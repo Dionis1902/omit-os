@@ -7,10 +7,14 @@
 #![no_std]
 #![no_main]
 
+extern crate alloc;
+
 mod arch;
+mod console;
 mod log;
 mod mm;
 mod panic;
+mod shell;
 mod sync;
 mod time;
 
@@ -19,13 +23,19 @@ use core::fmt;
 use omit_bootproto::memory::{self, MemoryMapError};
 use omit_bootproto::{BootInfo, BootInfoError, Cmdline};
 
+use arch::acpi::AcpiLookupError;
 use arch::apic::ApicError;
 use arch::cpu::CpuError;
+use arch::interrupts::RegisterError;
+use arch::ioapic::IoApicError;
 use arch::paging::PagingError;
 use arch::qemu::{self, ExitCode};
 use arch::serial::SerialError;
 use mm::frame::FrameInitError;
 use time::TickTestError;
+
+/// Interrupt vector of the serial port's receive interrupt.
+const SERIAL_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 2;
 
 /// The line that announces a fully initialised kernel. Printed only after
 /// every step of [`init`] has succeeded; the boot tests look for it.
@@ -48,6 +58,9 @@ enum InitError {
     Apic(ApicError),
     Timer(ApicError),
     TickSelfTest(TickTestError),
+    Acpi(AcpiLookupError),
+    IoApic(IoApicError),
+    SerialInterrupt(RegisterError),
 }
 
 impl fmt::Display for InitError {
@@ -69,6 +82,9 @@ impl fmt::Display for InitError {
             Self::Apic(e) => write!(f, "interrupt controller: {e}"),
             Self::Timer(e) => write!(f, "timer: {e}"),
             Self::TickSelfTest(e) => write!(f, "timer self-test: {e}"),
+            Self::Acpi(e) => write!(f, "acpi: {e}"),
+            Self::IoApic(e) => write!(f, "I/O APIC: {e}"),
+            Self::SerialInterrupt(e) => write!(f, "serial interrupt: {e:?}"),
         }
     }
 }
@@ -98,6 +114,10 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 
     if let Some(kind) = cmdline.value("fault") {
         inject_fault(kind);
+    }
+
+    if !cmdline.flag("noshell") {
+        shell::run();
     }
 
     qemu::exit(ExitCode::Success);
@@ -282,7 +302,32 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         elapsed_ns / 1_000_000,
     );
 
-    // 9. Audit the final address space, including the mappings made above.
+    // 9. Device interrupts: find the I/O APIC through ACPI and route the
+    //    serial port's receive interrupt, which makes the console interactive.
+    // SAFETY: `rsdp_phys` is the RSDP address reported by the firmware (or
+    // 0), passed through the validated boot information, and the direct map
+    // was registered in step 5.
+    let acpi =
+        unsafe { arch::acpi::interrupt_config(boot_info.rsdp_phys) }.map_err(InitError::Acpi)?;
+    let lines =
+        arch::ioapic::init(acpi.ioapic_address, acpi.ioapic_gsi_base).map_err(InitError::IoApic)?;
+    info!(
+        "irq: ACPI lists {} CPU(s); I/O APIC at {:#x} with {} lines",
+        acpi.cpu_count, acpi.ioapic_address, lines
+    );
+    arch::interrupts::register(SERIAL_VECTOR, arch::serial::handle_interrupt)
+        .map_err(InitError::SerialInterrupt)?;
+    // The I/O APIC's physical destination field is 8 bits wide; the boot
+    // CPU's ID always fits on machines this kernel can currently boot.
+    arch::ioapic::enable(acpi.serial_irq, SERIAL_VECTOR, apic.id as u8)
+        .map_err(InitError::IoApic)?;
+    console::enable_input();
+    info!(
+        "console: serial input enabled (GSI {} -> vector {})",
+        acpi.serial_irq.gsi, SERIAL_VECTOR
+    );
+
+    // 10. Audit the final address space, including the mappings made above.
     // SAFETY: `boot_info` is validated and describes the active address
     // space. Page tables are only modified under the address-space lock by
     // mapping calls, none of which can run concurrently with this (single

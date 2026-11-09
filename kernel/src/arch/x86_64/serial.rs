@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! 16550-compatible UART driver for the kernel console (COM1, 115200 8N1).
 //!
-//! Output is polled; no interrupts are used.
+//! Output is polled. Input is interrupt-driven once [`enable_receive_interrupt`]
+//! has been called: received bytes are handed to a callback from the
+//! interrupt handler.
 
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -20,7 +22,10 @@ const LINE_CTRL: u16 = 3;
 const MODEM_CTRL: u16 = 4;
 const LINE_STATUS: u16 = 5;
 
+const LSR_DATA_READY: u8 = 1 << 0;
 const LSR_THR_EMPTY: u8 = 1 << 5;
+/// Interrupt-enable bit: received data available.
+const IER_RX_AVAILABLE: u8 = 1 << 0;
 
 /// Upper bound on polls of the line status register per byte. Keeps a
 /// missing or wedged UART from hanging the kernel.
@@ -134,5 +139,46 @@ pub fn console() -> Console {
     match CONSOLE.try_lock() {
         Some(guard) => Console::Locked(guard),
         None => Console::Stolen(SerialPort { base: COM1 }),
+    }
+}
+
+/// Called from interrupt context with each received byte.
+pub type ReceiveHandler = fn(u8);
+
+static RECEIVE_HANDLER: SpinLock<Option<ReceiveHandler>> = SpinLock::new(None);
+
+/// Makes the UART raise its interrupt when data arrives and passes each
+/// received byte to `handler`.
+///
+/// The caller is responsible for routing the UART's interrupt line to
+/// [`handle_interrupt`].
+pub fn enable_receive_interrupt(handler: ReceiveHandler) {
+    *RECEIVE_HANDLER.lock() = Some(handler);
+    // Holding the console lock keeps the write from interleaving with the
+    // DLAB sequence in `init`.
+    let _console = CONSOLE.lock();
+    // SAFETY: COM1's interrupt-enable register; see `SerialPort::init`.
+    // Enabling the receive interrupt has no effect on memory safety. `init`
+    // already set OUT2, which gates the interrupt line on PC hardware.
+    unsafe { outb(COM1 + INT_ENABLE, IER_RX_AVAILABLE) };
+}
+
+/// Interrupt handler for the UART: drains the receive FIFO.
+pub fn handle_interrupt() {
+    let handler = *RECEIVE_HANDLER.lock();
+    // SAFETY: reads of COM1's line-status and data registers. Reading the
+    // data register pops the receive FIFO, which is exactly the intent, and
+    // nothing else in the kernel reads it. The loop is bounded so a stuck
+    // status bit cannot hang the handler.
+    unsafe {
+        for _ in 0..256 {
+            if inb(COM1 + LINE_STATUS) & LSR_DATA_READY == 0 {
+                break;
+            }
+            let byte = inb(COM1 + DATA);
+            if let Some(handler) = handler {
+                handler(byte);
+            }
+        }
     }
 }

@@ -50,6 +50,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "omit-acpi"
+version = "0.1.0"
+
+[[package]]
 name = "omit-boot"
 version = "0.1.0"
 dependencies = [
@@ -70,12 +74,26 @@ version = "0.1.0"
 name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
+ "omit-acpi",
  "omit-bootproto",
  "omit-mm",
+ "omit-shell",
+ "omit-vfs",
 ]
 
 [[package]]
 name = "omit-mm"
+version = "0.1.0"
+
+[[package]]
+name = "omit-shell"
+version = "0.1.0"
+dependencies = [
+ "omit-vfs",
+]
+
+[[package]]
+name = "omit-vfs"
 version = "0.1.0"
 
 [[package]]

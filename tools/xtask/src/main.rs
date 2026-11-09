@@ -12,7 +12,7 @@ use std::fs;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use std::sync::mpsc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -317,6 +317,12 @@ struct BootTest {
     must_contain: &'static [&'static str],
     /// Strings that must not appear in the serial log.
     must_not_contain: &'static [&'static str],
+    /// Shell session to drive over the serial console: `(input line, text
+    /// that must appear in the output it produces)`. When non-empty the
+    /// kernel is booted into its shell, each line is typed once the prompt
+    /// appears, and `exit` is sent at the end. Output is matched with line
+    /// endings normalised to `\n`.
+    script: &'static [(&'static str, &'static str)],
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -334,9 +340,60 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] paging: map/unmap self-test passed",
             "[INFO ] irq: legacy PIC masked; local APIC 0 enabled",
             "[INFO ] time: timer interrupt self-test passed",
+            "[INFO ] console: serial input enabled",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[],
+    },
+    BootTest {
+        name: "shell-session",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            SUCCESS_MESSAGE,
+            "[INFO ] vfs: RAM filesystem mounted at /",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("pwd", "\n/\n"),
+            ("uname -a", "\nOmit OS 0.1.0 x86_64\n"),
+            ("mkdir /home", ""),
+            ("mkdir -p /home/user/docs", ""),
+            ("cd /home/user", ""),
+            ("pwd", "\n/home/user\n"),
+            ("echo hello from omit > greeting.txt", ""),
+            ("cat greeting.txt", "\nhello from omit\n"),
+            ("echo 'second  line' >> greeting.txt", ""),
+            ("cat greeting.txt", "\nhello from omit\nsecond  line\n"),
+            ("ls", "\ndocs\ngreeting.txt\n"),
+            (
+                "ls -l /home/user",
+                "\nd          0 docs\n-         29 greeting.txt\n",
+            ),
+            ("cp greeting.txt docs", ""),
+            ("mv docs/greeting.txt docs/copy.txt", ""),
+            ("ls docs", "\ncopy.txt\n"),
+            ("cat docs/copy.txt", "\nhello from omit\nsecond  line\n"),
+            ("touch empty", ""),
+            ("rm greeting.txt empty", ""),
+            ("ls", "\ndocs\n"),
+            (
+                "cat greeting.txt",
+                "\ncat: greeting.txt: No such file or directory\n",
+            ),
+            ("rm -r docs", ""),
+            ("cd /", ""),
+            ("ls /home/user", "ls /home/user\nomit:/# "),
+            ("nosuchcommand", "\nnosuchcommand: command not found\n"),
+            (
+                "ps",
+                "\nps: not available: Omit OS has no process management yet\n",
+            ),
+            // Line editing: the typo is erased with backspace before Enter.
+            ("echo line-edix\x7fting", "\nline-editing\n"),
+        ],
     },
     BootTest {
         name: "panic-diagnostics",
@@ -350,6 +407,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "  #0 0xffffffff8",
         ],
         must_not_contain: &["KERNEL EXCEPTION"],
+        script: &[],
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -361,6 +419,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "fault address: 0x0000000000001000 (non-present page on read in kernel mode)",
         ],
         must_not_contain: &["KERNEL PANIC"],
+        script: &[],
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -372,6 +431,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "fault address: 0xffffd00000000000 (non-present page on read in kernel mode)",
         ],
         must_not_contain: &["KERNEL PANIC", "[ERROR]"],
+        script: &[],
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -382,6 +442,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "exception: #DF double fault (vector 8",
         ],
         must_not_contain: &["KERNEL PANIC"],
+        script: &[],
     },
 ];
 
@@ -393,37 +454,119 @@ struct QemuRun {
     elapsed: Duration,
 }
 
-fn run_qemu_captured(mut command: Command, timeout: Duration) -> Result<QemuRun> {
+/// Finds the first shell prompt (`omit:<cwd># `) at or after `from` and
+/// returns the offset just past it.
+fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
+    let find = |needle: &[u8], start: usize| {
+        output
+            .get(start..)?
+            .windows(needle.len())
+            .position(|window| window == needle)
+            .map(|index| start + index)
+    };
+    let start = find(b"omit:", from)?;
+    find(b"# ", start).map(|index| index + 2)
+}
+
+/// Runs QEMU to completion, capturing the serial console.
+///
+/// If `script` is non-empty it is typed into the shell line by line, each
+/// line only after the previous one's prompt has appeared, followed by
+/// `exit`. Nothing is sent before the first prompt: earlier input would be
+/// consumed by the firmware. Script failures are appended to `failures`.
+fn run_qemu_captured(
+    mut command: Command,
+    script: &[(&str, &str)],
+    timeout: Duration,
+    failures: &mut Vec<String>,
+) -> Result<QemuRun> {
     let start = Instant::now();
+    let deadline = start + timeout;
     let mut child = command
-        .stdin(Stdio::null())
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot start QEMU: {e}"))?;
 
+    let mut stdin = child.stdin.take().expect("stdin is piped");
     let mut stdout = child.stdout.take().expect("stdout is piped");
     let mut stderr = child.stderr.take().expect("stderr is piped");
-    let (tx, rx) = mpsc::channel();
-    let reader = thread::spawn(move || {
-        let mut serial = Vec::new();
-        let _ = stdout.read_to_end(&mut serial);
-        let _ = tx.send(());
-        serial
-    });
+
+    let output = Arc::new(Mutex::new(Vec::new()));
+    let reader = {
+        let output = Arc::clone(&output);
+        thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            while let Ok(count) = stdout.read(&mut chunk) {
+                if count == 0 {
+                    break;
+                }
+                output
+                    .lock()
+                    .expect("output lock")
+                    .extend_from_slice(&chunk[..count]);
+            }
+        })
+    };
     let stderr_reader = thread::spawn(move || {
         let mut text = String::new();
         let _ = stderr.read_to_string(&mut text);
         text
     });
 
+    // Waits until a prompt appears at or after `from`.
+    let wait_for_prompt = |from: usize| -> Option<usize> {
+        loop {
+            if let Some(end) = find_prompt(&output.lock().expect("output lock"), from) {
+                return Some(end);
+            }
+            if Instant::now() >= deadline || reader.is_finished() {
+                return None;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    };
+
+    if !script.is_empty() {
+        let mut position = wait_for_prompt(0);
+        if position.is_none() {
+            failures.push("shell prompt never appeared".into());
+        }
+        for (line, expected) in script {
+            let Some(from) = position else { break };
+            if stdin.write_all(format!("{line}\r").as_bytes()).is_err() {
+                failures.push(format!("could not send {line:?}"));
+                break;
+            }
+            position = wait_for_prompt(from);
+            let Some(to) = position else {
+                failures.push(format!("no prompt after {line:?}"));
+                break;
+            };
+            let produced = String::from_utf8_lossy(&output.lock().expect("output lock")[from..to])
+                .replace("\r\n", "\n");
+            if !produced.contains(expected) {
+                failures.push(format!(
+                    "{line:?}: expected {expected:?} in output {produced:?}"
+                ));
+            }
+        }
+        let _ = stdin.write_all(b"exit\r");
+    }
+    drop(stdin);
+
     // The reader finishes when QEMU closes its stdout, i.e. when it exits.
-    let timed_out = rx.recv_timeout(timeout).is_err();
+    while !reader.is_finished() && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(5));
+    }
+    let timed_out = !reader.is_finished();
     if timed_out {
         let _ = child.kill();
     }
     let status = child.wait()?;
-    let serial = String::from_utf8_lossy(&reader.join().expect("reader thread")).into_owned();
+    reader.join().expect("reader thread");
+    let serial = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
     let stderr = stderr_reader.join().expect("stderr thread");
     if !stderr.trim().is_empty() {
         eprintln!("xtask: qemu stderr: {}", stderr.trim());
@@ -448,12 +591,23 @@ fn run_boot_test(
     let vars = dir.join(format!("test-{}.vars.fd", test.name));
     let log = dir.join(format!("test-{}.serial.log", test.name));
 
-    let cmdline = format!("qemu-exit {}", test.cmdline);
+    // Tests without a script must not sit at the shell prompt forever.
+    let shell = if test.script.is_empty() {
+        "noshell "
+    } else {
+        ""
+    };
+    let cmdline = format!("qemu-exit {shell}{}", test.cmdline);
     build_image(artifacts, cmdline.trim(), &image)?;
-    let run = run_qemu_captured(qemu_command(&image, &vars, options)?, timeout)?;
+    let mut failures = Vec::new();
+    let run = run_qemu_captured(
+        qemu_command(&image, &vars, options)?,
+        test.script,
+        timeout,
+        &mut failures,
+    )?;
     fs::write(&log, &run.serial)?;
 
-    let mut failures = Vec::new();
     match run.exit {
         None => failures.push(format!("timed out after {}s", timeout.as_secs())),
         Some(code) if code != test.expected_exit => failures.push(format!(

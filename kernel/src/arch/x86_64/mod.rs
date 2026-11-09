@@ -5,11 +5,13 @@ use core::arch::asm;
 
 use omit_bootproto::{KERNEL_STACK_BOTTOM, KERNEL_STACK_TOP};
 
+pub mod acpi;
 pub mod apic;
 pub mod cpu;
 pub mod gdt;
 pub mod idt;
 pub mod interrupts;
+pub mod ioapic;
 pub mod paging;
 pub mod pic;
 mod pit;

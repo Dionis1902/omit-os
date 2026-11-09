@@ -14,8 +14,11 @@ test = false
 bench = false
 
 [dependencies]
+omit-acpi.workspace = true
 omit-bootproto.workspace = true
 omit-mm.workspace = true
+omit-shell.workspace = true
+omit-vfs.workspace = true
 
 [lints]
 workspace = true
