@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format, lint, host tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Installs the pinned toolchain, components and targets from
+      # rust-toolchain.toml.
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Check formatting
+        run: cargo fmt --all --check
+      - name: Clippy (host crates)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Clippy (kernel)
+        run: cargo clippy --locked -p omit-kernel --target x86_64-unknown-none -- -D warnings
+      - name: Clippy (boot loader)
+        run: cargo clippy --locked -p omit-boot --target x86_64-unknown-uefi -- -D warnings
+      - name: Host unit tests
+        run: cargo test --locked
+
+  qemu:
+    name: QEMU boot tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+      - name: Boot tests (debug)
+        run: cargo xtask test
+      - name: Boot tests (release)
+        run: cargo xtask test --release
+      - name: Boot tests (release, baseline CPU without 1 GiB pages/SMEP/SMAP)
+        run: cargo xtask test --release --cpu qemu64
+      - name: Build release disk image
+        run: cargo xtask image --release
+      - name: Upload serial logs and disk image
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: omit-os-${{ github.sha }}
+          path: |
+            target/omit/**/*.serial.log
+            target/omit/release/omit-os.img
+          if-no-files-found: warn

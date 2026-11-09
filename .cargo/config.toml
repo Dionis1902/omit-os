@@ -1,0 +1,20 @@
+[alias]
+xtask = "run --quiet --package xtask --"
+
+# The kernel is linked at a fixed higher-half address (see kernel/linker.ld),
+# so it needs neither PIC nor runtime relocations. Frame pointers are kept so
+# the panic handler can produce a backtrace.
+[target.x86_64-unknown-none]
+rustflags = [
+    "-C", "relocation-model=static",
+    "-C", "code-model=kernel",
+    "-C", "force-frame-pointers=yes",
+]
+
+# Make the loader binary reproducible:
+#  * /Brepro replaces the PE link timestamp with a hash of the image;
+#  * /DEBUG:NONE suppresses the PDB, which embeds randomly named temporary
+#    build paths and would otherwise feed into that hash. (GDB cannot read
+#    PDBs, so nothing of practical use is lost.)
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "link-arg=/Brepro", "-C", "link-arg=/DEBUG:NONE"]

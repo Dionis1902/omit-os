@@ -1,0 +1,15 @@
+[package]
+name = "xtask"
+description = "Omit OS build, image, run and test driver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# FAT filesystem writer for the EFI system partition. `chrono` is disabled so
+# no wall-clock timestamps leak into the image (reproducible builds).
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
+
+[lints]
+workspace = true
