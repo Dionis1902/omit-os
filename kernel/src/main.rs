@@ -9,18 +9,23 @@
 
 mod arch;
 mod log;
+mod mm;
 mod panic;
 mod sync;
+mod time;
 
 use core::fmt;
 
 use omit_bootproto::memory::{self, MemoryMapError};
 use omit_bootproto::{BootInfo, BootInfoError, Cmdline};
 
+use arch::apic::ApicError;
 use arch::cpu::CpuError;
 use arch::paging::PagingError;
 use arch::qemu::{self, ExitCode};
 use arch::serial::SerialError;
+use mm::frame::FrameInitError;
+use time::TickTestError;
 
 /// The line that announces a fully initialised kernel. Printed only after
 /// every step of [`init`] has succeeded; the boot tests look for it.
@@ -36,6 +41,11 @@ enum InitError {
     ExceptionSelfTest,
     MemoryMap(MemoryMapError),
     Paging(PagingError),
+    FrameAllocator(FrameInitError),
+    FrameSelfTest(&'static str),
+    Apic(ApicError),
+    Timer(ApicError),
+    TickSelfTest(TickTestError),
 }
 
 impl fmt::Display for InitError {
@@ -50,6 +60,11 @@ impl fmt::Display for InitError {
             }
             Self::MemoryMap(e) => write!(f, "memory map: {e}"),
             Self::Paging(e) => write!(f, "paging: {e}"),
+            Self::FrameAllocator(e) => write!(f, "frame allocator: {e}"),
+            Self::FrameSelfTest(e) => write!(f, "frame allocator self-test: {e}"),
+            Self::Apic(e) => write!(f, "interrupt controller: {e}"),
+            Self::Timer(e) => write!(f, "timer: {e}"),
+            Self::TickSelfTest(e) => write!(f, "timer self-test: {e}"),
         }
     }
 }
@@ -82,8 +97,10 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     qemu::exit(ExitCode::Success);
-    info!("nothing left to do; halting");
-    arch::halt_forever();
+    info!("nothing left to do; idling");
+    loop {
+        arch::interrupts::wait();
+    }
 }
 
 /// Brings up every foundational kernel component, in dependency order.
@@ -171,7 +188,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
     if !arch::idt::self_test() {
         return Err(InitError::ExceptionSelfTest);
     }
-    info!("cpu: IDT loaded, 32 exception vectors installed, #BP self-test passed");
+    info!("cpu: IDT loaded, 256 vectors installed, #BP self-test passed");
 
     // 4. Physical memory map.
     // SAFETY: `validate` succeeded and the loader's direct map is active.
@@ -195,20 +212,69 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         summary.reclaimable_bytes >> 20,
     );
 
-    // 5. Address space: drop the loader's identity mapping, then audit.
+    // 5. Address space: drop the loader's identity mapping.
     // SAFETY: `boot_info` is validated and describes the active address
     // space. The kernel is linked and running in the higher half on the
     // higher-half boot stack, and every pointer it holds (`boot_info`, the
     // memory map, the command line) points into the direct map.
     unsafe { arch::paging::unmap_identity(boot_info) }.map_err(InitError::Paging)?;
-    // SAFETY: as above; nothing else can modify the page tables (single CPU,
-    // interrupts disabled).
-    let audit = unsafe { arch::paging::audit(boot_info) }.map_err(InitError::Paging)?;
+    mm::init_direct_map(boot_info);
     info!(
         "paging: identity map removed; direct map of {} MiB at {:#x}",
         boot_info.phys_map_size >> 20,
         boot_info.phys_map_base
     );
+
+    // 6. Physical frame allocator.
+    // SAFETY: `map` is the validated boot memory map. Its usable regions are
+    // free RAM by the loader's contract: the kernel image, stack, page
+    // tables and boot information are all tagged with other kinds, and the
+    // kernel has allocated nothing yet. The direct map was registered above.
+    let frames = unsafe { mm::frame::init(map) }.map_err(InitError::FrameAllocator)?;
+    mm::frame::self_test().map_err(InitError::FrameSelfTest)?;
+    info!(
+        "mem: frame allocator ready: {} MiB managed, {} MiB free, {} KiB metadata; self-test passed",
+        (frames.managed as u64 * mm::PAGE_SIZE) >> 20,
+        (frames.free as u64 * mm::PAGE_SIZE) >> 20,
+        frames.metadata_bytes / 1024,
+    );
+
+    // 7. Interrupt controllers.
+    arch::pic::disable();
+    let apic = arch::apic::init().map_err(InitError::Apic)?;
+    info!(
+        "irq: legacy PIC masked; local APIC {} enabled ({} mode, version {:#x})",
+        apic.id,
+        if apic.x2apic { "x2APIC" } else { "xAPIC" },
+        apic.version & 0xFF,
+    );
+
+    // 8. Clocks and the periodic tick. Interrupts are enabled from here on.
+    let clocks = time::init().map_err(InitError::Timer)?;
+    info!(
+        "time: TSC {} MHz ({}), APIC timer {} MHz, tick {} Hz",
+        clocks.tsc_hz / 1_000_000,
+        if cpu.invariant_tsc {
+            "invariant"
+        } else {
+            "not invariant"
+        },
+        clocks.timer_hz / 1_000_000,
+        time::TICK_HZ,
+    );
+    let elapsed_ns = time::self_test().map_err(InitError::TickSelfTest)?;
+    info!(
+        "time: timer interrupt self-test passed ({} ticks in {} ms)",
+        time::SELF_TEST_TICKS,
+        elapsed_ns / 1_000_000,
+    );
+
+    // 9. Audit the final address space, including the mappings made above.
+    // SAFETY: `boot_info` is validated and describes the active address
+    // space. Page tables are only modified under the address-space lock by
+    // mapping calls, none of which can run concurrently with this (single
+    // CPU, and interrupt handlers do not map memory).
+    let audit = unsafe { arch::paging::audit(boot_info) }.map_err(InitError::Paging)?;
     info!(
         "paging: audit passed (W^X holds): {} KiB r-x, {} KiB r--, {} MiB rw-, {} table pages",
         audit.executable / 1024,
@@ -216,6 +282,10 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         audit.writable >> 20,
         audit.tables
     );
+    let unhandled = arch::interrupts::unhandled_count();
+    if unhandled != 0 {
+        warn!("irq: {unhandled} interrupt(s) arrived on vectors without a handler");
+    }
 
     Ok(cmdline)
 }

@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! Interrupt Descriptor Table and CPU exception handling.
+//! Interrupt Descriptor Table, trap entry and CPU exception handling.
 //!
-//! Vectors 0-31 (the architectural exceptions) are routed through small
-//! assembly stubs into [`exception_dispatch`]. All other vectors are left
-//! not-present: no interrupt source is enabled yet, and a stray one would
-//! surface as a diagnosed #GP instead of silently running garbage.
+//! All 256 vectors are routed through small assembly stubs into
+//! [`trap_dispatch`]. Vectors 0-31 are the architectural exceptions and are
+//! handled here; vectors 32-255 are hardware interrupts and are forwarded to
+//! [`super::interrupts`].
 //!
 //! Every exception except #BP is fatal for now: the kernel prints the saved
 //! machine state and halts.
@@ -13,10 +13,11 @@ use core::arch::{asm, global_asm};
 use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::gdt::{DOUBLE_FAULT_IST, DescriptorTablePointer, KERNEL_CS};
-use super::{cpu, qemu};
+use super::{cpu, interrupts, qemu};
 use crate::kprintln;
 
 const EXCEPTION_COUNT: usize = 32;
+const VECTOR_COUNT: usize = 256;
 const VECTOR_BREAKPOINT: u64 = 3;
 const VECTOR_DOUBLE_FAULT: usize = 8;
 const VECTOR_PAGE_FAULT: u64 = 14;
@@ -101,7 +102,7 @@ pub struct TrapFrame {
 
 // Entry stubs. Each normalises the stack to a `TrapFrame` (pushing a dummy
 // error code where the CPU pushes none) and jumps to the common path, which
-// saves the general-purpose registers and calls `exception_dispatch` with a
+// saves the general-purpose registers and calls `trap_dispatch` with a
 // pointer to the frame.
 //
 // Stack alignment: in 64-bit mode the CPU aligns RSP to 16 bytes before
@@ -160,6 +161,17 @@ EXC_ERR   29
 EXC_ERR   30
 EXC_NOERR 31
 
+// Hardware interrupt vectors never carry an error code.
+.altmacro
+.macro IRQ_STUB n
+    EXC_NOERR \n
+.endm
+.set vector, 32
+.rept 224
+    IRQ_STUB %vector
+    .set vector, vector + 1
+.endr
+
 exc_common:
     push rax
     push rbx
@@ -199,25 +211,25 @@ exc_common:
 
 .section .rodata.exceptions, "a", @progbits
 .balign 8
-.global exc_stub_table
-exc_stub_table:
-    .quad exc_stub_0,  exc_stub_1,  exc_stub_2,  exc_stub_3
-    .quad exc_stub_4,  exc_stub_5,  exc_stub_6,  exc_stub_7
-    .quad exc_stub_8,  exc_stub_9,  exc_stub_10, exc_stub_11
-    .quad exc_stub_12, exc_stub_13, exc_stub_14, exc_stub_15
-    .quad exc_stub_16, exc_stub_17, exc_stub_18, exc_stub_19
-    .quad exc_stub_20, exc_stub_21, exc_stub_22, exc_stub_23
-    .quad exc_stub_24, exc_stub_25, exc_stub_26, exc_stub_27
-    .quad exc_stub_28, exc_stub_29, exc_stub_30, exc_stub_31
+.global trap_stub_table
+trap_stub_table:
+.macro STUB_ADDRESS n
+    .quad exc_stub_\n
+.endm
+.set vector, 0
+.rept 256
+    STUB_ADDRESS %vector
+    .set vector, vector + 1
+.endr
+.noaltmacro
 .text
 "#,
-    dispatch = sym exception_dispatch,
+    dispatch = sym trap_dispatch,
 );
 
 unsafe extern "C" {
-    /// Addresses of the 32 exception entry stubs, defined in the assembly
-    /// above.
-    static exc_stub_table: [u64; EXCEPTION_COUNT];
+    /// Addresses of the 256 trap entry stubs, defined in the assembly above.
+    static trap_stub_table: [u64; VECTOR_COUNT];
 }
 
 const EXCEPTION_NAMES: [&str; EXCEPTION_COUNT] = [
@@ -274,11 +286,11 @@ pub fn init() {
 
     let idt = &raw mut IDT;
     // SAFETY: the `INITIALISED` guard makes this the only access to `IDT`
-    // from Rust, before the table is visible to the CPU. `exc_stub_table` is
-    // an immutable array of 32 addresses emitted by the `global_asm!` block
+    // from Rust, before the table is visible to the CPU. `trap_stub_table` is
+    // an immutable array of 256 addresses emitted by the `global_asm!` block
     // above.
     unsafe {
-        for (vector, &stub) in exc_stub_table.iter().enumerate() {
+        for (vector, &stub) in trap_stub_table.iter().enumerate() {
             let ist = if vector == VECTOR_DOUBLE_FAULT {
                 DOUBLE_FAULT_IST
             } else {
@@ -307,7 +319,7 @@ pub fn init() {
 /// register save/restore and `iretq`.
 pub fn self_test() -> bool {
     let before = BREAKPOINTS.load(Ordering::Relaxed);
-    // SAFETY: `int3` raises #BP, which `exception_dispatch` handles by
+    // SAFETY: `int3` raises #BP, which `trap_dispatch` handles by
     // counting and returning; the stub restores every register and `iretq`
     // restores the flags.
     unsafe { asm!("int3", options(nomem, nostack, preserves_flags)) };
@@ -315,7 +327,11 @@ pub fn self_test() -> bool {
 }
 
 /// Rust entry point for all CPU exceptions; called from `exc_common`.
-extern "C" fn exception_dispatch(frame: &mut TrapFrame) {
+extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
+    if frame.vector >= EXCEPTION_COUNT as u64 {
+        interrupts::dispatch(frame.vector);
+        return;
+    }
     if frame.vector == VECTOR_BREAKPOINT {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);
         return;

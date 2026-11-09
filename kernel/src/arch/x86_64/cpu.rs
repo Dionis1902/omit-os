@@ -47,6 +47,8 @@ pub struct CpuInfo {
     pub umip: bool,
     /// The CPU supports 1 GiB pages.
     pub pages_1g: bool,
+    /// The time-stamp counter runs at a constant rate in all power states.
+    pub invariant_tsc: bool,
 }
 
 impl CpuInfo {
@@ -56,7 +58,8 @@ impl CpuInfo {
     }
 }
 
-fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+/// Executes CPUID and returns `(eax, ebx, ecx, edx)`.
+pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
     let r = __cpuid_count(leaf, subleaf);
     (r.eax, r.ebx, r.ecx, r.edx)
 }
@@ -103,15 +106,42 @@ fn read_cr4() -> u64 {
     value
 }
 
-fn read_msr(msr: u32) -> u64 {
+/// Reads a model-specific register.
+///
+/// # Safety
+///
+/// `msr` must exist on this CPU; reading a non-existent MSR raises #GP.
+pub unsafe fn read_msr(msr: u32) -> u64 {
     let (lo, hi): (u32, u32);
-    // SAFETY: callers in this module only pass MSRs that exist on every
-    // x86-64 CPU (EFER), so `rdmsr` cannot fault.
+    // SAFETY: the caller guarantees the MSR exists, so `rdmsr` cannot fault;
+    // it has no effect on memory.
     unsafe {
         asm!("rdmsr", in("ecx") msr, out("eax") lo, out("edx") hi,
              options(nomem, nostack, preserves_flags));
     }
     (u64::from(hi) << 32) | u64::from(lo)
+}
+
+/// Writes a model-specific register.
+///
+/// # Safety
+///
+/// `msr` must exist on this CPU and `value` must be valid for it. MSRs
+/// control fundamental CPU behaviour; the caller is responsible for the
+/// consequences of the specific write.
+pub unsafe fn write_msr(msr: u32, value: u64) {
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        asm!("wrmsr", in("ecx") msr, in("eax") value as u32, in("edx") (value >> 32) as u32,
+             options(nomem, nostack, preserves_flags));
+    }
+}
+
+/// Reads the time-stamp counter.
+pub fn read_tsc() -> u64 {
+    // SAFETY: `rdtsc` is available on every x86-64 CPU, is permitted in
+    // ring 0 regardless of CR4.TSD, and has no side effects.
+    unsafe { core::arch::x86_64::_rdtsc() }
 }
 
 /// Verifies the CPU meets the kernel's requirements and turns on the
@@ -148,18 +178,17 @@ pub fn init() -> Result<CpuInfo, CpuError> {
         return Err(CpuError::FiveLevelPaging);
     }
 
-    let efer = read_msr(MSR_EFER);
-    if efer & EFER_NXE == 0 {
-        let value = efer | EFER_NXE;
-        // SAFETY: NX support was just confirmed via CPUID, so setting
-        // EFER.NXE is valid; it only makes the NX bit in page tables
-        // effective, which the loader's tables already rely on.
-        unsafe {
-            asm!("wrmsr", in("ecx") MSR_EFER, in("eax") value as u32,
-                 in("edx") (value >> 32) as u32, options(nomem, nostack, preserves_flags));
+    // SAFETY: EFER exists on every x86-64 CPU. NX support was just confirmed
+    // via CPUID, so setting EFER.NXE is valid; it only makes the NX bit in
+    // page tables effective, which the loader's tables already rely on.
+    let nxe_enabled = unsafe {
+        let efer = read_msr(MSR_EFER);
+        if efer & EFER_NXE == 0 {
+            write_msr(MSR_EFER, efer | EFER_NXE);
         }
-    }
-    if read_msr(MSR_EFER) & EFER_NXE == 0 {
+        read_msr(MSR_EFER) & EFER_NXE != 0
+    };
+    if !nxe_enabled {
         return Err(CpuError::ControlBitNotSticky("EFER.NXE"));
     }
 
@@ -199,5 +228,6 @@ pub fn init() -> Result<CpuInfo, CpuError> {
         smap,
         umip,
         pages_1g: ext_edx & (1 << 26) != 0,
+        invariant_tsc: max_ext >= 0x8000_0007 && cpuid(0x8000_0007, 0).3 & (1 << 8) != 0,
     })
 }

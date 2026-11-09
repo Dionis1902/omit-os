@@ -71,7 +71,12 @@ name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
  "omit-bootproto",
+ "omit-mm",
 ]
+
+[[package]]
+name = "omit-mm"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

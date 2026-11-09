@@ -1,9 +1,9 @@
 [workspace]
 resolver = "3"
-members = ["boot", "kernel", "libs/bootproto", "libs/elf", "tools/xtask"]
+members = ["boot", "kernel", "libs/bootproto", "libs/elf", "libs/mm", "tools/xtask"]
 # Plain `cargo build` / `cargo test` operate on the host-buildable crates only.
 # The loader and kernel need bare-metal targets; `cargo xtask` drives those.
-default-members = ["libs/bootproto", "libs/elf", "tools/xtask"]
+default-members = ["libs/bootproto", "libs/elf", "libs/mm", "tools/xtask"]
 
 [workspace.package]
 version = "0.1.0"
@@ -15,6 +15,7 @@ rust-version = "1.97"
 [workspace.dependencies]
 omit-bootproto = { path = "libs/bootproto" }
 omit-elf = { path = "libs/elf" }
+omit-mm = { path = "libs/mm" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

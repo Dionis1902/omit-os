@@ -36,6 +36,7 @@ OPTIONS:
     --cmdline <TEXT>    Kernel command line to embed in the image (image, run)
     --cpu <MODEL>       QEMU CPU model (run, test) [default: max]
     --memory <SIZE>     QEMU guest memory (run, test) [default: 256M]
+    --accel <NAME>      QEMU accelerator, e.g. kvm (run, test) [default: tcg]
     --gdb               Start QEMU paused with a GDB server on :1234 (run)
 
 ENVIRONMENT:
@@ -62,6 +63,7 @@ struct Options {
     cmdline: String,
     cpu: Option<String>,
     memory: Option<String>,
+    accel: Option<String>,
 }
 
 impl Options {
@@ -80,6 +82,7 @@ impl Options {
                 "--cmdline" => options.cmdline = value("--cmdline")?,
                 "--cpu" => options.cpu = Some(value("--cpu")?),
                 "--memory" => options.memory = Some(value("--memory")?),
+                "--accel" => options.accel = Some(value("--accel")?),
                 other => return Err(format!("unknown option `{other}`").into()),
             }
         }
@@ -254,6 +257,7 @@ fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command>
     let mut command = Command::new(qemu);
     command
         .args(["-machine", "q35"])
+        .args(["-accel", options.accel.as_deref().unwrap_or("tcg")])
         .args(["-cpu", options.cpu.as_deref().unwrap_or("max")])
         .args(["-m", options.memory.as_deref().unwrap_or("256M")])
         .arg("-drive")
@@ -323,11 +327,14 @@ const BOOT_TESTS: &[BootTest] = &[
         must_contain: &[
             SUCCESS_MESSAGE,
             "[INFO ] serial: COM1 16550 UART ready",
-            "[INFO ] cpu: IDT loaded, 32 exception vectors installed, #BP self-test passed",
+            "[INFO ] cpu: IDT loaded, 256 vectors installed, #BP self-test passed",
             "[INFO ] paging: identity map removed",
+            "[INFO ] mem: frame allocator ready",
+            "[INFO ] irq: legacy PIC masked; local APIC 0 enabled",
+            "[INFO ] time: timer interrupt self-test passed",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
-        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]"],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
     },
     BootTest {
         name: "panic-diagnostics",
@@ -499,8 +506,9 @@ fn cmd_test(options: &Options) -> Result<ExitCode> {
         }
     }
     println!(
-        "# {} profile, cpu={}: {} passed, {failed} failed; serial logs in {}",
+        "# {} profile, accel={}, cpu={}: {} passed, {failed} failed; serial logs in {}",
         options.profile_dir(),
+        options.accel.as_deref().unwrap_or("tcg"),
         options.cpu.as_deref().unwrap_or("max"),
         BOOT_TESTS.len() - failed,
         out_dir(options)?.display()

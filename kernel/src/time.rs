@@ -1,0 +1,154 @@
+// SPDX-License-Identifier: GPL-2.0-only
+//! Kernel timekeeping.
+//!
+//! Two facilities, both set up by [`init`]:
+//!
+//! * a monotonic clock ([`monotonic_ns`]) read from the CPU's time-stamp
+//!   counter, with its frequency measured at boot;
+//! * a periodic tick ([`ticks`]) driven by the local APIC timer interrupt,
+//!   which is what will drive scheduling.
+
+use core::fmt;
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use crate::arch::apic::{self, ApicError};
+use crate::arch::{cpu, interrupts};
+
+/// Frequency of the periodic tick.
+pub const TICK_HZ: u32 = 100;
+
+const NANOS_PER_SEC: u64 = 1_000_000_000;
+
+static TSC_HZ: AtomicU64 = AtomicU64::new(0);
+static TSC_AT_INIT: AtomicU64 = AtomicU64::new(0);
+static TICKS: AtomicU64 = AtomicU64::new(0);
+
+/// Why the tick self-test failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TickTestError {
+    /// No (or too few) timer interrupts arrived within the deadline.
+    NoTicks {
+        /// Ticks that did arrive.
+        seen: u64,
+    },
+    /// Ticks arrived, but not at the expected rate.
+    WrongRate {
+        /// Time the expected number of ticks actually took, in nanoseconds.
+        elapsed_ns: u64,
+        /// Time they should have taken, in nanoseconds.
+        expected_ns: u64,
+    },
+}
+
+impl fmt::Display for TickTestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoTicks { seen } => {
+                write!(f, "timer interrupts are not arriving ({seen} seen)")
+            }
+            Self::WrongRate {
+                elapsed_ns,
+                expected_ns,
+            } => write!(
+                f,
+                "tick rate is off: took {} us, expected {} us",
+                elapsed_ns / 1000,
+                expected_ns / 1000
+            ),
+        }
+    }
+}
+
+/// What [`init`] measured.
+#[derive(Debug, Clone, Copy)]
+pub struct TimeInfo {
+    /// Time-stamp counter frequency in Hz.
+    pub tsc_hz: u64,
+    /// Local APIC timer frequency in Hz.
+    pub timer_hz: u64,
+}
+
+/// Calibrates the clocks and starts the periodic tick.
+///
+/// Must be called once, after the local APIC is initialised, with interrupts
+/// disabled. Ticks start being counted once interrupts are enabled.
+pub fn init() -> Result<TimeInfo, ApicError> {
+    let calibration = apic::calibrate()?;
+    TSC_AT_INIT.store(cpu::read_tsc(), Ordering::Relaxed);
+    TSC_HZ.store(calibration.tsc_hz, Ordering::Release);
+
+    interrupts::register(apic::TIMER_VECTOR, on_tick).map_err(ApicError::Register)?;
+    apic::start_periodic_timer(calibration.timer_hz, TICK_HZ)?;
+    Ok(TimeInfo {
+        tsc_hz: calibration.tsc_hz,
+        timer_hz: calibration.timer_hz,
+    })
+}
+
+fn on_tick() {
+    TICKS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Number of timer ticks since [`init`].
+pub fn ticks() -> u64 {
+    TICKS.load(Ordering::Relaxed)
+}
+
+/// Nanoseconds since [`init`], from the time-stamp counter. Returns 0 before
+/// [`init`].
+pub fn monotonic_ns() -> u64 {
+    let hz = TSC_HZ.load(Ordering::Acquire);
+    if hz == 0 {
+        return 0;
+    }
+    let elapsed = cpu::read_tsc().wrapping_sub(TSC_AT_INIT.load(Ordering::Relaxed));
+    (u128::from(elapsed) * u128::from(NANOS_PER_SEC) / u128::from(hz)) as u64
+}
+
+/// Verifies end to end that timer interrupts are delivered and arrive at
+/// the configured rate: waits for a number of ticks, sleeping the CPU
+/// between them, and compares the elapsed time on the independent TSC clock.
+///
+/// Enables interrupts and leaves them enabled. Returns the measured duration
+/// of [`SELF_TEST_TICKS`] ticks in nanoseconds.
+pub fn self_test() -> Result<u64, TickTestError> {
+    let expected_ns = SELF_TEST_TICKS * NANOS_PER_SEC / u64::from(TICK_HZ);
+    let deadline_ns = 10 * expected_ns;
+
+    interrupts::enable();
+    // Synchronise to a tick edge so that whole periods are measured.
+    let first = ticks();
+    let sync_start = monotonic_ns();
+    while ticks() == first {
+        if monotonic_ns() - sync_start > deadline_ns {
+            return Err(TickTestError::NoTicks { seen: 0 });
+        }
+        interrupts::wait();
+    }
+
+    let start_ticks = ticks();
+    let start_ns = monotonic_ns();
+    while ticks() - start_ticks < SELF_TEST_TICKS {
+        if monotonic_ns() - start_ns > deadline_ns {
+            return Err(TickTestError::NoTicks {
+                seen: ticks() - start_ticks,
+            });
+        }
+        interrupts::wait();
+    }
+    let elapsed_ns = monotonic_ns() - start_ns;
+
+    // Generous bounds: under emulation both clocks are derived from host
+    // time and jitter by several percent. A mis-programmed divider or a
+    // wrong calibration would be off by a factor of two or more.
+    if elapsed_ns < expected_ns / 2 || elapsed_ns > expected_ns * 2 {
+        return Err(TickTestError::WrongRate {
+            elapsed_ns,
+            expected_ns,
+        });
+    }
+    Ok(elapsed_ns)
+}
+
+/// Number of ticks [`self_test`] waits for.
+pub const SELF_TEST_TICKS: u64 = 10;

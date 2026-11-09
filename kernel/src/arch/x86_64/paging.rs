@@ -208,3 +208,158 @@ unsafe fn walk(
     }
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// Mapping
+// ---------------------------------------------------------------------------
+
+use crate::mm::{self, frame};
+use crate::sync::SpinLock;
+
+/// Page-level cache disable. With the power-on PAT this selects the
+/// "uncacheable" memory type, which is what device registers need.
+const CACHE_DISABLE: u64 = 1 << 4;
+
+/// Start of the virtual range used for device memory (PML4 slot 384).
+const MMIO_BASE: u64 = 0xFFFF_C000_0000_0000;
+/// Exclusive end of the device memory range (64 GiB).
+const MMIO_END: u64 = MMIO_BASE + (64 << 30);
+
+/// Why a mapping could not be established.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapError {
+    /// No frame was available for a page table.
+    OutOfMemory,
+    /// The virtual address is already mapped.
+    AlreadyMapped {
+        /// The offending virtual address.
+        virt: u64,
+    },
+    /// An address is not page-aligned, the range is empty, or it overflows.
+    InvalidRange,
+    /// The device-memory virtual range is exhausted.
+    OutOfVirtualSpace,
+    /// A page table could not be reached through the direct map.
+    Table(PagingError),
+}
+
+impl fmt::Display for MapError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::OutOfMemory => write!(f, "out of memory for page tables"),
+            Self::AlreadyMapped { virt } => write!(f, "{virt:#018x} is already mapped"),
+            Self::InvalidRange => write!(f, "invalid address range"),
+            Self::OutOfVirtualSpace => write!(f, "device-memory address range exhausted"),
+            Self::Table(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+/// State of the kernel address space that mapping operations mutate. The
+/// lock also serialises all page-table modifications.
+struct KernelSpace {
+    /// Next unused address in the device-memory range.
+    mmio_next: u64,
+}
+
+static KERNEL_SPACE: SpinLock<KernelSpace> = SpinLock::new(KernelSpace {
+    mmio_next: MMIO_BASE,
+});
+
+fn table_ptr(phys: u64) -> Result<*mut [u64; ENTRIES], MapError> {
+    mm::phys_to_virt(phys, PAGE_SIZE)
+        .map(|ptr| ptr.cast())
+        .ok_or(MapError::Table(PagingError::TableOutsideDirectMap { phys }))
+}
+
+/// Maps the 4 KiB page at kernel virtual address `virt` to the physical
+/// frame `phys` with leaf `flags`, allocating intermediate tables as needed.
+///
+/// # Safety
+///
+/// The caller must hold the `KERNEL_SPACE` lock, `virt` must be a higher-half
+/// address that the kernel image, stack and direct map do not use, and the
+/// frame allocator must be initialised.
+unsafe fn map_page_locked(virt: u64, phys: u64, flags: u64) -> Result<(), MapError> {
+    let mut table = table_ptr(cpu::read_cr3() & ADDRESS_MASK)?;
+    for level in (2..=4u32).rev() {
+        let index = ((virt >> (12 + 9 * (level - 1))) & 0x1FF) as usize;
+        // SAFETY: `table` is the direct-map alias of a live page table,
+        // valid for reads and writes of 512 entries; `index < 512`. The
+        // caller holds the lock that serialises page-table updates.
+        let entry = unsafe { (&raw mut (*table)[index]).read_volatile() };
+        let next = if entry & PRESENT == 0 {
+            let frame = frame::alloc_zeroed(0).ok_or(MapError::OutOfMemory)?;
+            // Intermediate entries are maximally permissive; the leaf
+            // decides. SAFETY: as above.
+            unsafe { (&raw mut (*table)[index]).write_volatile(frame | PRESENT | WRITABLE) };
+            frame
+        } else if entry & HUGE != 0 {
+            return Err(MapError::AlreadyMapped { virt });
+        } else {
+            entry & ADDRESS_MASK
+        };
+        table = table_ptr(next)?;
+    }
+
+    let index = ((virt >> 12) & 0x1FF) as usize;
+    // SAFETY: `table` is now the level-1 table for `virt`; see above.
+    unsafe {
+        let slot = &raw mut (*table)[index];
+        if slot.read_volatile() & PRESENT != 0 {
+            return Err(MapError::AlreadyMapped { virt });
+        }
+        // A previously non-present entry is never cached in the TLB, so no
+        // invalidation is needed.
+        slot.write_volatile(phys | flags | PRESENT);
+    }
+    Ok(())
+}
+
+/// Maps the device memory `[phys, phys + len)` into the kernel's
+/// device-memory range and returns the virtual address corresponding to
+/// `phys`.
+///
+/// The mapping is writable, non-executable and uncached, and is separated
+/// from neighbouring mappings by an unmapped guard page. Mappings are
+/// permanent; there is no unmap yet.
+///
+/// Establishing the mapping is safe; accessing the device through the
+/// returned address is subject to the usual raw-pointer rules.
+pub fn map_mmio(phys: u64, len: u64) -> Result<u64, MapError> {
+    let offset = phys % PAGE_SIZE;
+    let first = phys - offset;
+    let pages = offset
+        .checked_add(len)
+        .filter(|_| len != 0)
+        .ok_or(MapError::InvalidRange)?
+        .div_ceil(PAGE_SIZE);
+    if first
+        .checked_add(pages * PAGE_SIZE)
+        .is_none_or(|end| end > ADDRESS_MASK)
+    {
+        return Err(MapError::InvalidRange);
+    }
+
+    let mut space = KERNEL_SPACE.lock();
+    let virt = space.mmio_next;
+    let next = virt + (pages + 1) * PAGE_SIZE; // + guard page
+    if next > MMIO_END {
+        return Err(MapError::OutOfVirtualSpace);
+    }
+    space.mmio_next = next;
+
+    for page in 0..pages {
+        // SAFETY: the lock is held; the address comes from the dedicated
+        // device-memory range, which nothing else uses and from which each
+        // page is handed out exactly once.
+        unsafe {
+            map_page_locked(
+                virt + page * PAGE_SIZE,
+                first + page * PAGE_SIZE,
+                WRITABLE | NO_EXECUTE | CACHE_DISABLE,
+            )?;
+        }
+    }
+    Ok(virt + offset)
+}

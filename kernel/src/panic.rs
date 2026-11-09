@@ -15,6 +15,7 @@ static PANICKING: AtomicBool = AtomicBool::new(false);
 
 #[panic_handler]
 fn panic(info: &PanicInfo<'_>) -> ! {
+    arch::interrupts::disable();
     // A panic raised while already reporting one (for example from a broken
     // `Display` impl) must not recurse forever.
     if PANICKING.swap(true, Ordering::AcqRel) {

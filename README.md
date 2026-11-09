@@ -7,25 +7,31 @@ written in Rust. It is not a Linux distribution and contains no Linux or
 Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
-the CPU and the address space, and reports its state on the serial console.
-There is no memory allocator, scheduler, filesystem, shell or driver model
-yet. See [Status](#status) for exactly what exists and what has been tested.
+the CPU and the address space, manages physical memory, handles timer
+interrupts, and reports its state on the serial console. There is no heap,
+scheduler, filesystem, shell or driver model yet. See [Status](#status) for exactly what exists and what has been tested.
 
 ```text
 omit-boot: Omit OS boot loader 0.1.0 (protocol v1)
-omit-boot: kernel image: 835096 bytes
-omit-boot: kernel loaded at phys 0xe3bc000, entry 0xffffffff80001f10; direct map 4 GiB (1 GiB pages)
+omit-boot: kernel image: 938800 bytes
+omit-boot: kernel loaded at phys 0xe2c6000, entry 0xffffffff80004cc0; direct map 4 GiB (1 GiB pages)
 omit-boot: exiting boot services
 
 [INFO ] Omit OS kernel 0.1.0 (x86_64, release build)
 [INFO ] serial: COM1 16550 UART ready (115200 8N1), loopback test passed
 [INFO ] boot: protocol v1, command line ""
+[INFO ] boot: kernel image 0xffffffff80000000..0xffffffff80014000 at phys 0xe2c6000 (80 KiB)
+[INFO ] boot: ACPI RSDP at phys 0xfb7e014
 [INFO ] cpu: AuthenticAMD | NX=on WP=on SMEP=on SMAP=on UMIP=on 1GiB-pages=yes
 [INFO ] cpu: GDT and TSS loaded (double-fault stack on IST1)
-[INFO ] cpu: IDT loaded, 32 exception vectors installed, #BP self-test passed
-[INFO ] mem: 40 regions, 255 MiB RAM, 210 MiB usable (largest block 167 MiB), 38 MiB reclaimable
+[INFO ] cpu: IDT loaded, 256 vectors installed, #BP self-test passed
+[INFO ] mem: 40 regions, 255 MiB RAM, 211 MiB usable (largest block 167 MiB), 38 MiB reclaimable
 [INFO ] paging: identity map removed; direct map of 4096 MiB at 0xffff800000000000
-[INFO ] paging: audit passed (W^X holds): 24 KiB r-x, 8 KiB r--, 4096 MiB rw-, 7 table pages
+[INFO ] mem: frame allocator ready: 209 MiB managed, 209 MiB free, 764 KiB metadata; self-test passed
+[INFO ] irq: legacy PIC masked; local APIC 0 enabled (xAPIC mode, version 0x14)
+[INFO ] time: TSC 2101 MHz (not invariant), APIC timer 62 MHz, tick 100 Hz
+[INFO ] time: timer interrupt self-test passed (10 ticks in 100 ms)
+[INFO ] paging: audit passed (W^X holds): 40 KiB r-x, 12 KiB r--, 4096 MiB rw-, 10 table pages
 Omit OS — Kernel initialized successfully.
 ```
 
@@ -75,7 +81,7 @@ All `xtask` commands:
 | `cargo xtask test` | Build and run the QEMU integration tests (TAP output) |
 
 Options: `--release`, `--cmdline "<text>"` (image/run), `--cpu <model>`,
-`--memory <size>`, `--gdb` (run). Environment: `QEMU`, `OVMF_CODE` +
+`--memory <size>`, `--accel <name>` (e.g. `kvm`), `--gdb` (run). Environment: `QEMU`, `OVMF_CODE` +
 `OVMF_VARS` (if the firmware is not in a standard location),
 `OMIT_TEST_TIMEOUT`.
 
@@ -120,8 +126,8 @@ Boot must be disabled).
 
 ## Status
 
-Milestone 0 (development environment) and the first part of Milestone 1
-(bootable kernel) are implemented.
+Milestone 0 (development environment), Milestone 1 (bootable kernel) and
+most of Milestone 2 (memory and interrupts) are implemented.
 
 | Component | State |
 | --- | --- |
@@ -129,38 +135,61 @@ Milestone 0 (development environment) and the first part of Milestone 1
 | Kernel entry, boot-information validation, command line | Working, tested |
 | Serial console (16550, polled) and levelled logging | Working, tested |
 | CPU setup: NX, write-protect, SMEP/SMAP/UMIP when available | Working, tested |
-| GDT, TSS, IDT, handlers for all 32 CPU exceptions, double-fault stack | Working, tested (breakpoint round-trip, page fault, stack overflow) |
+| GDT, TSS, IDT for all 256 vectors, exception handlers, double-fault stack | Working, tested (breakpoint round-trip, page fault, stack overflow) |
 | Physical memory map: validation and reporting | Working, tested |
 | Address space: identity map removal, live page-table W^X audit | Working, tested |
 | Panic handler with location and backtrace | Working, tested |
-| Physical/virtual memory allocators, heap | Not started (Milestone 2) |
-| Hardware interrupts, timers, SMP | Not started (Milestone 2) |
+| Physical frame allocator (buddy, orders 0-10) | Working; algorithm host-tested, kernel integration self-tested at every boot |
+| Kernel page mapper for device memory (`map_mmio`) | Working, exercised by the local APIC mapping; no unmap yet |
+| Interrupt-safe spinlock, interrupt handler registration and dispatch | Working, tested |
+| Legacy PIC masking, local APIC (xAPIC mode) | Working, tested |
+| Local APIC in x2APIC mode | Implemented, **untested locally** (QEMU's TCG does not offer x2APIC; a KVM job in CI covers it where the runner provides KVM) |
+| Clocks: TSC monotonic clock and 100 Hz APIC timer tick, calibrated against the PIT | Working; tick rate verified against the TSC at every boot |
+| Kernel heap, kernel-owned page tables, unmapping | Not started (rest of Milestone 2) |
+| ACPI table parsing, I/O APIC, device interrupts, SMP | Not started |
 | Filesystem, shell, processes, user mode, drivers, Windows/Linux compatibility | Not started |
 
 ### What has been verified, and how
 
 On QEMU 8.2.2 (TCG, no KVM) with OVMF, Rust 1.97.0:
 
-- 24 host unit tests (`cargo test`): boot protocol validation, memory map
+- 33 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
-  input, GPT writer.
+  input, the buddy allocator (including a randomised test against an
+  independent model), GPT writer.
 - 4 QEMU integration tests (`cargo xtask test`), in debug and release builds,
   with `-cpu max` and with `-cpu qemu64` (no 1 GiB pages, SMEP, SMAP or UMIP),
-  and with 256 MiB and 6 GiB of guest RAM.
+  and with 96 MiB, 256 MiB and 6 GiB of guest RAM.
+- At every boot the kernel itself checks: a breakpoint exception round-trip;
+  frame allocation, alignment, memory read-back and rejection of invalid
+  frees; that ten timer interrupts arrive and take 100 ms ± a factor of two
+  by the TSC; and that no mapping is writable and executable.
 - `cargo fmt --check` and `cargo clippy -D warnings` for host crates, kernel
   and loader.
-- GDB attach and breakpoint at `_start`; `addr2line` on a panic backtrace.
+- GDB attach and breakpoint at `_start`; `addr2line` on a panic backtrace
+  (verified for the first milestone; not re-run since).
 - Release disk images are byte-identical across clean rebuilds.
 
 ### Known limitations and untested behaviour
 
-- **Never run on real hardware**, under KVM, or with firmware other than OVMF.
+- **Never run on real hardware** or with firmware other than OVMF.
 - The serial port is the only console. If COM1 is absent the kernel stops
   without any visible output.
+- Clock calibration needs the legacy PIT. On hardware without one the kernel
+  reports a calibration timeout and stops; CPUID- or HPET-based calibration
+  is future work. The TSC is used as the clock even when the CPU does not
+  advertise it as invariant (a warning-worthy condition on real hardware,
+  normal under emulation).
+- The tick is periodic at 100 Hz even when idle; tickless idle is future
+  work.
+- The frame allocator manages usable RAM above 1 MiB only. Boot-reclaimable
+  memory (about 38 MiB under OVMF) is not reclaimed yet.
+- Device mappings are permanent, and the loader's direct map still covers
+  device address ranges with ordinary caching.
 - Loader error paths (missing or corrupt kernel image, unsupported CPU,
   5-level paging, more than 512 GiB of RAM) are implemented but not covered by
   automated tests.
-- Only the boot CPU is used; interrupts stay disabled.
+- Only the boot CPU is used.
 - No Secure Boot support; the loader does not authenticate the kernel.
 - No kernel address-space randomisation.
 - No performance measurements have been made, and no performance claims are
@@ -174,6 +203,7 @@ kernel/          the kernel (x86_64-unknown-none), linker script
   src/arch/      architecture-specific code (x86_64 only)
 libs/bootproto/  loader <-> kernel contract: BootInfo, memory map, command line
 libs/elf/        safe ELF64 program-header parser
+libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
 tools/xtask/     build / image / run / test driver
 docs/adr/        architecture decision records
 .github/         CI
@@ -194,8 +224,10 @@ products.
    firmware-independent format, switches page tables and jumps to `_start`.
 4. The kernel initialises, in order: serial console, boot-information
    validation, CPU protection features, GDT/TSS, IDT (verified with a
-   breakpoint round-trip), memory map validation, identity-map removal and a
-   page-table audit.
+   breakpoint round-trip), memory map validation, identity-map removal, the
+   physical frame allocator (self-tested), the interrupt controllers, clock
+   calibration and the timer tick (verified against an independent clock),
+   and finally a page-table audit.
 5. Only if every step succeeded does it print
    `Omit OS — Kernel initialized successfully.`
 
@@ -205,6 +237,8 @@ The exact contract between loader and kernel is documented in
 - [ADR 0001 — Own UEFI loader, ELF kernel in the higher half](docs/adr/0001-uefi-loader-and-elf-kernel.md)
 - [ADR 0002 — Boot protocol and initial address space](docs/adr/0002-boot-protocol-and-initial-address-space.md)
 - [ADR 0003 — Toolchain, dependency policy and test harness](docs/adr/0003-toolchain-dependencies-and-test-harness.md)
+- [ADR 0004 — Physical memory management](docs/adr/0004-physical-memory-management.md)
+- [ADR 0005 — Interrupts and timekeeping](docs/adr/0005-interrupts-and-timekeeping.md)
 
 ## Testing
 
@@ -213,7 +247,7 @@ checks both QEMU's exit status and the serial log:
 
 | Test | Checks |
 | --- | --- |
-| `boot` | Every initialisation step logs success, the success line is printed, exit status reports success, no panic/exception/error output |
+| `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `page-fault-diagnostics` | Reading address `0x1000` raises a page fault with the right address and cause — which also proves the identity map is gone |
 | `stack-overflow-double-fault` | Overflowing the boot stack hits the guard page and is caught as a double fault on its dedicated stack |
@@ -229,9 +263,11 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step (Milestone 2):** a physical frame allocator fed by the boot
-memory map, then the kernel's own page tables and heap, then the local APIC
-timer and hardware interrupts.
+**Next step (finishing Milestone 2):** a kernel heap on top of the frame
+allocator, and kernel-owned page tables with unmapping and correct cache
+attributes for device memory. After that, Milestone 3: ACPI/I/O APIC for
+device interrupts, keyboard and serial input, a virtual filesystem with a RAM
+filesystem, and an interactive shell.
 
 ## Licence
 

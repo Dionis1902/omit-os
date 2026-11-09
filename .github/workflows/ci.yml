@@ -52,6 +52,25 @@ jobs:
         run: cargo xtask test --release
       - name: Boot tests (release, baseline CPU without 1 GiB pages/SMEP/SMAP)
         run: cargo xtask test --release --cpu qemu64
+      # Hosted runners usually expose KVM. Running on a real CPU covers what
+      # emulation cannot: x2APIC mode, an invariant TSC, real timer rates.
+      - name: Enable KVM
+        id: kvm
+        run: |
+          if [ -e /dev/kvm ]; then
+            echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+            sudo udevadm control --reload-rules
+            sudo udevadm trigger --name-match=kvm
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::KVM is not available on this runner; skipping KVM boot tests"
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Boot tests (release, KVM, host CPU)
+        if: steps.kvm.outputs.available == 'true'
+        run: |
+          cargo xtask test --release --accel kvm --cpu host
+          grep -a "irq:\|time:\|cpu:" target/omit/release/test-boot.serial.log
       - name: Build release disk image
         run: cargo xtask image --release
       - name: Upload serial logs and disk image
