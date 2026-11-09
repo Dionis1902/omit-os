@@ -43,6 +43,8 @@ enum InitError {
     Paging(PagingError),
     FrameAllocator(FrameInitError),
     FrameSelfTest(&'static str),
+    HeapSelfTest(&'static str),
+    MappingSelfTest(&'static str),
     Apic(ApicError),
     Timer(ApicError),
     TickSelfTest(TickTestError),
@@ -62,6 +64,8 @@ impl fmt::Display for InitError {
             Self::Paging(e) => write!(f, "paging: {e}"),
             Self::FrameAllocator(e) => write!(f, "frame allocator: {e}"),
             Self::FrameSelfTest(e) => write!(f, "frame allocator self-test: {e}"),
+            Self::HeapSelfTest(e) => write!(f, "heap self-test: {e}"),
+            Self::MappingSelfTest(e) => write!(f, "page mapping self-test: {e}"),
             Self::Apic(e) => write!(f, "interrupt controller: {e}"),
             Self::Timer(e) => write!(f, "timer: {e}"),
             Self::TickSelfTest(e) => write!(f, "timer self-test: {e}"),
@@ -239,6 +243,15 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         frames.metadata_bytes / 1024,
     );
 
+    mm::heap::self_test().map_err(InitError::HeapSelfTest)?;
+    let heap = mm::heap::stats();
+    info!(
+        "mem: kernel heap ready: self-test passed ({} slab pages retained)",
+        heap.slab_pages
+    );
+    arch::paging::self_test(false).map_err(InitError::MappingSelfTest)?;
+    info!("paging: map/unmap self-test passed");
+
     // 7. Interrupt controllers.
     arch::pic::disable();
     let apic = arch::apic::init().map_err(InitError::Apic)?;
@@ -303,6 +316,12 @@ fn inject_fault(kind: &str) {
         "pagefault" => {
             warn!("fault injection: reading from unmapped address 0x1000");
             arch::trigger_page_fault(0x1000);
+        }
+        "unmapped" => {
+            warn!("fault injection: reading through a page after unmapping it");
+            if let Err(error) = arch::paging::self_test(true) {
+                error!("fault injection: mapping test failed early: {error}");
+            }
         }
         "stackoverflow" => {
             warn!("fault injection: overflowing the kernel stack");

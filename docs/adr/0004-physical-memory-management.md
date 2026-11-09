@@ -61,6 +61,27 @@ inherited from the loader.
 - Boot-reclaimable memory is not handed to the allocator yet. Some firmware
   keeps using boot-services memory after `ExitBootServices`, so reclaiming it
   safely needs care and testing on real machines.
-- Still to do in this milestone: a kernel heap, and kernel-owned page tables
-  with unmapping, TLB invalidation and correct cache attributes for the
-  direct map.
+
+## Addendum: kernel heap and page mapping
+
+- **Heap** (`libs/mm/src/heap.rs`): power-of-two size classes from 16 bytes to
+  2 KiB, each with an intrusive free list refilled one page at a time;
+  larger requests are page runs taken from, and returned to, the frame
+  allocator. Chosen because allocation and free are a handful of pointer
+  operations with no searching, and because power-of-two blocks carved from
+  aligned pages satisfy any alignment for free. The cost is up to 50 %
+  internal fragmentation, and pages given to a size class are not returned.
+  Both are acceptable until measurements on real workloads say otherwise; a
+  slab allocator with per-CPU caches is the expected successor.
+- The heap is generic over a `PageSource` trait, so the same code is
+  unit-tested on the host against the host allocator and runs in the kernel
+  against the frame allocator through the direct map (no page-table work on
+  the allocation path).
+- **Kernel page mappings** live in their own range
+  (`0xFFFF_D000_0000_0000`, 64 GiB): `map_kernel_page`, `unmap_kernel_page`
+  (with `invlpg`) and `translate_kernel_page`. Intermediate tables are kept
+  when a page is unmapped. There is no virtual-address allocator for this
+  range yet; it arrives with its first real user (kernel thread stacks).
+- The kernel keeps using and extending the page tables built by the loader;
+  rebuilding them is unnecessary. What remains open is giving the direct map
+  correct cache attributes over device address ranges.

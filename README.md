@@ -7,9 +7,9 @@ written in Rust. It is not a Linux distribution and contains no Linux or
 Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
-the CPU and the address space, manages physical memory, handles timer
-interrupts, and reports its state on the serial console. There is no heap,
-scheduler, filesystem, shell or driver model yet. See [Status](#status) for exactly what exists and what has been tested.
+the CPU and the address space, manages physical memory and a kernel heap,
+handles timer interrupts, and reports its state on the serial console. There
+is no scheduler, filesystem, shell or driver model yet. See [Status](#status) for exactly what exists and what has been tested.
 
 ```text
 omit-boot: Omit OS boot loader 0.1.0 (protocol v1)
@@ -127,7 +127,7 @@ Boot must be disabled).
 ## Status
 
 Milestone 0 (development environment), Milestone 1 (bootable kernel) and
-most of Milestone 2 (memory and interrupts) are implemented.
+Milestone 2 (memory and interrupts) are implemented.
 
 | Component | State |
 | --- | --- |
@@ -140,29 +140,31 @@ most of Milestone 2 (memory and interrupts) are implemented.
 | Address space: identity map removal, live page-table W^X audit | Working, tested |
 | Panic handler with location and backtrace | Working, tested |
 | Physical frame allocator (buddy, orders 0-10) | Working; algorithm host-tested, kernel integration self-tested at every boot |
-| Kernel page mapper for device memory (`map_mmio`) | Working, exercised by the local APIC mapping; no unmap yet |
+| Kernel heap (size classes 16 B-2 KiB, larger requests from the frame allocator); `alloc` crate available in the kernel | Working; algorithm host-tested, kernel integration self-tested at every boot |
+| Page mapping: device memory (`map_mmio`), kernel pages (map, unmap with TLB flush, translate) | Working; self-tested at every boot, plus a use-after-unmap fault test |
 | Interrupt-safe spinlock, interrupt handler registration and dispatch | Working, tested |
 | Legacy PIC masking, local APIC (xAPIC mode) | Working, tested |
-| Local APIC in x2APIC mode | Implemented, **untested locally** (QEMU's TCG does not offer x2APIC; a KVM job in CI covers it where the runner provides KVM) |
+| Local APIC in x2APIC mode | Working; tested in CI under KVM (QEMU's software emulation does not offer x2APIC, so it cannot be tested without KVM) |
 | Clocks: TSC monotonic clock and 100 Hz APIC timer tick, calibrated against the PIT | Working; tick rate verified against the TSC at every boot |
-| Kernel heap, kernel-owned page tables, unmapping | Not started (rest of Milestone 2) |
 | ACPI table parsing, I/O APIC, device interrupts, SMP | Not started |
 | Filesystem, shell, processes, user mode, drivers, Windows/Linux compatibility | Not started |
 
 ### What has been verified, and how
 
-On QEMU 8.2.2 (TCG, no KVM) with OVMF, Rust 1.97.0:
+On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
+(TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 33 host unit tests (`cargo test`): boot protocol validation, memory map
+- 40 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
-  input, the buddy allocator (including a randomised test against an
-  independent model), GPT writer.
-- 4 QEMU integration tests (`cargo xtask test`), in debug and release builds,
+  input, the buddy allocator and the heap (each including a randomised test
+  against an independent model), GPT writer.
+- 5 QEMU integration tests (`cargo xtask test`), in debug and release builds,
   with `-cpu max` and with `-cpu qemu64` (no 1 GiB pages, SMEP, SMAP or UMIP),
   and with 96 MiB, 256 MiB and 6 GiB of guest RAM.
 - At every boot the kernel itself checks: a breakpoint exception round-trip;
   frame allocation, alignment, memory read-back and rejection of invalid
-  frees; that ten timer interrupts arrive and take 100 ms ± a factor of two
+  frees; heap use through `Box`, `Vec` and `String` with nothing leaked;
+  mapping, aliasing and unmapping of a page; that ten timer interrupts arrive and take 100 ms ± a factor of two
   by the TSC; and that no mapping is writable and executable.
 - `cargo fmt --check` and `cargo clippy -D warnings` for host crates, kernel
   and loader.
@@ -172,7 +174,8 @@ On QEMU 8.2.2 (TCG, no KVM) with OVMF, Rust 1.97.0:
 
 ### Known limitations and untested behaviour
 
-- **Never run on real hardware** or with firmware other than OVMF.
+- **Never run on real hardware** or with firmware other than OVMF. KVM has
+  only been exercised in CI.
 - The serial port is the only console. If COM1 is absent the kernel stops
   without any visible output.
 - Clock calibration needs the legacy PIT. On hardware without one the kernel
@@ -186,6 +189,10 @@ On QEMU 8.2.2 (TCG, no KVM) with OVMF, Rust 1.97.0:
   memory (about 38 MiB under OVMF) is not reclaimed yet.
 - Device mappings are permanent, and the loader's direct map still covers
   device address ranges with ordinary caching.
+- The heap rounds sizes up to powers of two, never returns small-object pages
+  to the frame allocator, and has no hardening against use-after-free. A
+  failed allocation in infallible `alloc` APIs panics the kernel.
+- Unmapping flushes the TLB of the current CPU only (there is only one).
 - Loader error paths (missing or corrupt kernel image, unsupported CPU,
   5-level paging, more than 512 GiB of RAM) are implemented but not covered by
   automated tests.
@@ -249,6 +256,7 @@ checks both QEMU's exit status and the serial log:
 | --- | --- |
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
+| `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
 | `page-fault-diagnostics` | Reading address `0x1000` raises a page fault with the right address and cause — which also proves the identity map is gone |
 | `stack-overflow-double-fault` | Overflowing the boot stack hits the guard page and is caught as a double fault on its dedicated stack |
 
@@ -263,11 +271,9 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step (finishing Milestone 2):** a kernel heap on top of the frame
-allocator, and kernel-owned page tables with unmapping and correct cache
-attributes for device memory. After that, Milestone 3: ACPI/I/O APIC for
-device interrupts, keyboard and serial input, a virtual filesystem with a RAM
-filesystem, and an interactive shell.
+**Next step (Milestone 3):** device interrupts (ACPI MADT, I/O APIC), serial
+and keyboard input, a virtual filesystem with a RAM filesystem, and an
+interactive shell with real `ls`, `cd`, `pwd`, `cat`, `mkdir` and `echo`.
 
 ## Licence
 

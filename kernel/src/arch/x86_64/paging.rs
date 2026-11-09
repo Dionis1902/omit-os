@@ -363,3 +363,162 @@ pub fn map_mmio(phys: u64, len: u64) -> Result<u64, MapError> {
     }
     Ok(virt + offset)
 }
+
+/// Start of the virtual range for general kernel mappings (PML4 slot 416).
+const KERNEL_MAP_BASE: u64 = 0xFFFF_D000_0000_0000;
+/// Exclusive end of that range (64 GiB).
+const KERNEL_MAP_END: u64 = KERNEL_MAP_BASE + (64 << 30);
+
+fn check_kernel_map_address(virt: u64) -> Result<(), MapError> {
+    if virt.is_multiple_of(PAGE_SIZE) && (KERNEL_MAP_BASE..KERNEL_MAP_END).contains(&virt) {
+        Ok(())
+    } else {
+        Err(MapError::InvalidRange)
+    }
+}
+
+/// Returns a pointer to the leaf (level 1) entry for `virt`, or `None` if
+/// an intermediate table is missing or a huge page covers the address.
+///
+/// # Safety
+///
+/// The caller must hold the `KERNEL_SPACE` lock.
+unsafe fn leaf_entry(virt: u64) -> Result<Option<*mut u64>, MapError> {
+    let mut table = table_ptr(cpu::read_cr3() & ADDRESS_MASK)?;
+    for level in (2..=4u32).rev() {
+        let index = ((virt >> (12 + 9 * (level - 1))) & 0x1FF) as usize;
+        // SAFETY: `table` is the direct-map alias of a live page table,
+        // valid for reads of 512 entries; the caller holds the lock.
+        let entry = unsafe { (&raw const (*table)[index]).read_volatile() };
+        if entry & PRESENT == 0 || entry & HUGE != 0 {
+            return Ok(None);
+        }
+        table = table_ptr(entry & ADDRESS_MASK)?;
+    }
+    let index = ((virt >> 12) & 0x1FF) as usize;
+    // SAFETY: `index < 512`, so the pointer stays inside the level-1 table.
+    Ok(Some(unsafe { (&raw mut (*table)[index]).cast::<u64>() }))
+}
+
+/// Maps the page at `virt`, inside the general kernel mapping range, to the
+/// frame `phys`. The mapping is non-executable, and writable if `writable`.
+///
+/// # Safety
+///
+/// The caller must own the frame at `phys` and must ensure the mapping does
+/// not create aliasing that violates Rust's rules for whatever is stored
+/// there.
+pub unsafe fn map_kernel_page(virt: u64, phys: u64, writable: bool) -> Result<(), MapError> {
+    check_kernel_map_address(virt)?;
+    if !phys.is_multiple_of(PAGE_SIZE) || phys > ADDRESS_MASK {
+        return Err(MapError::InvalidRange);
+    }
+    let flags = NO_EXECUTE | if writable { WRITABLE } else { 0 };
+    let _space = KERNEL_SPACE.lock();
+    // SAFETY: the lock is held and `virt` lies in the general kernel mapping
+    // range, which the image, stack and direct map do not use.
+    unsafe { map_page_locked(virt, phys, flags) }
+}
+
+/// Removes the mapping of the page at `virt` and returns the physical
+/// address it was mapped to, or `None` if it was not mapped. The stale
+/// translation is flushed from this CPU's TLB. Intermediate page tables are
+/// kept for reuse.
+///
+/// # Safety
+///
+/// Nothing may access the page through `virt` afterwards.
+pub unsafe fn unmap_kernel_page(virt: u64) -> Result<Option<u64>, MapError> {
+    check_kernel_map_address(virt)?;
+    let _space = KERNEL_SPACE.lock();
+    // SAFETY: the lock is held.
+    let Some(slot) = (unsafe { leaf_entry(virt)? }) else {
+        return Ok(None);
+    };
+    // SAFETY: `slot` points at a live level-1 entry (see `leaf_entry`) and
+    // the lock serialises updates. `invlpg` only drops a TLB entry.
+    unsafe {
+        let entry = slot.read_volatile();
+        if entry & PRESENT == 0 {
+            return Ok(None);
+        }
+        slot.write_volatile(0);
+        core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+        Ok(Some(entry & ADDRESS_MASK))
+    }
+}
+
+/// Looks up the physical frame the page at `virt` (in the general kernel
+/// mapping range) is mapped to.
+pub fn translate_kernel_page(virt: u64) -> Result<Option<u64>, MapError> {
+    check_kernel_map_address(virt)?;
+    let _space = KERNEL_SPACE.lock();
+    // SAFETY: the lock is held; the entry is only read.
+    let entry = match unsafe { leaf_entry(virt)? } {
+        // SAFETY: `slot` points at a live level-1 entry.
+        Some(slot) => unsafe { slot.read_volatile() },
+        None => return Ok(None),
+    };
+    Ok((entry & PRESENT != 0).then_some(entry & ADDRESS_MASK))
+}
+
+/// First page of the general kernel mapping range, reserved for
+/// [`self_test`] and the `fault=unmapped` fault-injection test.
+pub const SCRATCH_PAGE: u64 = KERNEL_MAP_BASE;
+
+/// Maps a fresh frame at [`SCRATCH_PAGE`], checks that the mapping and the
+/// direct map show the same memory, unmaps it and checks that the
+/// translation is gone.
+///
+/// With `leave_stale_access` the function finishes by reading through the
+/// unmapped address, which must raise a page fault (and would silently
+/// succeed if the TLB entry had not been flushed). That mode never returns
+/// normally and is used only by fault injection.
+pub fn self_test(leave_stale_access: bool) -> Result<(), &'static str> {
+    const PATTERN: u64 = 0x0123_4567_89AB_CDEF;
+    let frame = frame::alloc_zeroed(0).ok_or("no frame for the mapping test")?;
+    let direct = mm::phys_to_virt(frame, PAGE_SIZE)
+        .ok_or("test frame outside the direct map")?
+        .cast::<u64>();
+    let mapped = SCRATCH_PAGE as *mut u64;
+
+    // SAFETY: the frame was just allocated, so this test owns it; it is only
+    // accessed through raw pointers with volatile operations, so the two
+    // virtual aliases cannot violate reference rules. `SCRATCH_PAGE` is
+    // reserved for this purpose.
+    unsafe {
+        map_kernel_page(SCRATCH_PAGE, frame, true).map_err(|_| "mapping failed")?;
+        if map_kernel_page(SCRATCH_PAGE, frame, true)
+            != Err(MapError::AlreadyMapped { virt: SCRATCH_PAGE })
+        {
+            return Err("double mapping was not rejected");
+        }
+        if translate_kernel_page(SCRATCH_PAGE) != Ok(Some(frame)) {
+            return Err("translation does not match the mapping");
+        }
+        mapped.write_volatile(PATTERN);
+        if direct.read_volatile() != PATTERN {
+            return Err("mapping does not reach the mapped frame");
+        }
+        direct.add(1).write_volatile(!PATTERN);
+        if mapped.add(1).read_volatile() != !PATTERN {
+            return Err("mapping does not show writes made through the direct map");
+        }
+
+        if unmap_kernel_page(SCRATCH_PAGE) != Ok(Some(frame)) {
+            return Err("unmap did not return the mapped frame");
+        }
+        if translate_kernel_page(SCRATCH_PAGE) != Ok(None) {
+            return Err("page is still mapped after unmap");
+        }
+        if unmap_kernel_page(SCRATCH_PAGE) != Ok(None) {
+            return Err("second unmap did not report an unmapped page");
+        }
+        frame::free(frame, 0).map_err(|_| "could not free the test frame")?;
+    }
+
+    if leave_stale_access {
+        super::trigger_page_fault(SCRATCH_PAGE);
+    }
+    Ok(())
+}

@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use omit_bootproto::{BootInfo, PHYS_MAP_BASE};
 
 pub mod frame;
+pub mod heap;
 
 /// Size of a page frame in bytes.
 pub const PAGE_SIZE: u64 = omit_bootproto::PAGE_SIZE;

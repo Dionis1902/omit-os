@@ -330,6 +330,8 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] cpu: IDT loaded, 256 vectors installed, #BP self-test passed",
             "[INFO ] paging: identity map removed",
             "[INFO ] mem: frame allocator ready",
+            "[INFO ] mem: kernel heap ready: self-test passed",
+            "[INFO ] paging: map/unmap self-test passed",
             "[INFO ] irq: legacy PIC masked; local APIC 0 enabled",
             "[INFO ] time: timer interrupt self-test passed",
             "[INFO ] paging: audit passed (W^X holds)",
@@ -359,6 +361,17 @@ const BOOT_TESTS: &[BootTest] = &[
             "fault address: 0x0000000000001000 (non-present page on read in kernel mode)",
         ],
         must_not_contain: &["KERNEL PANIC"],
+    },
+    BootTest {
+        name: "use-after-unmap-faults",
+        cmdline: "fault=unmapped",
+        expected_exit: QEMU_EXIT_FAILURE,
+        must_contain: &[
+            "==== KERNEL EXCEPTION ====",
+            "exception: #PF page fault (vector 14, error code 0x0)",
+            "fault address: 0xffffd00000000000 (non-present page on read in kernel mode)",
+        ],
+        must_not_contain: &["KERNEL PANIC", "[ERROR]"],
     },
     BootTest {
         name: "stack-overflow-double-fault",
