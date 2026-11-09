@@ -1,0 +1,20 @@
+[package]
+name = "omit-kernel"
+description = "The Omit OS kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "omit-kernel"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+omit-bootproto.workspace = true
+
+[lints]
+workspace = true
