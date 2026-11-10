@@ -8,9 +8,9 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use omit_gfx::desktop::{App, Context};
+use omit_gfx::files::{Entry, Files, Place, Storage};
 use omit_gfx::font::{REGULAR_12, REGULAR_13, SEMIBOLD_20};
 use omit_gfx::geometry::Rect;
-use omit_gfx::icon::icon;
 use omit_gfx::surface::{CHAR_WIDTH, Canvas, TEXT_HEIGHT};
 use omit_gfx::theme::Theme;
 use omit_rt::abi::{Errno, key};
@@ -114,191 +114,55 @@ impl App for About {
 
 // ---------------------------------------------------------------------
 
-struct Entry {
-    name: String,
-    is_dir: bool,
-}
+/// The files of this system, for the Files window.
+pub struct SystemFiles;
 
-/// A file browser: click a directory to enter it, a file to view it.
-pub struct Files {
-    path: String,
-    title: String,
-    entries: Vec<Entry>,
-    error: Option<Errno>,
-    selected: usize,
-    first_row: usize,
-    /// Rows that fit, as of the last draw.
-    visible_rows: usize,
-}
-
-impl Files {
-    /// Where the list starts, below the path, and the height of a row.
-    const LIST_TOP: i32 = 44;
-    const ROW: i32 = 30;
-
-    pub fn new(path: &str) -> Self {
-        let mut files = Self {
-            path: String::new(),
-            title: String::new(),
-            entries: Vec::new(),
-            error: None,
-            selected: 0,
-            first_row: 0,
-            visible_rows: 1,
-        };
-        files.enter(path.into());
-        files
-    }
-
-    fn enter(&mut self, path: String) {
-        self.entries.clear();
-        self.error = None;
-        if path != "/" {
-            self.entries.push(Entry {
-                name: "..".into(),
-                is_dir: true,
-            });
-        }
-        match omit_rt::read_dir(&path) {
-            Ok(mut listing) => {
-                // Directories first, each group by name.
-                listing.sort_by(|a, b| (!a.is_dir, &a.name).cmp(&(!b.is_dir, &b.name)));
-                self.entries.extend(listing.into_iter().map(|entry| Entry {
+impl Storage for SystemFiles {
+    fn list(&mut self, path: &str) -> Result<Vec<Entry>, String> {
+        let listing = omit_rt::read_dir(path).map_err(|error| format!("{error}"))?;
+        Ok(listing
+            .into_iter()
+            .map(|entry| {
+                let full = if path == "/" {
+                    format!("/{}", entry.name)
+                } else {
+                    format!("{path}/{}", entry.name)
+                };
+                // A file whose size cannot be asked for is listed all
+                // the same.
+                let size = omit_rt::stat(&full).map_or(0, |stat| stat.size);
+                Entry {
                     name: entry.name,
                     is_dir: entry.is_dir,
-                }));
-            }
-            Err(error) => self.error = Some(error),
-        }
-        self.title = format!("Files — {path}");
-        self.path = path;
-        self.selected = 0;
-        self.first_row = 0;
-    }
-
-    fn child(&self, name: &str) -> String {
-        if name == ".." {
-            return match self.path.rfind('/') {
-                Some(0) | None => "/".into(),
-                Some(index) => self.path[..index].into(),
-            };
-        }
-        if self.path == "/" {
-            format!("/{name}")
-        } else {
-            format!("{}/{name}", self.path)
-        }
-    }
-
-    fn activate(&mut self, context: &mut Context) {
-        let Some(entry) = self.entries.get(self.selected) else {
-            return;
-        };
-        let target = self.child(&entry.name);
-        if entry.is_dir {
-            self.enter(target);
-        } else {
-            context.open(Box::new(Viewer::new(&target)), 600, 380);
-        }
-    }
-
-    fn keep_selection_visible(&mut self) {
-        if self.selected < self.first_row {
-            self.first_row = self.selected;
-        } else if self.selected >= self.first_row + self.visible_rows {
-            self.first_row = self.selected + 1 - self.visible_rows;
-        }
+                    size,
+                }
+            })
+            .collect())
     }
 }
 
-impl App for Files {
-    fn title(&self) -> &str {
-        &self.title
+/// A Files window showing the folder `path`: files are opened in the
+/// viewer.
+pub fn files(path: &str) -> Files<SystemFiles> {
+    let place = |label: &str, path: &str, icon: &str| Place {
+        label: label.into(),
+        path: path.into(),
+        icon: icon.into(),
+    };
+    let mut places = alloc::vec![
+        place("Computer", "/", "mon"),
+        place("Programs", "/bin", "grid"),
+    ];
+    // The data partition, on an installed system.
+    if omit_rt::read_dir("/data").is_ok() {
+        places.push(place("Data", "/data", "drive"));
     }
-
-    fn icon(&self) -> &str {
-        "folder"
-    }
-
-    fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
-        // The path, on a strip in the chrome colour like the title bar.
-        canvas.fill(Rect::new(0, 0, width, Self::LIST_TOP - 6), theme.chrome);
-        canvas.tint(
-            Rect::new(0, Self::LIST_TOP - 7, width, 1),
-            theme.separator.colour,
-            theme.separator.alpha,
-        );
-        let (path, cut) = REGULAR_13.fit(&self.path, width - 2 * PADDING);
-        let end = canvas.write(PADDING, 10, path, REGULAR_13, theme.text_2);
-        if cut {
-            canvas.write(end, 10, "…", REGULAR_13, theme.text_2);
-        }
-        if let Some(error) = self.error {
-            canvas.write(
-                PADDING,
-                Self::LIST_TOP + 6,
-                &format!("Cannot list: {error}"),
-                REGULAR_13,
-                theme.danger,
-            );
-        }
-        self.visible_rows = ((height - Self::LIST_TOP - 6) / Self::ROW).max(1) as usize;
-        self.keep_selection_visible();
-        let shown = self.entries.iter().enumerate().skip(self.first_row);
-        for (row, (index, entry)) in shown.take(self.visible_rows).enumerate() {
-            let area = Rect::new(
-                8,
-                Self::LIST_TOP + row as i32 * Self::ROW,
-                width - 16,
-                Self::ROW,
-            );
-            if index == self.selected {
-                canvas.round_rect(area, 7, theme.accent_soft.colour, theme.accent_soft.alpha);
-            }
-            let (name, ink) = if entry.is_dir {
-                ("folder", theme.accent_text)
-            } else {
-                ("doc", theme.text_3)
-            };
-            if let Some(mask) = icon(name, 20) {
-                canvas.mask(area.x + 10, area.y + 5, mask, ink, 255);
-            }
-            let (text, cut) = REGULAR_13.fit(&entry.name, area.w - 54);
-            let end = canvas.write(area.x + 40, area.y + 7, text, REGULAR_13, theme.text);
-            if cut {
-                canvas.write(end, area.y + 7, "…", REGULAR_13, theme.text);
-            }
-        }
-    }
-
-    fn click(&mut self, _x: i32, y: i32, context: &mut Context) {
-        if y < Self::LIST_TOP {
-            return;
-        }
-        let index = self.first_row + ((y - Self::LIST_TOP) / Self::ROW) as usize;
-        if index < self.entries.len() {
-            self.selected = index;
-            self.activate(context);
-        }
-    }
-
-    fn key(&mut self, code: i32, context: &mut Context) {
-        let last = self.entries.len().saturating_sub(1);
-        match code {
-            key::UP => self.selected = self.selected.saturating_sub(1),
-            key::DOWN => self.selected = (self.selected + 1).min(last),
-            key::HOME => self.selected = 0,
-            key::END => self.selected = last,
-            key::PAGE_UP => self.selected = self.selected.saturating_sub(self.visible_rows),
-            key::PAGE_DOWN => self.selected = (self.selected + self.visible_rows).min(last),
-            ENTER => self.activate(context),
-            BACKSPACE if self.path != "/" => {
-                let parent = self.child("..");
-                self.enter(parent);
-            }
-            _ => {}
-        }
-    }
+    Files::new(
+        SystemFiles,
+        places,
+        path,
+        Box::new(|file, context| context.open(Box::new(Viewer::new(file)), 600, 380)),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -558,7 +422,7 @@ impl App for Run {
     }
 
     fn icon(&self) -> &str {
-        "term"
+        "terminal"
     }
 
     fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {

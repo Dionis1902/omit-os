@@ -110,7 +110,9 @@ desktop              a graphical desktop (needs a mouse: PS/2, as virtual
 
 On the desktop, the icons on the task bar start programs — hold the
 pointer over one to see its name — and the mark at the left lists them
-all. Some have windows of their own (Scribble, Clock, the game Pop), and
+all; type there to search. Settings switches between light and dark and
+chooses the accent colour; Files browses the folders (click a row to
+select it, again to open it). Some have windows of their own (Scribble, Clock, the game Pop), and
 the Run window starts anything by
 name — try `wingui.exe`, a graphical Windows program: click in its
 window, type, press `m` for a message box, `x` for a timer, `q` to quit.

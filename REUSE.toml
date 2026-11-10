@@ -45,6 +45,15 @@ path = "libs/gfx/icons/**"
 SPDX-FileCopyrightText = "2026 Omit OS contributors"
 SPDX-License-Identifier = "MIT OR Apache-2.0"
 
+# The design system's pictures: wallpapers and program icons, as
+# drawings and as rendered by tools/gen-art.js. Artwork, under the
+# licence of the project's artwork — not that of the library they are
+# built into; see COPYING.
+[[annotations]]
+path = "libs/gfx/art/**"
+SPDX-FileCopyrightText = "2026 Omit OS contributors"
+SPDX-License-Identifier = "CC-BY-SA-4.0"
+
 # Imported Linux driver code. The files are kept exactly as upstream has
 # them, including their own notices; three of them use the older spelling
 # "GPL-2.0+" of the identifier GPL-2.0-or-later, which is restated here

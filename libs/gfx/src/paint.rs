@@ -10,6 +10,7 @@
 //! down.
 
 use crate::Colour;
+use crate::art::Picture;
 use crate::font::Font;
 use crate::geometry::Rect;
 use crate::icon::Mask;
@@ -250,6 +251,24 @@ impl Canvas<'_> {
         self.cover(Rect::new(x, y, size, size), colour, |mx, my| {
             scale(mask.coverage[(my * size + mx) as usize], alpha)
         });
+    }
+
+    /// Draws a picture with its top-left corner at (`x`, `y`), blended
+    /// over what is there by its own transparency.
+    pub fn picture(&mut self, x: i32, y: i32, picture: &Picture) {
+        self.rows(
+            Rect::new(x, y, picture.width(), picture.height()),
+            |px, py, row| {
+                for (offset, pixel) in row.iter_mut().enumerate() {
+                    let (colour, alpha) = picture.pixel(px + offset as i32, py);
+                    match alpha {
+                        0 => {}
+                        255 => *pixel = colour,
+                        alpha => *pixel = mix(colour, *pixel, alpha),
+                    }
+                }
+            },
+        );
     }
 
     /// Writes `text` in `font` and `colour`, the top of its line at `y`

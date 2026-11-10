@@ -28,6 +28,7 @@ use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use omit_gfx::desktop::Desktop;
+use omit_gfx::settings;
 use omit_gfx::surface::Surface;
 use omit_rt::abi::datetime::DateTime;
 use omit_rt::abi::{Errno, InputEvent, event, key};
@@ -62,11 +63,16 @@ fn main() -> i32 {
     let mut surface = Surface::new(width, height, 0);
     let mut desktop = Desktop::new(width, height);
 
-    desktop.add_launcher("Files", "folder", |context| {
-        context.open(Box::new(apps::Files::new("/")), 440, 330);
+    desktop.add_launcher("Files", "files", |context| {
+        let (width, height) = omit_gfx::files::SIZE;
+        context.open(Box::new(apps::files("/")), width, height);
     });
-    desktop.add_launcher("Run", "term", |context| {
+    desktop.add_launcher("Run", "terminal", |context| {
         context.open(Box::new(apps::Run::new()), 620, 360);
+    });
+    desktop.add_launcher("Settings", "settings", |context| {
+        let (width, height) = settings::SIZE;
+        context.open(Box::new(settings::Settings::new()), width, height);
     });
     desktop.add_launcher("About", "info", move |context| {
         context.open(Box::new(apps::About::new(width, height)), 470, 230);
@@ -75,7 +81,7 @@ fn main() -> i32 {
     // They are only started here; their windows arrive through `server`.
     let children: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
     for (label, icon, program) in [
-        ("Scribble", "brush", "/bin/scribble"),
+        ("Scribble", "canvas", "/bin/scribble"),
         ("Clock", "clock", "/bin/clock"),
         ("Pop", "play", "/bin/pop"),
     ] {

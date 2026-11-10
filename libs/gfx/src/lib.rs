@@ -32,13 +32,17 @@ extern crate alloc;
 #[cfg(test)]
 extern crate std;
 
+pub mod art;
 pub mod desktop;
+pub mod files;
 pub mod font;
 pub mod geometry;
 pub mod icon;
 pub mod paint;
+pub mod settings;
 pub mod surface;
 pub mod theme;
+pub mod widgets;
 
 /// A colour: `0x00RRGGBB`.
 pub type Colour = u32;

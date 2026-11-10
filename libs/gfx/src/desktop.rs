@@ -38,6 +38,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::Colour;
+use crate::art;
 use crate::font::{MEDIUM_13, REGULAR_12, REGULAR_13, SEMIBOLD_13};
 use crate::geometry::{Point, Rect};
 use crate::icon::icon;
@@ -73,7 +74,8 @@ const SHADOW_BEHIND: (i32, i32) = (22, 6);
 /// Width of the Start panel, and the height of one of its rows.
 const START_WIDTH: i32 = 300;
 const START_ROW: i32 = 36;
-const START_HEADER: i32 = 44;
+/// The top of the Start panel: the search field and the space around it.
+const START_HEADER: i32 = 60;
 const START_FOOTER: i32 = 52;
 
 /// The pointer: `#` is outline, `.` is fill. The hot spot is the top-left
@@ -113,6 +115,20 @@ enum Request {
     },
     Close,
     Quit,
+    Theme(Theme),
+    Mode(crate::theme::Mode),
+    Accent(crate::theme::Accent),
+    Align(Alignment),
+}
+
+/// Where the programs' icons sit on the task bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Alignment {
+    /// After the Start mark, at the left.
+    #[default]
+    Left,
+    /// In the middle of the bar.
+    Centre,
 }
 
 /// Handed to apps and task bar actions so they can talk to the desktop.
@@ -136,6 +152,26 @@ impl Context {
     /// Ends the desktop: [`Desktop::quit_requested`] becomes true.
     pub fn quit(&mut self) {
         self.requests.push(Request::Quit);
+    }
+
+    /// Changes the colours of the whole desktop.
+    pub fn set_theme(&mut self, theme: Theme) {
+        self.requests.push(Request::Theme(theme));
+    }
+
+    /// Switches the desktop to light or dark, keeping its accent.
+    pub fn set_mode(&mut self, mode: crate::theme::Mode) {
+        self.requests.push(Request::Mode(mode));
+    }
+
+    /// Changes the desktop's accent colour, keeping its mode.
+    pub fn set_accent(&mut self, accent: crate::theme::Accent) {
+        self.requests.push(Request::Accent(accent));
+    }
+
+    /// Moves the programs' icons on the task bar.
+    pub fn set_alignment(&mut self, alignment: Alignment) {
+        self.requests.push(Request::Align(alignment));
     }
 }
 
@@ -181,6 +217,10 @@ pub trait App {
     fn tick(&mut self, _context: &mut Context) -> bool {
         false
     }
+
+    /// Called before each `draw` with where the task bar's icons sit,
+    /// for windows that show it.
+    fn alignment(&mut self, _alignment: Alignment) {}
 }
 
 /// Identifies a window for as long as it is open.
@@ -334,6 +374,14 @@ pub struct Desktop {
     hover: Hover,
     /// Whether the Start panel is open.
     start_open: bool,
+    /// What has been typed into the Start panel's search field.
+    start_query: String,
+    /// Which of the listed programs Enter would start.
+    start_selected: usize,
+    alignment: Alignment,
+    /// The wallpaper at the size of the screen, and the mode it is for;
+    /// made when first needed.
+    wallpaper: Option<(crate::theme::Mode, Vec<Colour>)>,
     /// The window being moved, and where in its frame it was grabbed.
     drag: Option<(WindowId, Point)>,
     /// The window being resized by its corner, and where in the corner
@@ -364,6 +412,10 @@ impl Desktop {
             left_button: false,
             hover: Hover::Nothing,
             start_open: false,
+            start_query: String::new(),
+            start_selected: 0,
+            alignment: Alignment::Left,
+            wallpaper: None,
             drag: None,
             resize: None,
             capture: None,
@@ -407,12 +459,36 @@ impl Desktop {
 
     fn launcher_button(&self, index: usize) -> Rect {
         let start = self.start_button();
+        let count = self.launchers.len() as i32;
+        let all = count * TASK_BUTTON + (count - 1).max(0) * TASK_GAP;
+        let after_start = start.right() + 10;
+        let first = match self.alignment {
+            Alignment::Left => after_start,
+            // In the middle, but never under the Start mark.
+            Alignment::Centre => ((self.width - all) / 2).max(after_start),
+        };
         Rect::new(
-            start.right() + 10 + index as i32 * (TASK_BUTTON + TASK_GAP),
+            first + index as i32 * (TASK_BUTTON + TASK_GAP),
             start.y,
             TASK_BUTTON,
             TASK_BUTTON,
         )
+    }
+
+    /// Where the programs' icons sit on the task bar.
+    pub fn alignment(&self) -> Alignment {
+        self.alignment
+    }
+
+    /// Moves the programs' icons on the task bar.
+    pub fn set_alignment(&mut self, alignment: Alignment) {
+        if self.alignment != alignment {
+            // Whatever the pointer was over has moved from under it.
+            self.damage(self.hover_area(self.hover));
+            self.hover = Hover::Nothing;
+            self.alignment = alignment;
+            self.damage(self.taskbar());
+        }
     }
 
     /// The area of the `index`-th program's task bar button.
@@ -433,6 +509,27 @@ impl Desktop {
         )
     }
 
+    /// The programs the Start panel lists: all of them, or those whose
+    /// name contains what has been typed (whatever the case).
+    fn start_matches(&self) -> Vec<usize> {
+        let query = self.start_query.to_lowercase();
+        (0..self.launchers.len())
+            .filter(|&index| self.launchers[index].label.to_lowercase().contains(&query))
+            .collect()
+    }
+
+    /// The search field at the top of the Start panel.
+    fn start_field(&self) -> Rect {
+        let panel = self.start_panel();
+        Rect::new(panel.x + 12, panel.y + 12, panel.w - 24, 36)
+    }
+
+    /// What has been typed into the Start panel's search field.
+    pub fn start_query(&self) -> &str {
+        &self.start_query
+    }
+
+    /// The area of the `row`-th row of the Start panel's list.
     fn start_item(&self, index: usize) -> Rect {
         let panel = self.start_panel();
         Rect::new(
@@ -443,10 +540,10 @@ impl Desktop {
         )
     }
 
-    /// The row of the `index`-th program in the Start panel, while the
-    /// panel is open.
-    pub fn start_item_frame(&self, index: usize) -> Option<Rect> {
-        (self.start_open && index < self.launchers.len()).then(|| self.start_item(index))
+    /// The `row`-th row of the Start panel's list, while the panel is
+    /// open and lists that many programs.
+    pub fn start_item_frame(&self, row: usize) -> Option<Rect> {
+        (self.start_open && row < self.start_matches().len()).then(|| self.start_item(row))
     }
 
     /// The button in the Start panel that ends the desktop.
@@ -468,6 +565,8 @@ impl Desktop {
     fn set_start(&mut self, open: bool) {
         if self.start_open != open {
             self.start_open = open;
+            self.start_query.clear();
+            self.start_selected = 0;
             self.damage(self.start_panel().inset(-(SHADOW_FRONT.0 + SHADOW_FRONT.1)));
             self.damage(self.start_button());
         }
@@ -672,6 +771,14 @@ impl Desktop {
                     }
                 }
                 Request::Quit => self.quit = true,
+                Request::Theme(theme) => self.set_theme(theme),
+                Request::Mode(mode) => {
+                    self.set_theme(Theme::new(mode, self.theme.accent_name));
+                }
+                Request::Accent(accent) => {
+                    self.set_theme(Theme::new(self.theme.mode, accent));
+                }
+                Request::Align(alignment) => self.set_alignment(alignment),
             }
         }
     }
@@ -690,8 +797,8 @@ impl Desktop {
                 if self.power_button().contains(at) {
                     return Hover::Power;
                 }
-                return (0..self.launchers.len())
-                    .find(|&i| self.start_item(i).contains(at))
+                return (0..self.start_matches().len())
+                    .find(|&row| self.start_item(row).contains(at))
                     .map_or(Hover::Nothing, Hover::StartItem);
             }
         }
@@ -833,9 +940,18 @@ impl Desktop {
             // also starts that program.
             let chosen = self.hover_at(at);
             let on_start_button = self.start_button().contains(at);
+            let matches = self.start_matches();
+            if self.start_field().contains(at) {
+                // The field is for typing in; a click there changes nothing.
+                return;
+            }
             self.set_start(false);
             match chosen {
-                Hover::StartItem(index) => self.run_launcher(index),
+                Hover::StartItem(row) => {
+                    if let Some(&index) = matches.get(row) {
+                        self.run_launcher(index);
+                    }
+                }
                 Hover::Power => self.quit = true,
                 _ => {}
             }
@@ -936,9 +1052,7 @@ impl Desktop {
     /// Start panel is open, Escape closes it instead.
     pub fn key(&mut self, code: i32) {
         if self.start_open {
-            if code == 0x1B {
-                self.set_start(false);
-            }
+            self.start_key(code);
             return;
         }
         let Some(index) = self.front_index() else {
@@ -949,6 +1063,42 @@ impl Desktop {
         self.windows[index].app.key(code, &mut context);
         self.damage(self.windows[index].frame);
         self.perform(context, Some(id));
+    }
+
+    /// A key pressed while the Start panel is open: typing searches,
+    /// the arrows choose, Enter starts, Escape closes.
+    fn start_key(&mut self, code: i32) {
+        const ESCAPE: i32 = 0x1B;
+        const ENTER: i32 = 13;
+        const BACKSPACE: [i32; 2] = [8, 127];
+        const UP: i32 = 0x101;
+        const DOWN: i32 = 0x102;
+        let listed = self.start_matches();
+        match code {
+            ESCAPE => return self.set_start(false),
+            ENTER => {
+                let chosen = listed.get(self.start_selected).copied();
+                self.set_start(false);
+                if let Some(index) = chosen {
+                    self.run_launcher(index);
+                }
+                return;
+            }
+            UP => self.start_selected = self.start_selected.saturating_sub(1),
+            DOWN => {
+                self.start_selected = (self.start_selected + 1).min(listed.len().saturating_sub(1));
+            }
+            code if BACKSPACE.contains(&code) => {
+                self.start_query.pop();
+                self.start_selected = 0;
+            }
+            0x20..=0x7E if self.start_query.len() < 32 => {
+                self.start_query.push(code as u8 as char);
+                self.start_selected = 0;
+            }
+            _ => return,
+        }
+        self.damage(self.start_panel());
     }
 
     /// Gives every app the chance to update itself; call this regularly.
@@ -982,9 +1132,24 @@ impl Desktop {
             return dirty;
         }
         let theme = self.theme;
+        // The wallpaper is scaled to the screen once per mode, and then
+        // only copied.
+        if self
+            .wallpaper
+            .as_ref()
+            .is_none_or(|(mode, _)| *mode != theme.mode)
+        {
+            self.wallpaper = Some((theme.mode, make_wallpaper(&theme, self.width, self.height)));
+        }
         let mut root = surface.canvas();
         let mut canvas = root.clipped(dirty);
-        draw_wallpaper(&mut canvas, self.width, self.height, &theme);
+        if let Some((_, wallpaper)) = &self.wallpaper {
+            let width = self.width as usize;
+            canvas.rows(Rect::new(0, 0, self.width, self.height), |x, y, row| {
+                let start = y as usize * width + x as usize;
+                row.copy_from_slice(&wallpaper[start..start + row.len()]);
+            });
+        }
 
         let front = self.front_index();
         let hover = self.hover;
@@ -996,6 +1161,7 @@ impl Desktop {
                 Hover::Control(id, which) if id == window.id => Some(which),
                 _ => None,
             };
+            window.app.alignment(self.alignment);
             draw_window(&mut canvas, window, Some(index) == front, hovered, &theme);
         }
 
@@ -1054,7 +1220,14 @@ impl Desktop {
             if self.hover == Hover::Launcher(index) || active {
                 tone(canvas, button, 10, theme.hover);
             }
-            draw_icon(canvas, button, &self.launchers[index].icon, 24, theme.text);
+            draw_program_icon(
+                canvas,
+                button,
+                &self.launchers[index].icon,
+                30,
+                24,
+                theme.text,
+            );
             // Running: a small dot. In front: a short bar in the accent.
             let mark_y = button.bottom() - 6;
             if active {
@@ -1108,15 +1281,39 @@ impl Desktop {
             theme.shadow,
             theme.shadow_popup,
         );
-        tone(canvas, panel, 16, theme.glass);
+        // Without blur behind it, glass this size has to be nearly opaque
+        // for what is written on it to be readable.
+        canvas.round_rect(panel, 16, theme.glass.colour, 242);
         canvas.round_outline(panel, 16, theme.highlight.colour, theme.highlight.alpha);
-        canvas.write(
-            panel.x + 20,
-            panel.y + 15,
-            "Programs",
-            SEMIBOLD_13,
-            theme.text_2,
+        // The search field: what has been typed, or what typing does.
+        let field = self.start_field();
+        tone(canvas, field, 10, theme.fill);
+        canvas.round_outline(field, 10, theme.separator.colour, theme.separator.alpha);
+        draw_icon(
+            canvas,
+            Rect::new(field.x + 10, field.y + 8, 20, 20),
+            "search",
+            20,
+            theme.text_3,
         );
+        let text_y = field.y + (field.h - REGULAR_13.height()) / 2;
+        if self.start_query.is_empty() {
+            canvas.write(
+                field.x + 38,
+                text_y,
+                "Type to search",
+                REGULAR_13,
+                theme.text_3,
+            );
+        } else {
+            let (shown, _) = REGULAR_13.fit(&self.start_query, field.w - 60);
+            let end = canvas.write(field.x + 38, text_y, shown, REGULAR_13, theme.text);
+            // The caret.
+            canvas.fill(
+                Rect::new(end + 1, field.y + 9, 1, field.h - 18),
+                theme.accent_text,
+            );
+        }
 
         let mut list = canvas.clipped(Rect::new(
             panel.x,
@@ -1124,19 +1321,36 @@ impl Desktop {
             panel.w,
             (panel.h - START_HEADER - START_FOOTER).max(0),
         ));
-        for (index, launcher) in self.launchers.iter().enumerate() {
-            let row = self.start_item(index);
-            let hovered = self.hover == Hover::StartItem(index);
-            let (ink, icon_ink) = if hovered {
+        let listed = self.start_matches();
+        if listed.is_empty() {
+            list.write(
+                panel.x + 20,
+                panel.y + START_HEADER + 10,
+                "No program has that in its name",
+                REGULAR_13,
+                theme.text_3,
+            );
+        }
+        for (row_index, &index) in listed.iter().enumerate() {
+            let launcher = &self.launchers[index];
+            let row = self.start_item(row_index);
+            // Filled: the row under the pointer, or else the one Enter
+            // would start.
+            let chosen = match self.hover {
+                Hover::StartItem(hovered) => hovered == row_index,
+                _ => row_index == self.start_selected,
+            };
+            let (ink, icon_ink) = if chosen {
                 list.round_rect(row, 8, theme.accent, 255);
                 (theme.on_accent, theme.on_accent)
             } else {
                 (theme.text, theme.text_2)
             };
-            draw_icon(
+            draw_program_icon(
                 &mut list,
                 Rect::new(row.x + 8, row.y + (row.h - 20) / 2, 20, 20),
                 &launcher.icon,
+                20,
                 20,
                 icon_ink,
             );
@@ -1212,6 +1426,28 @@ fn tone(canvas: &mut Canvas<'_>, area: Rect, radius: i32, tone: Tone) {
     }
 }
 
+/// Draws a program's icon in the middle of `area`: the design system's
+/// picture of it, `picture` pixels wide, if there is one called `name`;
+/// otherwise the line icon of that name, `glyph` pixels wide, in
+/// `colour`.
+fn draw_program_icon(
+    canvas: &mut Canvas<'_>,
+    area: Rect,
+    name: &str,
+    picture: i32,
+    glyph: i32,
+    colour: Colour,
+) {
+    match art::icon(name, picture) {
+        Some(image) => canvas.picture(
+            area.x + (area.w - picture) / 2,
+            area.y + (area.h - picture) / 2,
+            &image,
+        ),
+        None => draw_icon(canvas, area, name, glyph, colour),
+    }
+}
+
 /// Draws the icon `name` at `size` pixels in the middle of `area`.
 /// Names the icon set lacks are drawn as the generic document.
 fn draw_icon(canvas: &mut Canvas<'_>, area: Rect, name: &str, size: i32, colour: Colour) {
@@ -1226,46 +1462,27 @@ fn draw_icon(canvas: &mut Canvas<'_>, area: Rect, name: &str, size: i32, colour:
     }
 }
 
-/// The wallpaper: a gradient from the top-left corner to the bottom-right
-/// through the theme's three colours.
-fn draw_wallpaper(canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
-    let visible = canvas.visible();
-    if visible.is_empty() {
-        return;
+/// The colour of the wallpaper at (`x`, `y`) on a `width` x `height`
+/// screen: what shows wherever nothing is drawn over it. It is the
+/// design system's picture for the theme's mode, scaled to cover the
+/// screen.
+pub fn wallpaper_at(theme: &Theme, width: i32, height: i32, x: i32, y: i32) -> Colour {
+    match art::wallpaper(theme.mode) {
+        Some(picture) => picture.scaled(width, height, x, y),
+        // (Only if the picture built into the library were damaged.)
+        None => theme.wallpaper[1],
     }
-    // The colour depends only on how far along the diagonal a pixel is,
-    // in thousandths: work the colours out once.
-    let [from, middle, to] = theme.wallpaper;
-    let colours: Vec<Colour> = (0..=1000)
-        .map(|along| {
-            if along < 600 {
-                mix(middle, from, (along * 255 / 600) as u8)
-            } else {
-                mix(to, middle, ((along - 600) * 255 / 400) as u8)
-            }
-        })
-        .collect();
-    // And each column's share of the way.
-    let across: Vec<i32> = (visible.x..visible.right())
-        .map(|x| x * 600 / width.max(1))
-        .collect();
-    canvas.rows(Rect::new(0, 0, width, height), |x, y, row| {
-        let down = y * 400 / height.max(1);
-        let first = (x - visible.x).max(0) as usize;
-        for (pixel, share) in row.iter_mut().zip(&across[first.min(across.len())..]) {
-            *pixel = colours[(share + down).clamp(0, 1000) as usize];
-        }
-    });
 }
 
-/// The colour of the wallpaper at (`x`, `y`) on a `width` x `height`
-/// screen: what shows wherever nothing is drawn over it.
-pub fn wallpaper_at(theme: &Theme, width: i32, height: i32, x: i32, y: i32) -> Colour {
-    let mut surface = Surface::new(1, 1, 0);
-    let mut canvas = surface.canvas();
-    let mut shifted = canvas.sub(Rect::new(-x, -y, width, height));
-    draw_wallpaper(&mut shifted, width, height, theme);
-    surface.pixel(0, 0).unwrap_or(0)
+/// The whole wallpaper for a `width` x `height` screen, row by row.
+fn make_wallpaper(theme: &Theme, width: i32, height: i32) -> Vec<Colour> {
+    let mut pixels = Vec::with_capacity((width.max(0) * height.max(0)) as usize);
+    for y in 0..height {
+        for x in 0..width {
+            pixels.push(wallpaper_at(theme, width, height, x, y));
+        }
+    }
+    pixels
 }
 
 fn draw_window(
@@ -1321,10 +1538,11 @@ fn draw_window(
 
     let ink = if active { theme.text } else { theme.text_3 };
     let capsule = window.capsule();
-    draw_icon(
+    draw_program_icon(
         canvas,
         Rect::new(bar.x + 13, bar.y + (bar.h - 20) / 2, 20, 20),
         window.app.icon(),
+        20,
         20,
         if active {
             theme.accent_text
@@ -1474,7 +1692,7 @@ mod tests {
             &self.name
         }
         fn icon(&self) -> &str {
-            "folder"
+            "drive"
         }
         fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
             let mut log = self.log.borrow_mut();
@@ -1684,14 +1902,14 @@ mod tests {
     #[test]
     fn first_render_paints_wallpaper_task_bar_and_pointer() {
         let mut f = Fixture::new();
-        f.add_program("Files", "folder");
+        f.add_program("Files", "drive");
         assert_eq!(f.render(), Rect::new(0, 0, W as i32, H as i32));
         let without_clock = f.surface.clone();
         f.desktop.set_clock("12:34", "Tue 10 Nov");
         f.render();
         let theme = *f.desktop.theme();
         // The wallpaper: a gradient between the theme's corner colours.
-        assert_eq!(f.pixel(0, 0), theme.wallpaper[0]);
+        assert_eq!(f.pixel(0, 0), f.wallpaper(0, 0));
         assert_eq!(f.pixel(5, 5), f.wallpaper(5, 5));
         assert_ne!(f.wallpaper(5, 5), f.wallpaper(700, 400));
         // The task bar: glass over the wallpaper, with a lighter top edge.
@@ -2000,7 +2218,7 @@ mod tests {
     #[test]
     fn a_task_bar_icon_starts_raises_and_minimises_its_program() {
         let mut f = Fixture::new();
-        f.add_program("Files", "folder");
+        f.add_program("Files", "drive");
         f.add_program("Run", "term");
         let files = f.desktop.launcher_frame(0).unwrap();
         let run = f.desktop.launcher_frame(1).unwrap();
@@ -2095,7 +2313,7 @@ mod tests {
     #[test]
     fn the_start_panel_lists_and_starts_programs() {
         let mut f = Fixture::new();
-        f.add_program("Files", "folder");
+        f.add_program("Files", "drive");
         f.add_program("Run", "term");
         f.add_program("About", "info");
         assert!(!f.desktop.start_is_open());
@@ -2118,8 +2336,13 @@ mod tests {
         for pair in rows.windows(2) {
             assert_eq!(pair[1].y, pair[0].bottom());
         }
-        for row in &rows {
+        // The first is the one Enter would start: filled with the accent,
+        // its name in white. The others are plain.
+        assert!(f.count(rows[0], theme.accent) > 1000);
+        assert!(f.count(rows[0], theme.on_accent) > 10);
+        for row in &rows[1..] {
             assert!(f.count(*row, theme.text) > 10, "{row:?}");
+            assert_eq!(f.count(*row, theme.accent), 0);
         }
         let panel = f.desktop.start_panel();
         assert!(panel.bottom() < H as i32 - TASKBAR_HEIGHT && panel.y > 0);
@@ -2130,7 +2353,7 @@ mod tests {
         assert_eq!(f.count(rows[0], theme.accent), 0);
         // Keys do not reach programs while the panel is open.
         f.open("w", RED);
-        f.desktop.key(0x61);
+        f.desktop.key(0x101);
         assert!(f.log.borrow().keys.is_empty());
 
         // Choosing a row starts that program and closes the panel.
@@ -2176,7 +2399,7 @@ mod tests {
     #[test]
     fn what_the_pointer_is_over_is_shown() {
         let mut f = Fixture::new();
-        f.add_program("Files", "folder");
+        f.add_program("Files", "drive");
         let id = f.open("w", RED);
         f.move_to(700, 300);
         f.render();
@@ -2234,7 +2457,7 @@ mod tests {
     #[test]
     fn themes_change_every_colour_and_reach_the_apps() {
         let mut f = Fixture::new();
-        f.add_program("Files", "folder");
+        f.add_program("Files", "drive");
         let id = f.open("Files", RED);
         f.move_to(700, 300);
         f.render();
@@ -2245,7 +2468,8 @@ mod tests {
         f.desktop.set_theme(dark);
         assert_eq!(f.render(), Rect::new(0, 0, W as i32, H as i32));
         assert_eq!(f.log.borrow().modes.last(), Some(&Mode::Dark));
-        assert_eq!(f.pixel(0, 0), dark.wallpaper[0]);
+        assert_eq!(f.pixel(0, 0), wallpaper_at(&dark, W as i32, H as i32, 0, 0));
+        assert_ne!(f.pixel(0, 0), light.pixel(0, 0).unwrap());
         let frame = f.desktop.window_frame(id).unwrap();
         assert_eq!(f.pixel(frame.x + frame.w / 2, frame.y + 4), dark.chrome);
         let bar = f.desktop.windows[0].title_bar();
@@ -2303,7 +2527,7 @@ mod tests {
         // After any sequence of events, the incrementally updated image
         // must equal one painted from scratch.
         let mut f = Fixture::new();
-        f.add_program("a", "folder");
+        f.add_program("a", "drive");
         f.add_program("ticker", "clock");
         f.add_program("Other", "term");
         f.open("a", RED);
@@ -2350,11 +2574,17 @@ mod tests {
                         }
                     }
                 }
-                _ => {
-                    if next(8) == 0 {
-                        f.desktop.set_theme(themes[next(3) as usize]);
-                    }
-                }
+                _ => match next(8) {
+                    0 => f.desktop.set_theme(themes[next(3) as usize]),
+                    1 => f
+                        .desktop
+                        .set_alignment([Alignment::Left, Alignment::Centre][next(2) as usize]),
+                    // Typed into the Start panel when it is open.
+                    2 | 3 => f
+                        .desktop
+                        .key([0x74, 0x69, 127, 0x102, 0x101, 13][next(6) as usize]),
+                    _ => {}
+                },
             }
             f.render();
             if step % 25 == 0 {
@@ -2363,5 +2593,237 @@ mod tests {
             }
         }
         assert!(!f.desktop.quit_requested());
+    }
+
+    #[test]
+    fn typing_in_the_start_panel_searches_and_enter_starts() {
+        let mut f = Fixture::new();
+        for (label, icon) in [
+            ("Files", "drive"),
+            ("Run", "term"),
+            ("Scribble", "brush"),
+            ("Clock", "clock"),
+        ] {
+            f.add_program(label, icon);
+        }
+        f.click_in(f.desktop.start_button());
+        f.move_to(700, 100);
+        assert_eq!(f.desktop.start_query(), "");
+        assert_eq!(f.desktop.start_matches(), [0, 1, 2, 3]);
+        f.render();
+        let empty = f.surface.clone();
+
+        // Typing narrows the list, whatever the case of the letters.
+        f.desktop.key(i32::from(b'C'));
+        assert_eq!(f.desktop.start_query(), "C");
+        assert_eq!(f.desktop.start_matches(), [2, 3], "Scribble and Clock");
+        assert!(f.desktop.start_item_frame(1).is_some());
+        assert_eq!(f.desktop.start_item_frame(2), None);
+        f.render();
+        let field = f.desktop.start_field();
+        assert!(
+            f.changed(field, &empty) > 30,
+            "the field shows what was typed"
+        );
+        f.desktop.key(i32::from(b'l'));
+        assert_eq!(f.desktop.start_matches(), [3]);
+        // Nothing matches: the list says so and Enter starts nothing.
+        f.desktop.key(i32::from(b'x'));
+        assert!(f.desktop.start_matches().is_empty());
+        f.render();
+        // Backspace takes a letter away again.
+        f.desktop.key(127);
+        assert_eq!(f.desktop.start_query(), "Cl");
+        // Enter starts the program listed first, and closes the panel.
+        f.desktop.key(13);
+        assert_eq!(f.log.borrow().launched, ["Clock"]);
+        assert!(!f.desktop.start_is_open());
+
+        // Opened again, the field is empty; the arrows choose.
+        f.click_in(f.desktop.start_button());
+        assert_eq!(f.desktop.start_query(), "");
+        f.desktop.key(0x102);
+        f.desktop.key(0x102);
+        f.desktop.key(0x101);
+        f.desktop.key(13);
+        assert_eq!(f.log.borrow().launched, ["Clock", "Run"]);
+        // The arrows stop at the ends of the list.
+        f.click_in(f.desktop.start_button());
+        for _ in 0..10 {
+            f.desktop.key(0x102);
+        }
+        f.desktop.key(13);
+        assert_eq!(f.log.borrow().launched.last(), Some(&"Clock"));
+        f.click_in(f.desktop.start_button());
+        f.desktop.key(0x101);
+        f.desktop.key(13);
+        assert_eq!(f.log.borrow().launched.last(), Some(&"Files"));
+
+        // A click in the list starts the program in that row of what is
+        // listed, not of all programs.
+        f.click_in(f.desktop.start_button());
+        f.desktop.key(i32::from(b'r'));
+        assert_eq!(f.desktop.start_matches(), [1, 2], "Run and Scribble");
+        let second = f.desktop.start_item_frame(1).unwrap();
+        f.click_in(second);
+        assert_eq!(f.log.borrow().launched.last(), Some(&"Scribble"));
+        // A click in the field keeps the panel open; Enter on an empty
+        // list just closes it; very long input is cut off.
+        f.click_in(f.desktop.start_button());
+        f.click_in(f.desktop.start_field());
+        assert!(f.desktop.start_is_open());
+        for _ in 0..100 {
+            f.desktop.key(i32::from(b'z'));
+        }
+        assert_eq!(f.desktop.start_query().len(), 32);
+        let before = f.log.borrow().launched.len();
+        f.desktop.key(13);
+        assert!(!f.desktop.start_is_open());
+        assert_eq!(f.log.borrow().launched.len(), before);
+        // With no windows of probes open, no key ever reached a program.
+        assert!(f.log.borrow().keys.is_empty());
+    }
+
+    #[test]
+    fn the_task_bar_icons_can_sit_in_the_middle() {
+        let mut f = Fixture::new();
+        f.add_program("Files", "drive");
+        f.add_program("Run", "term");
+        f.add_program("About", "info");
+        let left: Vec<Rect> = (0..3)
+            .map(|i| f.desktop.launcher_frame(i).unwrap())
+            .collect();
+        f.move_to(700, 300);
+        f.render();
+        assert_eq!(f.desktop.alignment(), Alignment::Left);
+
+        f.desktop.set_alignment(Alignment::Centre);
+        let centre: Vec<Rect> = (0..3)
+            .map(|i| f.desktop.launcher_frame(i).unwrap())
+            .collect();
+        // The group is centred on the screen; the Start mark stays put.
+        assert_eq!(
+            centre[0].x + (centre[2].right() - centre[0].x) / 2,
+            W as i32 / 2
+        );
+        assert_eq!(centre[1].x - centre[0].x, left[1].x - left[0].x);
+        assert_eq!(f.desktop.start_button().x, 10);
+        assert_eq!(f.render(), f.desktop.taskbar());
+        // The icons are drawn where they now are, and clicks follow.
+        let theme = *f.desktop.theme();
+        assert!(f.count(centre[0], theme.text) > 10);
+        assert_eq!(f.count(left[1], theme.text), 0);
+        f.click_in(centre[1]);
+        assert_eq!(f.log.borrow().launched, ["Run"]);
+        f.click_in(left[0]);
+        assert_eq!(f.log.borrow().launched.len(), 1);
+        // Setting it again changes nothing.
+        f.move_to(700, 300);
+        f.render();
+        f.desktop.set_alignment(Alignment::Centre);
+        assert!(f.render().is_empty());
+        // With more icons than fit in the middle they start after the
+        // Start mark rather than under it.
+        let mut narrow = Desktop::new(300, 200);
+        for _ in 0..6 {
+            narrow.add_launcher("x", "doc", |_| {});
+        }
+        narrow.set_alignment(Alignment::Centre);
+        assert!(narrow.launcher_frame(0).unwrap().x >= narrow.start_button().right());
+    }
+
+    #[test]
+    fn an_app_can_change_the_theme_and_the_alignment() {
+        struct Chooser;
+        impl App for Chooser {
+            fn title(&self) -> &str {
+                "Chooser"
+            }
+            fn draw(&mut self, _: &mut Canvas<'_>, _: i32, _: i32, _: &Theme) {}
+            fn key(&mut self, code: i32, context: &mut Context) {
+                match code {
+                    0x64 => context.set_theme(Theme::new(Mode::Dark, Accent::Violet)),
+                    0x63 => context.set_alignment(Alignment::Centre),
+                    _ => {}
+                }
+            }
+        }
+        let mut f = Fixture::new();
+        f.desktop.open(Box::new(Chooser), 200, 100);
+        f.render();
+        f.desktop.key(0x64);
+        assert_eq!(f.desktop.theme().mode, Mode::Dark);
+        assert_eq!(f.desktop.theme().accent_name, Accent::Violet);
+        assert_eq!(f.render(), Rect::new(0, 0, W as i32, H as i32));
+        f.desktop.key(0x63);
+        assert_eq!(f.desktop.alignment(), Alignment::Centre);
+    }
+
+    #[test]
+    fn programs_with_a_picture_of_their_own_show_it() {
+        let mut f = Fixture::new();
+        // "files" has a picture in the design system; "info" has only a
+        // line icon.
+        f.add_program("Files", "files");
+        f.add_program("About", "info");
+        f.move_to(700, 300);
+        f.render();
+        let theme = *f.desktop.theme();
+        let files = f.desktop.launcher_frame(0).unwrap();
+        let about = f.desktop.launcher_frame(1).unwrap();
+        // The folder's yellows, and no line icon drawn over them.
+        let yellow = |area: Rect| {
+            (area.y..area.bottom())
+                .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let p = f.pixel(x, y);
+                    (p >> 16) > 0xD0 && ((p >> 8) & 0xFF) > 0x90 && (p & 0xFF) < 0xA0
+                })
+                .count()
+        };
+        assert!(yellow(files) > 150, "{}", yellow(files));
+        assert_eq!(f.count(files, theme.text), 0);
+        assert_eq!(yellow(about), 0);
+        assert!(f.count(about, theme.text) > 10);
+        // The picture is centred in its button, and is the picture.
+        let picture = art::icon("files", 30).unwrap();
+        let (colour, alpha) = picture.pixel(15, 20);
+        assert_eq!(alpha, 255);
+        assert_eq!(f.pixel(files.x + 6 + 15, files.y + 6 + 20), colour);
+    }
+
+    #[test]
+    fn the_wallpaper_is_the_picture_for_the_mode_scaled_to_the_screen() {
+        let mut f = Fixture::new();
+        f.move_to(400, 590);
+        f.render();
+        let light = Theme::default();
+        let picture = art::wallpaper(Mode::Light).unwrap();
+        // Every pixel above the task bar that the pointer does not cover.
+        for y in (0..H as i32 - TASKBAR_HEIGHT).step_by(7) {
+            for x in (0..W as i32).step_by(11) {
+                assert_eq!(
+                    f.pixel(x, y),
+                    picture.scaled(W as i32, H as i32, x, y),
+                    "({x}, {y})"
+                );
+            }
+        }
+        // The top-left corner is the picture's (it is cut at the sides
+        // or top and bottom only if the shapes differ: 800 x 600 is
+        // squarer than the picture, so the sides are cut).
+        assert_eq!(
+            f.wallpaper(400, 0),
+            picture.scaled(W as i32, H as i32, 400, 0)
+        );
+        let dark = Theme::new(Mode::Dark, Accent::Blue);
+        f.desktop.set_theme(dark);
+        f.render();
+        let dusk = art::wallpaper(Mode::Dark).unwrap();
+        assert_eq!(f.pixel(100, 100), dusk.scaled(W as i32, H as i32, 100, 100));
+        assert_ne!(
+            wallpaper_at(&light, 64, 48, 10, 10),
+            wallpaper_at(&dark, 64, 48, 10, 10)
+        );
     }
 }

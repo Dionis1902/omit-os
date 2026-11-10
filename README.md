@@ -44,11 +44,13 @@ narrow each of those is, and what has been tested.
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
 
 Typing `desktop` at the prompt starts a small graphical desktop, drawn to
-the project's own design system (a first stage of it; see ADR 0023). In
-this screenshot, taken from QEMU by the automated test, the Run window
-has just been opened from the task bar:
+the project's own design system (two stages of it so far; see ADR 0023).
+These screenshots are taken from QEMU by the automated test: the Files
+window in front of others, and Settings just after "Dark" was chosen:
 
-![Omit OS desktop: task bar with the Start mark and program icons, and the Run window in front of the About window](docs/screenshot-desktop.png)
+![Omit OS desktop in light mode: the Files window listing the programs, over the Settings, About and Run windows](docs/screenshot-desktop.png)
+
+![Omit OS desktop in dark mode: the Settings window, Look & feel](docs/screenshot-desktop-dark.png)
 
 Programs can have windows of their own — including Windows programs.
 Here `wingui.exe`, an ordinary PE executable using `USER32.dll` and
@@ -326,7 +328,7 @@ machine.
 | PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
-| Desktop (`/bin/desktop`), drawn to the project's design system: rounded windows with shadows that can be moved, resized by a corner, minimised and maximised; a task bar with the Start mark, program icons and a clock; a Start panel; file browser, text viewer, program runner; the Inter typeface; light and dark colours with six accents | Working; the QEMU test opens windows from the task bar, types commands, runs a native and a Windows program, drags a window, maximises, minimises and restores it, and ends the desktop from the Start panel, checking screenshots. Resizing by the corner and the dark mode are tested on the host only. **A first stage: most screens of the design do not exist yet, and there is no way to choose the mode or accent.** See ADR 0023 |
+| Desktop (`/bin/desktop`), drawn to the project's design system: rounded windows with shadows that can be moved, resized by a corner, minimised and maximised; a task bar with the Start mark, program icons and a clock; a Start panel with search; a file manager, text viewer, program runner and Settings (light or dark, six accent colours, task bar alignment); the design's wallpapers, icons and typeface | Working; the QEMU test opens windows from the task bar, types commands, runs a native and a Windows program, drags a window, maximises, minimises and restores it, switches to dark mode and back in Settings, opens a folder in Files, and ends the desktop from the Start panel, checking screenshots. Resizing by the corner is tested on the host only. **Two stages of the design: most of its screens do not exist yet, and what Settings chooses is not remembered.** See ADR 0023 |
 | Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
 | Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (an average of about 8 ms in a release build with the current drawing code; see ADRs 0013 and 0023). No frame pacing: the display has no vertical-blank signal |
 | A terminal emulator, resizable windows for other programs, minimising, graphics modes | Not started |
@@ -540,7 +542,7 @@ checks both QEMU's exit status and the serial log:
 | `calibrate-with-pm-timer` | The clocks are measured against the ACPI power-management timer instead of the PIT (as on a machine without a working PIT); the other clock serves as a check, and the date and a program run |
 | `usb-keyboard-behind-hubs` | The same with the keyboard behind a USB hub and the mouse behind a second hub plugged into the first |
 | `usb-keyboard` | PS/2 devices switched off (`nops2`): the xHCI driver finds a USB keyboard and mouse, and a command typed on the USB keyboard runs |
-| `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, maximising, minimising to the task bar and back, the Start panel, exit. The second variant uses USB input only |
+| `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, maximising, minimising to the task bar and back, dark mode through Settings, a folder opened in Files, the Start panel, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
 | `install-to-sata` | The same on a SATA disk, with the native AHCI driver |
@@ -564,8 +566,8 @@ Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
 **Next steps**, in no promised order: on the desktop, the next screens of
-the design system (Settings with mode and accent, the full Files window,
-arranging and switching windows), resizing for the windows of other
+the design system (arranging and switching windows, the rest of Files,
+remembering settings), resizing for the windows of other
 programs and a terminal as a separate program; for Windows programs, what a C
 runtime needs before any existing program can start (static thread-local
 storage, exception handling, a much larger part of the API); for

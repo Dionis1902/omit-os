@@ -26,17 +26,18 @@ There are no third-party icons, cursors, sounds, images or wallpapers.
 | Asset | Path in repository | Author | Licence | Notes |
 | --- | --- | --- | --- | --- |
 | Screenshot of the console | `docs/screenshot.png` | Omit OS contributors | CC-BY-SA-4.0 | original work: taken from the system running in QEMU |
-| Screenshot of the desktop | `docs/screenshot-desktop.png` | Omit OS contributors | CC-BY-SA-4.0 | original work, as above |
+| Screenshots of the desktop, in light and in dark mode | `docs/screenshot-desktop.png`, `docs/screenshot-desktop-dark.png` | Omit OS contributors | CC-BY-SA-4.0 | original work, as above |
 | Screenshot of a graphical Windows test program on the desktop | `docs/screenshot-windows-gui.png` | Omit OS contributors | CC-BY-SA-4.0 | original work; the program shown is `compat/windows/samples/src/bin/wingui.rs`, written for this project |
 | The interface's glyph icons (about fifty line drawings on a 24-unit grid) and the Start mark, from the Omit OS design system | `libs/gfx/icons/icons.json` (the drawings, as paths), `libs/gfx/icons/glyphs.omi` (drawn at 13, 16, 20 and 24 px by `tools/gen-icons.js`) | Omit OS contributors: designed by the maintainer in the project's design system | MIT OR Apache-2.0, as the library they are built into | original work |
-| The desktop's wallpaper | a gradient computed by `libs/gfx/src/desktop.rs` from three colours of the design system; there is no image file | Omit OS contributors | the licence of that code | original work |
+| The wallpapers "Dawn" (light mode) and "Dusk" (dark mode), from the Omit OS design system | drawings: `libs/gfx/art/wallpaper-dawn.svg`, `libs/gfx/art/wallpaper-dusk.svg`; drawn small for scaling up by `tools/gen-art.js`: `libs/gfx/art/wallpaper-dawn.omp`, `libs/gfx/art/wallpaper-dusk.omp` | Omit OS contributors: designed by the maintainer in the project's design system | CC-BY-SA-4.0 | original work |
+| The icons of the programs (Files, Terminal, Settings, Clock, Canvas, Player, Notes) and of a folder, from the Omit OS design system | drawings: `libs/gfx/art/app-canvas.svg`, `libs/gfx/art/app-clock.svg`, `libs/gfx/art/app-files.svg`, `libs/gfx/art/app-notes.svg`, `libs/gfx/art/app-player.svg`, `libs/gfx/art/app-settings.svg`, `libs/gfx/art/app-terminal.svg`, `libs/gfx/art/folder.svg`; drawn at 20 and 30 px by `tools/gen-art.js`: `libs/gfx/art/app-canvas-20.omp`, `libs/gfx/art/app-canvas-30.omp`, `libs/gfx/art/app-clock-20.omp`, `libs/gfx/art/app-clock-30.omp`, `libs/gfx/art/app-files-20.omp`, `libs/gfx/art/app-files-30.omp`, `libs/gfx/art/app-notes-20.omp`, `libs/gfx/art/app-notes-30.omp`, `libs/gfx/art/app-player-20.omp`, `libs/gfx/art/app-player-30.omp`, `libs/gfx/art/app-settings-20.omp`, `libs/gfx/art/app-settings-30.omp`, `libs/gfx/art/app-terminal-20.omp`, `libs/gfx/art/app-terminal-30.omp`, `libs/gfx/art/folder-20.omp`, `libs/gfx/art/folder-30.omp` | Omit OS contributors: designed by the maintainer in the project's design system | CC-BY-SA-4.0 | original work |
 | Window decorations, task bar, mouse pointer, the drawings in the bundled programs | drawn by code in `libs/gfx/` and `userspace/programs/` | Omit OS contributors | the licence of that code (see `COPYING`) | original work; there are no image files |
 | Windows test programs and libraries (`*.exe`, `*.dll` on the system image) | built from `compat/windows/samples/`; no binaries in the repository | Omit OS contributors | MIT OR Apache-2.0 | original work, written against the public Windows API documentation |
 
 The Start mark — a ring with one segment omitted and the dot that is
 left — serves as the project's mark on the task bar; see
-[`TRADEMARKS.md`](TRADEMARKS.md). The project has no wallpaper image or
-sound yet. When it gets one it is
+[`TRADEMARKS.md`](TRADEMARKS.md). The project has no sounds yet. When
+it gets some, or more artwork, it is
 listed here, as original work under CC-BY-SA-4.0 unless stated
 otherwise; the name and logo are also covered by
 [`TRADEMARKS.md`](TRADEMARKS.md), which a copyright licence does not

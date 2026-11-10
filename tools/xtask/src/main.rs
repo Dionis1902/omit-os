@@ -2163,7 +2163,9 @@ impl<'a> Mouse<'a> {
 
 /// Labels of the programs on the desktop's task bar; must match
 /// `userspace/programs/src/bin/desktop/main.rs`.
-const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Pop"];
+const DESKTOP_LAUNCHERS: &[&str] = &[
+    "Files", "Run", "Settings", "About", "Scribble", "Clock", "Pop",
+];
 
 /// Operates the graphical desktop, which the caller has just started from
 /// the serial console, and checks what it shows:
@@ -2236,6 +2238,8 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         Some((frame.x + frame.w / 2, frame.y + frame.h / 2))
     };
     let (run_x, run_y) = button("Run").ok_or("no Run button")?;
+    let (settings_x, settings_y) = button("Settings").ok_or("no Settings button")?;
+    let (files_x, files_y) = button("Files").ok_or("no Files button")?;
     debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
     let start = layout.start_button();
     let (start_x, start_y) = (start.x + start.w / 2, start.y + start.h / 2);
@@ -2643,6 +2647,111 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                 && title(image, "Run")
         },
     )?;
+
+    // Settings: the seventh window. Choosing "Dark" repaints everything
+    // at once — the wallpaper becomes the dusk picture and the window's
+    // own title is written light on dark — and "Light" puts it back.
+    {
+        use omit_gfx::settings::{self, Choice};
+        use omit_gfx::theme::{Accent, Mode, Theme};
+        let window = layout.open(Box::new(Blank), settings::SIZE.0, settings::SIZE.1);
+        let frame = layout
+            .window_frame(window)
+            .ok_or("no frame for the Settings window")?;
+        let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+        let middle_of = |choice| {
+            let area = settings::control(choice);
+            (left + area.x + area.w / 2, top + area.y + area.h / 2)
+        };
+        mouse.click(settings_x, settings_y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the Settings window", patience, |image| {
+            title(image, "Settings")
+                && screen_writes(image, "Look & feel", SEMIBOLD_20, theme.text, theme.window)
+        })?;
+        let dark = Theme::new(Mode::Dark, Accent::Blue);
+        let far = (image.width - 10, 100usize);
+        let (x, y) = middle_of(Choice::Mode(Mode::Dark));
+        mouse.click(x, y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the desktop in dark mode", patience, |image| {
+            image.pixel(far.0, far.1)
+                == rgb(wallpaper_at(
+                    &dark,
+                    image.width as i32,
+                    image.height as i32,
+                    far.0 as i32,
+                    far.1 as i32,
+                ))
+                && screen_writes(image, "Settings", MEDIUM_13, dark.text, dark.chrome)
+                && screen_writes(image, "Look & feel", SEMIBOLD_20, dark.text, dark.window)
+        })?;
+        // Kept next to the serial log: the desktop in dark mode.
+        let _ = fs::copy(
+            &check.screenshot,
+            check.screenshot.with_extension("dark.ppm"),
+        );
+        let (x, y) = middle_of(Choice::Mode(Mode::Light));
+        mouse.click(x, y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(
+            check,
+            "the desktop in light mode again",
+            patience,
+            |image| {
+                image.pixel(far.0, far.1) == wallpaper(image, far.0, far.1)
+                    && title(image, "Settings")
+            },
+        )?;
+    }
+
+    // Files: the eighth window. It lists the top folder; a click on the
+    // first row (`bin`: folders come first) selects it and a second
+    // click opens it.
+    {
+        use omit_gfx::files::{self, Entry, Files, Storage};
+        use omit_gfx::font::REGULAR_13;
+        // Only the geometry is asked of this copy: any folder with a
+        // first row will do.
+        struct OneFolder;
+        impl Storage for OneFolder {
+            fn list(&mut self, _: &str) -> std::result::Result<Vec<Entry>, String> {
+                Ok(vec![Entry {
+                    name: "bin".into(),
+                    is_dir: true,
+                    size: 0,
+                }])
+            }
+        }
+        let geometry = Files::new(OneFolder, Vec::new(), "/", Box::new(|_, _| {}));
+        let row = geometry.row_frame(0).ok_or("no first row in Files")?;
+        let window = layout.open(Box::new(Blank), files::SIZE.0, files::SIZE.1);
+        let frame = layout
+            .window_frame(window)
+            .ok_or("no frame for the Files window")?;
+        let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+        mouse.click(files_x, files_y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the Files window", patience, |image| {
+            title(image, "Files — Computer")
+                && screen_writes(image, "Programs", REGULAR_13, theme.text, theme.chrome)
+                && screen_writes(image, "bin", REGULAR_13, theme.text, theme.window)
+        })?;
+        let (x, y) = (left + row.x + row.w / 2, top + row.y + row.h / 2);
+        mouse.click(x, y)?;
+        mouse.click(x, y)?;
+        mouse.move_to(20, 300)?;
+        let saved = wait_for_screen(check, "the folder bin in Files", patience, |image| {
+            title(image, "Files — bin")
+                && screen_writes(image, "fetch", REGULAR_13, theme.text, theme.window)
+        })?;
+        let _ = saved;
+        // Kept next to the serial log: the desktop with Files in front.
+        let _ = fs::copy(
+            &check.screenshot,
+            check.screenshot.with_extension("files.ppm"),
+        );
+    }
 
     // The Start mark opens the list of programs; the row under the
     // pointer is filled with the accent colour. Its power button ends

@@ -84,7 +84,7 @@ ASSET_SUFFIXES = (
     ".cur", ".ani", ".ttf", ".otf", ".ttc", ".woff", ".woff2", ".fon", ".pcf",
     ".bdf", ".psf", ".wav", ".mp3", ".ogg", ".flac", ".mid", ".exe", ".dll",
     # This project's own formats for ready-drawn fonts and icons.
-    ".omf", ".omi",
+    ".omf", ".omi", ".omp",
 )  # fmt: skip
 TEXT_LIMIT = 2 << 20
 

@@ -1,6 +1,6 @@
 # ADR 0023: The desktop follows the Omit OS design system
 
-- Status: accepted (first stage implemented)
+- Status: accepted (two stages implemented)
 - Date: 2026-11-10
 
 ## Context
@@ -48,11 +48,22 @@ this ADR records how the system implements it and how far it has got.
   bar with the program's icon, and one capsule holding minimise,
   maximise and close; close turns red under the pointer), minimising,
   a Start panel listing the programs, the wallpaper, and the restyled
-  Files, About and Run windows.
+  About and Run windows. The second: the design's pictures — its two
+  wallpapers and the programs' icons, kept as the vector drawings they
+  are (`libs/gfx/art/`) and drawn by `tools/gen-art.js`, the icons at
+  the sizes used and the wallpapers small, to be scaled up to the
+  screen once per mode; **Settings**, "Look & feel" (light or dark,
+  the accent colour, task bar icons at the left or in the middle, each
+  applied at once); a search field in the Start panel (typing narrows
+  the list, the arrows choose, Enter starts); and a new **Files**
+  window (back and up, the path as names that can be clicked, a
+  sidebar of places, a list with sizes and kinds). Settings, Files and
+  the controls they are made of (segmented control, swatch, card,
+  switch) live in the library, where they are host-tested.
 
 ## What works
 
-- 51 host tests in `libs/gfx`: the font and icon files (every
+- 79 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -66,7 +77,10 @@ this ADR records how the system implements it and how far it has got.
   type, programs started from the task bar, a window minimised and
   brought back from its icon, maximised and restored, dragged, the
   Start panel with the row under the pointer in the accent colour, and
-  the power button ending the desktop.
+  the power button ending the desktop; and, since the second stage,
+  dark mode chosen in Settings (the wallpaper becomes the dusk picture
+  and titles are written light on dark) and back, and a folder opened
+  in Files.
 
 ## Cost
 
@@ -79,19 +93,22 @@ halved that.) Debug builds are slower by the same factor as before.
 ## Not yet, and differences from the design
 
 - **Most of the design's screens**: lock screen and sign-in (there are
-  no users yet), search, the full Files window (tabs, sidebar, preview,
-  context menu, Recycle Bin), arranging windows side by side, the
-  window switcher, the quick panel and notifications, Settings, System
-  Monitor, calculator, Market. The Start panel is a plain list, not
-  the design's variant with search, favourites and an index.
-- **There is no way yet to choose the mode or accent**: both exist and
-  are tested, but need the Settings window. The desktop starts in
-  light mode with the blue accent.
-- **Glass is tinted, not blurred**, and nothing is animated.
-- **Program icons are the line icons**, in the text colour, where the
-  design shows a coloured picture per program; and the **wallpaper is a
-  gradient** in the design's colours, not its picture. The design's
-  pictures have not been brought into the repository.
+  no users yet), the separate search screen, arranging windows side by
+  side, the window switcher, the quick panel and notifications, System
+  Monitor, calculator, Market; all pages of Settings but one. In
+  Files: tabs, search, the preview pane, the context menu, renaming,
+  deleting and the Recycle Bin, sorting, and scrolling with the mouse
+  (there are no wheel events yet); a row is opened by clicking it a
+  second time, at any interval, where the design means a double click.
+  The Start panel has the design's search but not its favourites row
+  or letter index.
+- **What Settings chooses is not remembered**: every start of the
+  desktop is light and blue again.
+- **Glass is tinted, not blurred** (and the Start panel nearly opaque,
+  to stay readable without blur), and nothing is animated.
+- Two programs have no picture in the design and keep line icons
+  (About and the game); the wallpaper is scaled up from 320 x 180
+  pixels, which suits its soft shapes but is not sharp.
 - Corners are circular arcs, where the design asks for continuous
   ("superellipse") corners.
 - The status icons of the design's task bar (language, network, volume,

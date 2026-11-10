@@ -51,6 +51,18 @@ Which licence applies where
       README.md, docs/, this file, CONTRIBUTING.md, TRADEMARKS.md,
       IP_POLICY.md, PROVENANCE.md
 
+  Artwork — CC-BY-SA-4.0
+      libs/gfx/art/           the wallpapers and the programs' icons.
+                              They sit in the directory of an SDK library
+                              and are built into it, but they are not
+                              under its licence: a program that uses the
+                              library's window manager, or these pictures
+                              directly, carries them and their terms.
+                              (The interface's line icons, libs/gfx/icons/,
+                              are part of the SDK: MIT OR Apache-2.0.)
+      libs/gfx/fonts/         the Inter typeface as bitmap fonts: SIL
+                              Open Font License 1.1 (see ATTRIBUTION.md)
+
   Third-party material keeps its own licence. The console and desktop
   font is Noto Sans Mono (SIL Open Font License 1.1), which comes in
   through the noto-sans-mono-bitmap crate and is not stored in this
