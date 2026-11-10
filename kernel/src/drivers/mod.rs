@@ -6,5 +6,7 @@ pub mod ahci;
 pub mod block;
 pub mod nvme;
 pub mod registry;
+pub mod virtio;
 pub mod virtio_blk;
+pub mod virtio_net;
 pub mod xhci;

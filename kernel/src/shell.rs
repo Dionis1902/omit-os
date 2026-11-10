@@ -266,6 +266,24 @@ impl Host for KernelHost {
         process::kill(pid)
     }
 
+    fn network(&mut self) -> Vec<String> {
+        crate::net::describe()
+    }
+
+    fn ping(
+        &mut self,
+        address: omit_net::Ipv4Addr,
+        sequence: u16,
+    ) -> Result<omit_shell::PingReply, String> {
+        crate::net::ping(address, sequence)
+            .map(|reply| omit_shell::PingReply {
+                micros: reply.micros,
+                ttl: reply.ttl,
+                bytes: reply.bytes,
+            })
+            .map_err(|error| format!("{error}"))
+    }
+
     fn now(&mut self) -> Option<i64> {
         crate::time::realtime_us().map(|micros| (micros / 1_000_000) as i64)
     }

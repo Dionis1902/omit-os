@@ -1581,6 +1581,67 @@ const BOOT_TESTS: &[BootTest] = &[
         sata: false,
         no_serial: false,
     },
+    // A VirtIO network card on QEMU's built-in user-mode network, which
+    // has a DHCP server and a gateway at 10.0.2.2 that answers echo
+    // requests itself. The test only talks to that gateway, so nothing
+    // leaves the machine it runs on.
+    BootTest {
+        name: "network",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] virtio-net: 52:54:00:12:34:56 is eth0",
+            "[INFO ] net: eth0: address 10.0.2.15/24, router 10.0.2.2, name server 10.0.2.3 (DHCP)",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("lsdrv", "native     virtio-net\n"),
+            (
+                "lspci",
+                " 1af4:1041 VirtIO network device [native driver: virtio-net]\n",
+            ),
+            (
+                "ifconfig",
+                "\neth0: virtio-net, hardware address 52:54:00:12:34:56\n    address 10.0.2.15/24, router 10.0.2.2, name server 10.0.2.3\n    frames: ",
+            ),
+            // The gateway: found by ARP, then asked three times.
+            ("ping 10.0.2.2", "\n3 sent, 3 received\n"),
+            (
+                "ifconfig",
+                "\n    neighbour 10.0.2.2 is at 52:55:0a:00:02:02\n",
+            ),
+            (
+                "ping 10.0.2.2 1",
+                "\n32 bytes from 10.0.2.2: seq=1 ttl=255 time=",
+            ),
+            // An address on the local network that nobody has.
+            (
+                "ping 10.0.2.99 1",
+                "\nseq=1: unreachable: nobody on the local network answers for it\n1 sent, 0 received\nping: no answer from 10.0.2.99\n",
+            ),
+            (
+                "ping 10.0.2.15 1",
+                "\nseq=1: that is this machine's own address, which cannot be pinged yet\n",
+            ),
+            // The disk on the other VirtIO device still works.
+            ("lsblk", "\nvda"),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[
+            "-netdev",
+            "user,id=net0",
+            "-device",
+            "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56",
+        ],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: false,
+    },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
     // that happens, which is distinct from the status of the kernel's own

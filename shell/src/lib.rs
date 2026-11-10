@@ -146,6 +146,24 @@ pub trait Host {
 
     /// Opens the filesystem on block device `device` for mounting.
     fn open_filesystem(&mut self, device: &str) -> Result<Box<dyn FileSystem>, String>;
+
+    /// Lines describing the network interface.
+    fn network(&mut self) -> Vec<String>;
+
+    /// Sends echo request number `sequence` to `address` and waits for
+    /// the reply.
+    fn ping(&mut self, address: omit_net::Ipv4Addr, sequence: u16) -> Result<PingReply, String>;
+}
+
+/// An answer to an echo request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PingReply {
+    /// How long the answer took, in microseconds.
+    pub micros: u64,
+    /// Hops the reply had left when it arrived.
+    pub ttl: u8,
+    /// Bytes of data that came back.
+    pub bytes: usize,
 }
 
 /// Memory usage figures for `free`, in KiB.
@@ -190,7 +208,7 @@ type CommandResult = Result<(), Failure>;
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
     "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
-    "devattr", "watchdog", "install", "cmp", "date",
+    "devattr", "watchdog", "install", "cmp", "date", "ifconfig", "ping",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -248,6 +266,8 @@ Built-in commands:
   kill PID             terminate a process
   free                 show memory usage
   date                 show the date and time (UTC)
+  ifconfig             show the network interface and its addresses
+  ping ADDRESS [COUNT] send echo requests to an IPv4 address (default: 3)
   lspci                list PCI devices
   lsblk                list block devices
   lsdrv                list drivers and the devices they control
@@ -577,6 +597,53 @@ impl Shell {
                 Ok(())
             }
             _ if !BUILTINS.contains(&name) => Err(Failure(NOT_BUILTIN.into())),
+            "ifconfig" => {
+                if !args.is_empty() {
+                    return Err(Failure("usage: ifconfig".into()));
+                }
+                for line in host.network() {
+                    writeln!(out, "{line}")?;
+                }
+                Ok(())
+            }
+            "ping" => {
+                const USAGE: &str = "usage: ping ADDRESS [COUNT]";
+                let (target, count) = match args {
+                    [target] => (target, 3),
+                    [target, count] => match count.parse::<u16>() {
+                        Ok(count @ 1..=100) => (target, count),
+                        _ => return Err(Failure("COUNT must be between 1 and 100".into())),
+                    },
+                    _ => return Err(Failure(USAGE.into())),
+                };
+                let address = omit_net::Ipv4Addr::parse(target).ok_or_else(|| {
+                    Failure(format!(
+                        "{target}: not an IPv4 address (names cannot be looked up yet)"
+                    ))
+                })?;
+                let mut received = 0;
+                for sequence in 1..=count {
+                    match host.ping(address, sequence) {
+                        Ok(reply) => {
+                            received += 1;
+                            writeln!(
+                                out,
+                                "{} bytes from {address}: seq={sequence} ttl={} time={}.{:03} ms",
+                                reply.bytes,
+                                reply.ttl,
+                                reply.micros / 1000,
+                                reply.micros % 1000,
+                            )?;
+                        }
+                        Err(error) => writeln!(out, "seq={sequence}: {error}")?,
+                    }
+                }
+                writeln!(out, "{count} sent, {received} received")?;
+                if received == 0 {
+                    return Err(Failure(format!("no answer from {address}")));
+                }
+                Ok(())
+            }
             "date" => {
                 if !args.is_empty() {
                     return Err(Failure("usage: date".into()));
@@ -1133,6 +1200,7 @@ mod tests {
         spawned: Vec<(String, Vec<u8>)>,
         exit_status: i32,
         killed: Vec<u64>,
+        pinged: Vec<(omit_net::Ipv4Addr, u16)>,
         last_args: Vec<String>,
         last_cwd: String,
         last_stdout: Option<(String, bool)>,
@@ -1193,6 +1261,34 @@ mod tests {
 
         fn drivers(&mut self) -> Vec<String> {
             alloc::vec!["00:02.0  native     virtio-blk".into()]
+        }
+
+        fn network(&mut self) -> Vec<String> {
+            alloc::vec!["eth0: test, hardware address 02:00:00:00:00:01".into()]
+        }
+
+        fn ping(
+            &mut self,
+            address: omit_net::Ipv4Addr,
+            sequence: u16,
+        ) -> Result<PingReply, String> {
+            self.pinged.push((address, sequence));
+            // The gateway answers; one address loses every second
+            // request; nobody else is there.
+            match address.0 {
+                [10, 0, 2, 2] => Ok(PingReply {
+                    micros: 1234,
+                    ttl: 255,
+                    bytes: 32,
+                }),
+                [10, 0, 2, 3] if sequence % 2 == 1 => Ok(PingReply {
+                    micros: 20_007,
+                    ttl: 64,
+                    bytes: 32,
+                }),
+                [10, 0, 2, 3] => Err("no answer within a second".into()),
+                _ => Err("unreachable".into()),
+            }
         }
 
         fn device_attribute(
@@ -1856,6 +1952,65 @@ mod tests {
         assert_eq!(s.err("cmp /a /d"), "cmp: /a and /d differ at byte 1\n");
         assert_eq!(s.err("cmp /a /c"), "cmp: /a and /c differ at byte 4\n");
         assert!(s.err("cmp /a").contains("usage"));
+    }
+
+    #[test]
+    fn ifconfig_prints_what_the_system_reports() {
+        let mut s = Session::new();
+        assert_eq!(
+            s.ok("ifconfig"),
+            "eth0: test, hardware address 02:00:00:00:00:01\n"
+        );
+        assert_eq!(s.err("ifconfig eth0"), "ifconfig: usage: ifconfig\n");
+    }
+
+    #[test]
+    fn ping_reports_each_answer_and_a_summary() {
+        let mut s = Session::new();
+        assert_eq!(
+            s.ok("ping 10.0.2.2"),
+            "32 bytes from 10.0.2.2: seq=1 ttl=255 time=1.234 ms\n\
+             32 bytes from 10.0.2.2: seq=2 ttl=255 time=1.234 ms\n\
+             32 bytes from 10.0.2.2: seq=3 ttl=255 time=1.234 ms\n\
+             3 sent, 3 received\n"
+        );
+        let gateway = omit_net::Ipv4Addr([10, 0, 2, 2]);
+        assert_eq!(s.host.pinged, [(gateway, 1), (gateway, 2), (gateway, 3)]);
+        // Some lost: still a success, and the losses are shown.
+        assert_eq!(
+            s.ok("ping 10.0.2.3 4"),
+            "32 bytes from 10.0.2.3: seq=1 ttl=64 time=20.007 ms\n\
+             seq=2: no answer within a second\n\
+             32 bytes from 10.0.2.3: seq=3 ttl=64 time=20.007 ms\n\
+             seq=4: no answer within a second\n\
+             4 sent, 2 received\n"
+        );
+        // All lost: a failure.
+        assert_eq!(
+            s.err("ping 10.0.2.99 1"),
+            "seq=1: unreachable\n1 sent, 0 received\nping: no answer from 10.0.2.99\n"
+        );
+    }
+
+    #[test]
+    fn ping_refuses_what_it_cannot_do() {
+        let mut s = Session::new();
+        assert_eq!(s.err("ping"), "ping: usage: ping ADDRESS [COUNT]\n");
+        assert_eq!(
+            s.err("ping 1.2.3.4 5 6"),
+            "ping: usage: ping ADDRESS [COUNT]\n"
+        );
+        assert_eq!(
+            s.err("ping example.org"),
+            "ping: example.org: not an IPv4 address (names cannot be looked up yet)\n"
+        );
+        for count in ["0", "101", "many", "-1"] {
+            assert_eq!(
+                s.err(&format!("ping 10.0.2.2 {count}")),
+                "ping: COUNT must be between 1 and 100\n"
+            );
+        }
+        assert!(s.host.pinged.is_empty());
     }
 
     #[test]

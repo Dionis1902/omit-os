@@ -96,6 +96,8 @@ winrun --list        the Windows functions that are implemented
 ls /bin | tee /list  a pipeline (programs only; see `help`)
 lspci                hardware, with driver status
 lsblk                disks and partitions
+ifconfig             the network interface (VirtIO network cards only)
+ping 10.0.2.2        echo requests to an IPv4 address
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
                      machines provide, or USB); Exit or F12 returns to the
                      console
@@ -110,6 +112,13 @@ Windows support is a first step: programs run only if everything they
 import is among the implemented functions of `KERNEL32.dll`, `USER32.dll`
 and `GDI32.dll` (`winrun --list`). The programs on the image were written
 for it; existing Windows software does not run.
+
+Networking is a first step too: with a VirtIO network card (QEMU:
+`-netdev user,id=n -device virtio-net-pci,netdev=n`; VirtualBox: adapter
+type "Paravirtualized Network (virtio-net)") the system gets an address by
+DHCP, and `ifconfig` and `ping` work. There are no sockets, no TCP and no
+DNS yet, so programs cannot use the network, and no other network card
+has a driver. Only QEMU has been tried.
 
 On a real computer: the keyboard must be PS/2 (as built into many
 laptops) or USB. A serial port is not needed.

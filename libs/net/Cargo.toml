@@ -1,0 +1,12 @@
+[package]
+name = "omit-net"
+description = "Network protocol formats: Ethernet, ARP, IPv4, ICMP, UDP, DHCP (no_std)"
+version.workspace = true
+edition.workspace = true
+license = "GPL-2.0-only"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

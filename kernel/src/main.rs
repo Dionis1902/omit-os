@@ -23,6 +23,7 @@ mod install;
 mod linuxkpi;
 mod log;
 mod mm;
+mod net;
 mod panic;
 mod pci;
 mod pipe;
@@ -524,6 +525,17 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         }
         Ok(None) => info!("nvme: no controller"),
         Err(error) => warn!("nvme: cannot initialise controller: {error}"),
+    }
+    match drivers::virtio_net::init() {
+        Ok(Some(mac)) => {
+            info!("virtio-net: {mac} is eth0");
+            // Give DHCP a moment, so that the first commands typed find
+            // the network ready; without an answer it carries on in the
+            // background.
+            net::wait_for_address(2 * u64::from(time::TICK_HZ));
+        }
+        Ok(None) => info!("virtio-net: no device"),
+        Err(error) => warn!("virtio-net: cannot initialise device: {error}"),
     }
     match drivers::xhci::init() {
         Ok(Some(ports)) => info!("xhci: controller started, {ports} port(s)"),

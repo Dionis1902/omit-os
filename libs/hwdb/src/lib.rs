@@ -84,6 +84,10 @@ const VIRTIO_BLK: Support = Support::Native {
     driver: "virtio-blk",
 };
 
+const VIRTIO_NET: Support = Support::Native {
+    driver: "virtio-net",
+};
+
 /// Known devices, sorted by vendor then device ID.
 pub const DEVICES: &[DeviceInfo] = &[
     entry(
@@ -97,8 +101,8 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x1AF4,
         0x1000,
         "VirtIO network device (transitional)",
-        Support::Unsupported,
-        Validation::None,
+        VIRTIO_NET,
+        Validation::Emulation,
     ),
     entry(
         0x1AF4,
@@ -125,8 +129,8 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x1AF4,
         0x1041,
         "VirtIO network device",
-        Support::Unsupported,
-        Validation::None,
+        VIRTIO_NET,
+        Validation::Emulation,
     ),
     entry(
         0x1AF4,

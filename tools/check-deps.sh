@@ -16,7 +16,7 @@ check() {
 }
 # Linked into the kernel or the boot loader: GPL-2.0-compatible only.
 check deny.toml kernel boot shell \
-    libs/acpi libs/bootproto libs/elf libs/ext2 libs/fat libs/gpt libs/hwdb libs/term libs/vfs \
+    libs/acpi libs/bootproto libs/elf libs/ext2 libs/fat libs/gpt libs/hwdb libs/net libs/term libs/vfs \
     libs/abi
 # User-space system components and host tools.
 check tools/deny-userspace.toml userspace/programs compat/windows/pe compat/windows/win32 \

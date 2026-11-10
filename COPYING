@@ -19,7 +19,7 @@ Which licence applies where
       shell/                  the shell (it is linked into the kernel)
       boot/                   the UEFI boot loader
       libs/acpi  libs/bootproto  libs/elf  libs/ext2  libs/fat
-      libs/gpt   libs/hwdb       libs/term libs/vfs
+      libs/gpt   libs/hwdb       libs/net  libs/term libs/vfs
 
   The system call interface — GPL-2.0-only WITH the Omit OS syscall note
       libs/abi/               system call numbers, error codes and the

@@ -16,7 +16,8 @@ use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
 It can install itself onto a SATA, NVMe or VirtIO disk — tested only in
-virtual machines so far. See [Status](#status) for exactly what exists, how
+virtual machines so far. With a VirtIO network card it gets an address by
+DHCP and can `ping`; that is all the networking there is. See [Status](#status) for exactly what exists, how
 narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -274,6 +275,7 @@ machine.
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
 | AHCI driver for SATA disks (first controller, ATA disks with 48-bit addressing and 512-byte sectors, polling, one 4 KiB command at a time; disks named by port: `sda` is port 0) | Working against QEMU's emulated controller; **never run on real hardware**. No CD/DVD drives. See ADR 0020 |
 | NVMe driver (first controller, namespace 1, 512-byte sectors, polling, one 4 KiB command at a time) | Working against QEMU's emulated controller; **never run on a real NVMe disk**. See ADR 0017 |
+| Networking, first step: VirtIO network card driver (polling), ARP, IPv4, an address by DHCP, answering and sending echo requests (`ifconfig`, `ping`) | Working in QEMU: the test gets an address from QEMU's DHCP server and pings the gateway; protocol logic host-tested. **No sockets, TCP or DNS — programs cannot use the network yet**, and no driver for a real network card. See ADR 0022 |
 | ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
 | Hardware database: device names and support status in `lspci` | Working, host-tested |
 | Driver registry (`lsdrv`), unbinding of Linux drivers (`unbind`) | Working, tested |
@@ -352,6 +354,10 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   under emulation.
 - Keyboards (US layout) and mice: PS/2, or USB on an xHCI controller;
   USB is untested outside QEMU.
+- Networking stops at `ping`: the system gets an address by DHCP and
+  answers and sends echo requests, on a VirtIO network card only. There
+  are no sockets, no TCP and no DNS, so no program can use the network,
+  and there is no driver for any real network card (see ADR 0022).
 - Installation works onto SATA, NVMe and VirtIO disks and has only been
   tested with QEMU's emulated ones; there is no USB storage driver. An installed system still runs from memory; only `/data`
   persists.
@@ -427,6 +433,7 @@ libs/fat/        one-pass FAT16 writer for the installer, verified against the f
 libs/gfx/        drawing, text and window manager for programs, host-tested
 libs/window/     protocol between programs with windows and the desktop, host-tested
 libs/gpt/        GUID partition tables: build and parse, host-tested
+libs/net/        network protocols (Ethernet, ARP, IPv4, ICMP, UDP, DHCP) and interface logic, host-tested
 libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
@@ -490,6 +497,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0019 — USB keyboards and mice (xHCI)](docs/adr/0019-usb-input.md)
 - [ADR 0020 — AHCI driver (SATA disks)](docs/adr/0020-ahci.md)
 - [ADR 0021 — Date and time](docs/adr/0021-date-and-time.md)
+- [ADR 0022 — Networking: a first network card and the base of IPv4](docs/adr/0022-networking.md)
 
 ## Testing
 
@@ -510,6 +518,7 @@ checks both QEMU's exit status and the serial log:
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
 | `install-to-sata` | The same on a SATA disk, with the native AHCI driver |
 | `install-to-nvme` | The native NVMe driver: install onto an emulated NVMe disk, write files (including one large enough to span many commands), restart from the NVMe disk alone, compare the files; the disk is then verified on the host like the VirtIO one |
+| `network` | A VirtIO network card on QEMU's built-in network: an address, router and name server by DHCP; `ping` to the gateway (found by ARP) gets its replies; an address nobody has is reported unreachable |
 | `linux-driver-watchdog-expiry` | The same driver, started and never pinged: the emulated hardware must reset the machine |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
@@ -532,8 +541,8 @@ windows of other programs and a terminal as a separate program; for Windows prog
 runtime needs before any existing program can start (static thread-local
 storage, exception handling, a much larger part of the API); for
 hardware, USB storage, interrupts for device drivers (MSI-X)
-instead of polling, more than one CPU; for the system itself, a
-network stack, loadable drivers, a shell outside the kernel, and a Rust
+instead of polling, more than one CPU; for the system itself,
+sockets, UDP and TCP on top of the new network base, loadable drivers, a shell outside the kernel, and a Rust
 `std` port so that ordinary command-line tools can be built.
 
 ## Licence
