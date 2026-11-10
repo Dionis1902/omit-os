@@ -5,7 +5,9 @@
 //!     fetch [--trust FILE] http[s]://HOST[:PORT]/PATH [DESTINATION]
 //!
 //! HOST is a name or an IPv4 address. Without DESTINATION the body is
-//! written to standard output.
+//! written to standard output. Where the server says the file is
+//! elsewhere, that is followed, up to five times — but never from an
+//! `https://` address to an `http://` one.
 //!
 //! An `https://` address is fetched over TLS 1.3: the server must show
 //! a certificate for HOST that leads to an authority in the built-in
@@ -18,6 +20,7 @@
 extern crate alloc;
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 use core::sync::atomic::{AtomicBool, Ordering};
@@ -104,12 +107,23 @@ impl Link {
     }
 }
 
+/// How often one request may be sent elsewhere.
+const MAX_REDIRECTS: usize = 5;
+
+/// How a request ended, when it did not fail.
+enum Fetched {
+    /// The body arrived: this many bytes.
+    Body(u64),
+    /// The server says the file is at this address instead.
+    Elsewhere(String),
+}
+
 fn fetch(
     url: &Url<'_>,
     address: [u8; 4],
     trusted: &[Vec<u8>],
     destination: Option<&str>,
-) -> Result<u64, i32> {
+) -> Result<Fetched, i32> {
     let stream =
         TcpStream::connect(address, url.port, Some(CONNECT_TIMEOUT_MS)).map_err(|error| {
             let reason = match error {
@@ -175,12 +189,17 @@ fn fetch(
         }
     };
     if head.status != 200 {
-        match head.location {
-            Some(location) if (300..400).contains(&head.status) => eprintln!(
-                "fetch: the server says the file is at {location} ({} {}); redirects are not followed",
+        let elsewhere = head
+            .location
+            .filter(|_| (300..400).contains(&head.status))
+            .map(|location| (location, http::redirect_target(url, location)));
+        match elsewhere {
+            Some((_, Some(target))) => return Ok(Fetched::Elsewhere(target)),
+            Some((location, None)) => eprintln!(
+                "fetch: the server says the file is at {location} ({} {}), which cannot be fetched",
                 head.status, head.reason
             ),
-            _ => eprintln!("fetch: the server says: {} {}", head.status, head.reason),
+            None => eprintln!("fetch: the server says: {} {}", head.status, head.reason),
         }
         return Err(1);
     }
@@ -196,7 +215,7 @@ fn fetch(
         }
         None => STDOUT,
     };
-    let finish = |outcome: Result<u64, i32>| {
+    let finish = |outcome: Result<u64, i32>| -> Result<Fetched, i32> {
         if let Some(path) = destination {
             let _ = omit_rt::close(out);
             if outcome.is_err() {
@@ -204,7 +223,7 @@ fn fetch(
                 let _ = omit_rt::remove(path);
             }
         }
-        outcome
+        outcome.map(Fetched::Body)
     };
     let store = |data: &[u8]| {
         omit_rt::write_all(out, data).map_err(|error| {
@@ -271,34 +290,55 @@ fn main() -> i32 {
         eprintln!("{USAGE}");
         return 2;
     };
-    let url = match Url::parse(text) {
-        Ok(url) => url,
-        Err(error) => {
-            let reason = match error {
-                UrlError::Scheme => "only http:// and https:// addresses can be fetched",
-                UrlError::Host => "no host name in the address",
-                UrlError::Port => "the port is not a number between 1 and 65535",
-                UrlError::Character => "the address contains a space or a control character",
-            };
-            eprintln!("fetch: {text}: {reason}");
-            return 2;
-        }
-    };
-    let address = match omit_rt::net::lookup(url.host) {
-        Ok(address) => address,
-        Err(error) => {
-            eprintln!("fetch: {}: {error}", url.host);
+    let mut current = String::from(text);
+    for hop in 0..=MAX_REDIRECTS {
+        let url = match Url::parse(&current) {
+            Ok(url) => url,
+            Err(error) => {
+                let reason = match error {
+                    UrlError::Scheme => "only http:// and https:// addresses can be fetched",
+                    UrlError::Host => "no host name in the address",
+                    UrlError::Port => "the port is not a number between 1 and 65535",
+                    UrlError::Character => "the address contains a space or a control character",
+                };
+                eprintln!("fetch: {current}: {reason}");
+                return 2;
+            }
+        };
+        let address = match omit_rt::net::lookup(url.host) {
+            Ok(address) => address,
+            Err(error) => {
+                eprintln!("fetch: {}: {error}", url.host);
+                return 1;
+            }
+        };
+        let next = match fetch(&url, address, &trusted, destination) {
+            Ok(Fetched::Body(bytes)) => {
+                if let Some(path) = destination {
+                    // (With the body on standard output, nothing else goes there.)
+                    omit_rt::println!("{current}: {bytes} bytes, stored as {path}");
+                }
+                return 0;
+            }
+            Ok(Fetched::Elsewhere(next)) => next,
+            Err(status) => return status,
+        };
+        if hop == MAX_REDIRECTS {
+            eprintln!("fetch: sent elsewhere more than {MAX_REDIRECTS} times; giving up at {next}");
             return 1;
         }
-    };
-    match fetch(&url, address, &trusted, destination) {
-        Ok(bytes) => {
-            if let Some(path) = destination {
-                // (With the body on standard output, nothing else goes there.)
-                omit_rt::println!("{text}: {bytes} bytes, stored as {path}");
-            }
-            0
+        // What was asked for privately is not then fetched in the open.
+        let open = !next
+            .get(..8)
+            .is_some_and(|start| start.eq_ignore_ascii_case("https://"));
+        if url.secure && open {
+            eprintln!(
+                "fetch: the server sends an https:// request on to {next}, which is not followed"
+            );
+            return 1;
         }
-        Err(status) => status,
+        eprintln!("fetch: the file is at {next}");
+        current = next;
     }
+    1
 }

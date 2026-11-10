@@ -103,7 +103,8 @@ host example.org     look a name up (needs a network that reaches a name
 tftp 10.0.2.2 FILE   fetch a file from a TFTP server
 fetch http://HOST/FILE [DEST]
                      download over HTTP; https:// addresses too
-                     (TLS 1.3, unaudited cryptography)
+                     (TLS 1.3, unaudited cryptography); follows
+                     redirects
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
                      machines provide, or USB); the power button in
                      the Start panel, or F12, returns to the console

@@ -8,8 +8,9 @@
 //! the body as it is and then closes the connection: the body is
 //! everything after the head, and its end is the end of the connection.
 //! That leaves out, deliberately: chunked transfer (which a server must
-//! not use in answer to HTTP/1.0), persistent connections, redirects
-//! (reported, not followed), and compression. An `https://` address is
+//! not use in answer to HTTP/1.0), persistent connections and
+//! compression. Where a server points elsewhere, [`redirect_target`]
+//! works out the address meant; following it is the caller's business. An `https://` address is
 //! taken apart too; the encryption itself is not this code's business:
 //! the same request and response travel inside the encrypted connection.
 
@@ -88,6 +89,52 @@ impl<'a> Url<'a> {
             port,
             path,
         })
+    }
+}
+
+/// The address a server means when, in answer to a request for `from`,
+/// it says the thing is at `location` (the `Location` field of a 3xx
+/// response): `location` itself if it is a whole address, otherwise
+/// completed from `from` — a `//host/path` takes its scheme, a `/path`
+/// its host as well, anything else also the folder of its path.
+/// `None` if `location` is empty or has another scheme.
+///
+/// The result is text for [`Url::parse`], which still has to accept it.
+pub fn redirect_target(from: &Url<'_>, location: &str) -> Option<alloc::string::String> {
+    use alloc::format;
+    let location = location.trim();
+    let scheme = if from.secure { "https" } else { "http" };
+    let default = if from.secure { SECURE_PORT } else { PORT };
+    let origin = if from.port == default {
+        format!("{scheme}://{}", from.host)
+    } else {
+        format!("{scheme}://{}:{}", from.host, from.port)
+    };
+    let lower = location.to_ascii_lowercase();
+    if location.is_empty() {
+        None
+    } else if lower.starts_with("http://") || lower.starts_with("https://") {
+        Some(location.into())
+    } else if let Some(rest) = location.strip_prefix("//") {
+        Some(format!("{scheme}://{rest}"))
+    } else if location.starts_with('/') {
+        Some(format!("{origin}{location}"))
+    } else if location
+        .split(['/', '?', '#'])
+        .next()
+        .is_some_and(|first| first.contains(':'))
+    {
+        // Another scheme ("mailto:", "ftp:").
+        None
+    } else if location.starts_with(['?', '#']) {
+        let path = from.path.split(['?', '#']).next().unwrap_or("/");
+        Some(format!("{origin}{path}{location}"))
+    } else {
+        // Relative to the folder of the path asked for.
+        let path = from.path.split(['?', '#']).next().unwrap_or("/");
+        let folder = &path[..path.rfind('/').map_or(0, |at| at + 1)];
+        let folder = if folder.is_empty() { "/" } else { folder };
+        Some(format!("{origin}{folder}{location}"))
     }
 }
 
@@ -258,6 +305,52 @@ mod tests {
             request.contains("\r\nHost: example.org:80\r\n"),
             "{request}"
         );
+    }
+
+    #[test]
+    fn a_redirect_is_completed_from_the_address_asked_for() {
+        let from = Url::parse("http://example.org:8080/docs/a.html?x=1").unwrap();
+        let secure = Url::parse("https://example.org/docs/a.html").unwrap();
+        for (location, target) in [
+            ("https://example.org/b", Some("https://example.org/b")),
+            ("HTTP://other.example/", Some("HTTP://other.example/")),
+            ("//cdn.example/x", Some("http://cdn.example/x")),
+            ("/top.html", Some("http://example.org:8080/top.html")),
+            ("b.html", Some("http://example.org:8080/docs/b.html")),
+            (
+                "sub/c.html?y=2",
+                Some("http://example.org:8080/docs/sub/c.html?y=2"),
+            ),
+            ("?y=2", Some("http://example.org:8080/docs/a.html?y=2")),
+            (" /spaced ", Some("http://example.org:8080/spaced")),
+            ("", None),
+            ("mailto:someone@example.org", None),
+            ("ftp://example.org/file", None),
+        ] {
+            assert_eq!(
+                redirect_target(&from, location).as_deref(),
+                target,
+                "{location:?}"
+            );
+        }
+        // The scheme and the default port of the address asked for.
+        assert_eq!(
+            redirect_target(&secure, "/x").as_deref(),
+            Some("https://example.org/x")
+        );
+        assert_eq!(
+            redirect_target(&secure, "//other.example/").as_deref(),
+            Some("https://other.example/")
+        );
+        // From a path without a folder.
+        let bare = Url::parse("http://host").unwrap();
+        assert_eq!(
+            redirect_target(&bare, "next").as_deref(),
+            Some("http://host/next")
+        );
+        // Whatever comes out is parsed like any other address.
+        let target = redirect_target(&from, "b.html").unwrap();
+        assert_eq!(Url::parse(&target).unwrap().path, "/docs/b.html");
     }
 
     #[test]

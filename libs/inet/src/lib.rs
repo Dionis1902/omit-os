@@ -5,11 +5,14 @@
 //! fetching files (TFTP, RFC 1350).
 //!
 //! Like the kernel's protocol library this is formats and decisions
-//! only — pure functions over byte slices, tested on the build machine.
+//! only — pure functions over byte slices (one of them returns text it
+//! puts together), tested on the build machine.
 //! Sending, receiving and waiting are the program's business.
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+extern crate alloc;
 
 pub mod dns;
 pub mod http;

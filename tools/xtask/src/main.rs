@@ -1746,9 +1746,24 @@ const BOOT_TESTS: &[BootTest] = &[
                 "fetch http://10.0.2.2:18080/missing /missing",
                 "\nfetch: the server says: 404 Not Found\n",
             ),
+            // A server that says the file is elsewhere is followed there:
+            // with a whole address or a relative one; not for ever; and
+            // not to what is no web address.
             (
                 "fetch http://10.0.2.2:18080/moved",
-                "(301 Moved Permanently); redirects are not followed\n",
+                "\nfetch: the file is at http://10.0.2.2:18080/hello.txt\nHello from the test server\nomit:/# ",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/relative",
+                "\nfetch: the file is at http://10.0.2.2:18080/hello.txt\nHello from the test server\nomit:/# ",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/loop",
+                "\nfetch: sent elsewhere more than 5 times; giving up at http://10.0.2.2:18080/loop\n",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/mail",
+                "(301 Moved Permanently), which cannot be fetched\n",
             ),
             (
                 "fetch http://10.0.2.2:18080/short /short.http",
@@ -1790,6 +1805,16 @@ const BOOT_TESTS: &[BootTest] = &[
             (
                 "fetch --trust /ca.pem https://10.0.2.2:18443/nolength",
                 "\nno length given\nomit:/# ",
+            ),
+            // From the plain server on to the secure one; but what was
+            // asked for over TLS is not then fetched in the open.
+            (
+                "fetch --trust /ca.pem http://10.0.2.2:18080/secure",
+                "\nfetch: the file is at https://10.0.2.2:18443/hello.txt\nHello from the test server\nomit:/# ",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/down",
+                "\nfetch: the server sends an https:// request on to http://10.0.2.2:18080/hello.txt, which is not followed\n",
             ),
             // Without the authority, the server is a stranger.
             (
@@ -3905,14 +3930,25 @@ fn answer_web_request(stream: &mut (impl Read + Write)) -> Option<String> {
                         with_length("200 OK", &body)
                     }
                     // No length: the body ends where the connection does.
-                    "/nolength" => {
-                        b"HTTP/1.0 200 OK\r\n\r\nno length given\n".to_vec()
-                    }
+                    "/nolength" => b"HTTP/1.0 200 OK\r\n\r\nno length given\n".to_vec(),
                     // Claims more than it sends.
-                    "/short" => {
-                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this".to_vec()
+                    "/short" => b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this".to_vec(),
+                    // Elsewhere: with a whole address, a relative one,
+                    // to itself for ever, to the secure server and back
+                    // from it, and to something that is no web address.
+                    "/moved" | "/relative" | "/loop" | "/secure" | "/down" | "/mail" => {
+                        let location = match path {
+                            "/moved" | "/down" => "http://10.0.2.2:18080/hello.txt",
+                            "/relative" => "hello.txt",
+                            "/loop" => "/loop",
+                            "/secure" => "https://10.0.2.2:18443/hello.txt",
+                            _ => "mailto:someone@omit.example",
+                        };
+                        with_test_ports(&format!(
+                            "HTTP/1.1 301 Moved Permanently\r\nLocation: {location}\r\nContent-Length: 0\r\n\r\n"
+                        ))
+                        .into_bytes()
                     }
-                    "/moved" => with_test_ports("HTTP/1.1 301 Moved Permanently\r\nLocation: http://10.0.2.2:18080/hello.txt\r\nContent-Length: 0\r\n\r\n").into_bytes(),
                     _ => with_length("404 Not Found", b"not here\n"),
                 };
                 let _ = stream.write_all(&response);

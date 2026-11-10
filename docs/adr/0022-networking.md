@@ -129,8 +129,8 @@ covers the first step and says where it stops.
   numbers come from the clock and a counter, which an attacker on the
   network path could predict. The 30-second linger after closing first
   holds the port pair for that long.
-- (TLS came later: ADR 0025.) `fetch` speaks HTTP/1.0 without
-  redirects, compression or chunked transfer.
+- (TLS came later: ADR 0025; so did following redirects.) `fetch`
+  speaks HTTP/1.0 without compression or chunked transfer.
 - No socket options: no keep-alive, no way to set buffer sizes or
   timeouts on an open connection; a listener queues at most eight
   connections; any program may listen on any port.
