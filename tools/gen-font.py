@@ -19,7 +19,7 @@ import sys
 from PIL import Image, ImageDraw, ImageFont
 
 # Printable ASCII, and the few other characters the interface uses.
-CHARACTERS = [chr(c) for c in range(32, 127)] + list("…–—·×›‹•’‘“”°→←↑↓✓")
+CHARACTERS = [chr(c) for c in range(32, 127)] + list("…–—·×÷−±›‹•’‘“”°→←↑↓✓")
 # (file name, font file, size in pixels)
 FACES = [
     ("inter-regular-11", "Inter-Regular.otf", 11),

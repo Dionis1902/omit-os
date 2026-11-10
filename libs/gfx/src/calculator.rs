@@ -681,6 +681,39 @@ mod tests {
         }
     }
 
+    /// The fonts are bitmaps of chosen characters; a sign that is not
+    /// among them would be drawn as a question mark.
+    #[test]
+    fn every_sign_on_the_keys_and_in_the_history_has_a_glyph() {
+        let operators = [
+            Operator::Add,
+            Operator::Subtract,
+            Operator::Multiply,
+            Operator::Divide,
+        ];
+        let signs = operators.iter().map(|operator| operator.sign()).chain([
+            "±",
+            "%",
+            "=",
+            "C",
+            ".",
+            "-",
+            "0123456789",
+        ]);
+        for sign in signs {
+            for (name, font) in [
+                ("regular 12", REGULAR_12),
+                ("medium 13", MEDIUM_13),
+                ("semibold 20", SEMIBOLD_20),
+                ("semibold 32", SEMIBOLD_32),
+            ] {
+                for character in sign.chars() {
+                    assert!(font.glyph(character).is_some(), "{name}: {character:?}");
+                }
+            }
+        }
+    }
+
     #[test]
     fn the_keypad_is_a_grid_and_every_key_can_be_clicked() {
         let content = Rect::new(0, 0, SIZE.0, SIZE.1);
