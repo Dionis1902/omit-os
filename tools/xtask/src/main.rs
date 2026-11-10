@@ -1758,8 +1758,58 @@ const BOOT_TESTS: &[BootTest] = &[
                 "\nfetch: 10.0.2.99: the host cannot be reached\n",
             ),
             (
-                "fetch https://example.org/",
-                "only http:// addresses can be fetched (there is no TLS)\n",
+                "fetch ftp://example.org/",
+                "only http:// and https:// addresses can be fetched\n",
+            ),
+            // The same server behind TLS. Its certificate is signed by
+            // an authority made for this run, whose certificate the
+            // guest fetches first (over TFTP, which protects nothing:
+            // good enough for a test).
+            (
+                "tftp 10.0.2.2 ca.pem /ca.pem",
+                " bytes from 10.0.2.2, stored as /ca.pem\n",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/hello.txt",
+                "\nHello from the test server\nomit:/# ",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/desktop /desktop.https",
+                " bytes, stored as /desktop.https\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.https",
+                "cmp /bin/desktop /desktop.https\nomit:/# ",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/nolength",
+                "\nno length given\nomit:/# ",
+            ),
+            // Without the authority, the server is a stranger.
+            (
+                "fetch https://10.0.2.2:18443/hello.txt",
+                "\nfetch: 10.0.2.2: the server's certificate is not signed by an authority this system trusts\n",
+            ),
+            // A connection that stops without the server saying it has
+            // finished.
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/short /short.https",
+                "\nfetch: 10.0.2.2: the connection was cut off\n",
+            ),
+            (
+                "cat /short.https",
+                "/short.https: No such file or directory",
+            ),
+            // What is not a certificate is not trusted.
+            (
+                "fetch --trust /bin/hello https://10.0.2.2:18443/hello.txt",
+                "not a certificate (PEM or DER)\n",
+            ),
+            // A server that does not speak TLS: the test's plain one
+            // makes nothing of the greeting and hangs up.
+            (
+                "fetch https://10.0.2.2:18080/hello.txt",
+                "\nfetch: 10.0.2.2: the connection was cut off\n",
             ),
             // The other direction: a server in the guest, reached from
             // the host through a forwarded port. The host sends 20 000
@@ -3614,13 +3664,26 @@ fn start_test_web_server(files: &Path) -> Result<()> {
             let Ok(mut stream) = stream else { continue };
             thread::spawn(move || {
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                answer_web_request(&mut stream);
+            });
+        }
+    });
+    Ok(())
+}
+
+/// Reads one request from `stream` and answers it. Returns the path
+/// asked for, if a request arrived.
+fn answer_web_request(stream: &mut (impl Read + Write)) -> Option<String> {
+    {
+        {
+            {
                 // The request head.
                 let mut request = Vec::new();
                 let mut byte = [0u8; 1];
                 while !request.ends_with(b"\r\n\r\n") && request.len() < 4096 {
                     match stream.read(&mut byte) {
                         Ok(1) => request.push(byte[0]),
-                        _ => return,
+                        _ => return None,
                     }
                 }
                 let request = String::from_utf8_lossy(&request);
@@ -3659,6 +3722,192 @@ fn start_test_web_server(files: &Path) -> Result<()> {
                     _ => with_length("404 Not Found", b"not here\n"),
                 };
                 let _ = stream.write_all(&response);
+                Some(path.to_string())
+            }
+        }
+    }
+}
+
+/// TCP port, on the host's loopback address, of the web server that
+/// speaks TLS for the `network` test.
+const TEST_SECURE_WEB_SERVER_PORT: u16 = 18443;
+
+/// Makes, with the `openssl` command, a certificate authority and a
+/// certificate signed by it for the address the guest knows the host
+/// by. Both are valid around the fixed moment the tests' clock is set
+/// to, whenever the test is run. The authority's certificate is put
+/// among the files the guest can fetch over TFTP, as `ca.pem`.
+fn make_test_certificates(dir: &Path, tftp_files: &Path) -> Result<PathBuf> {
+    let papers = dir.join("tls");
+    let _ = fs::remove_dir_all(&papers);
+    fs::create_dir_all(&papers)?;
+    let openssl = |arguments: &[&str]| -> Result<()> {
+        let output = Command::new("openssl")
+            .args(arguments)
+            .current_dir(&papers)
+            .output()
+            .map_err(|error| format!("the network test needs the openssl command: {error}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "openssl {}: {}",
+                arguments.join(" "),
+                String::from_utf8_lossy(&output.stderr)
+            )
+            .into());
+        }
+        Ok(())
+    };
+    fs::write(
+        papers.join("ca.cnf"),
+        "[ca]\ndefault_ca = this\n[this]\ndatabase = index.txt\nnew_certs_dir = .\n\
+         serial = serial\npolicy = any\nunique_subject = no\n[any]\ncommonName = supplied\n\
+         [authority]\nbasicConstraints = critical,CA:TRUE\nkeyUsage = critical,keyCertSign\n\
+         [server]\nsubjectAltName = IP:10.0.2.2,DNS:test.omit.example\n\
+         basicConstraints = CA:FALSE\nkeyUsage = digitalSignature\n\
+         extendedKeyUsage = serverAuth\n",
+    )?;
+    fs::write(papers.join("index.txt"), "")?;
+    fs::write(papers.join("serial"), "01\n")?;
+    let key = [
+        "genpkey",
+        "-algorithm",
+        "EC",
+        "-pkeyopt",
+        "ec_paramgen_curve:P-256",
+        "-out",
+    ];
+    let dates = [
+        "-startdate",
+        "20260101000000Z",
+        "-enddate",
+        "20361231000000Z",
+    ];
+    let sign = [
+        "ca", "-batch", "-config", "ca.cnf", "-notext", "-md", "sha256", "-keyfile", "ca.key",
+    ];
+    openssl(&[&key[..], &["ca.key"]].concat())?;
+    openssl(&[
+        "req",
+        "-new",
+        "-key",
+        "ca.key",
+        "-subj",
+        "/CN=Omit OS test authority",
+        "-out",
+        "ca.csr",
+    ])?;
+    openssl(
+        &[
+            &sign[..],
+            &dates[..],
+            &[
+                "-selfsign",
+                "-extensions",
+                "authority",
+                "-in",
+                "ca.csr",
+                "-out",
+                "ca.pem",
+            ],
+        ]
+        .concat(),
+    )?;
+    openssl(&[&key[..], &["server.key"]].concat())?;
+    openssl(&[
+        "req",
+        "-new",
+        "-key",
+        "server.key",
+        "-subj",
+        "/CN=Omit OS test server",
+        "-out",
+        "server.csr",
+    ])?;
+    openssl(
+        &[
+            &sign[..],
+            &dates[..],
+            &[
+                "-cert",
+                "ca.pem",
+                "-extensions",
+                "server",
+                "-in",
+                "server.csr",
+                "-out",
+                "server.pem",
+            ],
+        ]
+        .concat(),
+    )?;
+    fs::copy(papers.join("ca.pem"), tftp_files.join("ca.pem"))?;
+    Ok(papers)
+}
+
+/// The certificate and key the secure test web server shows, replaced
+/// at every run of the `network` test.
+static WEB_PAPERS: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Starts, once, the web server of [`start_test_web_server`] again
+/// behind TLS (rustls, the library the guest's client is built on, with
+/// the certificate from [`make_test_certificates`]). It ends each
+/// answer properly, except that of `/short`, after which it just drops
+/// the connection.
+fn start_test_secure_web_server(papers: &Path) -> Result<()> {
+    use rustls::pki_types::pem::PemObject;
+    use rustls::pki_types::{CertificateDer, PrivateKeyDer};
+    use std::net::TcpListener;
+    use std::sync::{Arc, OnceLock};
+    *WEB_PAPERS.lock().map_err(|_| "web server state")? = Some(papers.to_path_buf());
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.get().is_some() {
+        return Ok(());
+    }
+    let listener =
+        TcpListener::bind(("127.0.0.1", TEST_SECURE_WEB_SERVER_PORT)).map_err(|error| {
+            format!(
+                "cannot listen on TCP port {TEST_SECURE_WEB_SERVER_PORT} for the network test: {error}"
+            )
+        })?;
+    let _ = STARTED.set(());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                // The papers of the run in progress.
+                let Some(papers) = WEB_PAPERS.lock().ok().and_then(|papers| papers.clone()) else {
+                    return;
+                };
+                let (Ok(certificates), Ok(key)) = (
+                    CertificateDer::pem_file_iter(papers.join("server.pem"))
+                        .and_then(Iterator::collect::<std::result::Result<Vec<_>, _>>),
+                    PrivateKeyDer::from_pem_file(papers.join("server.key")),
+                ) else {
+                    return;
+                };
+                let Some(config) = rustls::ServerConfig::builder_with_provider(Arc::new(
+                    rustls_rustcrypto::provider(),
+                ))
+                .with_safe_default_protocol_versions()
+                .ok()
+                .and_then(|builder| {
+                    builder
+                        .with_no_client_auth()
+                        .with_single_cert(certificates, key)
+                        .ok()
+                }) else {
+                    return;
+                };
+                let Ok(mut connection) = rustls::ServerConnection::new(Arc::new(config)) else {
+                    return;
+                };
+                let mut secure = rustls::Stream::new(&mut connection, &mut stream);
+                let path = answer_web_request(&mut secure);
+                if path.as_deref() != Some("/short") {
+                    secure.conn.send_close_notify();
+                }
+                let _ = secure.flush();
             });
         }
     });
@@ -3740,6 +3989,7 @@ fn run_boot_test(
         let files = prepare_tftp_files(&dir, options)?;
         start_test_name_server()?;
         start_test_web_server(&files)?;
+        start_test_secure_web_server(&make_test_certificates(&dir, &files)?)?;
         start_test_echo_client();
         qemu_args.extend([
             "-netdev".into(),

@@ -19,7 +19,7 @@ check deny.toml kernel boot shell \
     libs/acpi libs/bootproto libs/elf libs/ext2 libs/fat libs/gpt libs/hwdb libs/net libs/rng libs/term libs/vfs \
     libs/abi
 # User-space system components and host tools.
-check tools/deny-userspace.toml userspace/programs compat/windows/pe compat/windows/win32 \
+check tools/deny-userspace.toml userspace/programs userspace/tls compat/windows/pe compat/windows/win32 \
     compat/windows/samples compat/windows/samples/dll compat/windows/samples/plugin tools/xtask
 # The SDK: permissive all the way down (the system call interface aside).
 check tools/deny-sdk.toml userspace/rt libs/window libs/gfx libs/inet libs/mm

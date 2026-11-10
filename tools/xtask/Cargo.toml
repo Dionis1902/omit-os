@@ -7,6 +7,11 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]
+# The `network` test's web server behind TLS: the library the guest's
+# client is built on, here with the standard library.
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+rustls-rustcrypto = "=0.0.2-alpha"
+
 # FAT filesystem writer for the EFI system partition. `chrono` is disabled so
 # no wall-clock timestamps leak into the image (reproducible builds).
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }

@@ -9,6 +9,16 @@ rustflags = [
     "-C", "relocation-model=static",
     "-C", "code-model=kernel",
     "-C", "force-frame-pointers=yes",
+    # Everything for this target is compiled without SSE, and LLVM cannot
+    # compile the vector code some cryptography crates would otherwise
+    # choose: they are told to use their portable implementations. (Only
+    # the TLS library of the user programs has such crates; the flags
+    # mean nothing to the kernel.)
+    "--cfg", "curve25519_dalek_backend=\"serial\"",
+    "--cfg", "aes_force_soft",
+    "--cfg", "polyval_force_soft",
+    "--cfg", "chacha20_force_soft",
+    "--cfg", "poly1305_force_soft",
 ]
 
 # Make the loader binary reproducible:

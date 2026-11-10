@@ -1,0 +1,33 @@
+[package]
+name = "omit-tls"
+description = "TLS client connections for Omit OS programs: rustls driven over any byte stream (no_std)"
+version.workspace = true
+edition.workspace = true
+license = "GPL-3.0-or-later"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The protocol: rustls, without its standard-library conveniences.
+rustls = { version = "0.23", default-features = false }
+# The arithmetic: the RustCrypto implementations, in pure Rust. An early
+# release of a provider that has not been audited; pinned so that a new
+# one is a decision.
+rustls-rustcrypto = { version = "=0.0.2-alpha", default-features = false, features = ["alloc"] }
+# The authorities trusted by default: Mozilla's list.
+webpki-roots = "1"
+# Where the cryptography asks for random numbers. On Omit OS there is no
+# built-in source it knows: this crate registers one, which hands the
+# request to the function given to `set_random_source`.
+getrandom = { version = "0.2", features = ["custom"] }
+# Programs are compiled without SSE: the hash functions must not pick
+# their vector implementations. (The other primitives are told the same
+# through `--cfg` flags, see .cargo/config.toml.)
+sha2 = { version = "0.10", default-features = false, features = ["force-soft"] }
+
+[dev-dependencies]
+rustls = { version = "0.23", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true

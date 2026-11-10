@@ -9,19 +9,25 @@
 //! everything after the head, and its end is the end of the connection.
 //! That leaves out, deliberately: chunked transfer (which a server must
 //! not use in answer to HTTP/1.0), persistent connections, redirects
-//! (reported, not followed), compression, and `https`.
+//! (reported, not followed), and compression. An `https://` address is
+//! taken apart too; the encryption itself is not this code's business:
+//! the same request and response travel inside the encrypted connection.
 
 /// TCP port of HTTP.
 pub const PORT: u16 = 80;
+/// TCP port of HTTP over TLS.
+pub const SECURE_PORT: u16 = 443;
 /// Longest response head this code looks through.
 pub const MAX_HEAD_LEN: usize = 8192;
 
-/// An `http://` address in its parts.
+/// An `http://` or `https://` address in its parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Url<'a> {
+    /// The address is `https://`: to be fetched over TLS.
+    pub secure: bool,
     /// Host name or IPv4 address.
     pub host: &'a str,
-    /// Port; 80 unless stated.
+    /// Port; 80 (443 for `https://`) unless stated.
     pub port: u16,
     /// Path and query, starting with `/`.
     pub path: &'a str,
@@ -30,7 +36,7 @@ pub struct Url<'a> {
 /// Why an address is not one this code can fetch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlError {
-    /// Not `http://`: another scheme, such as `https://`, or none.
+    /// Neither `http://` nor `https://`: another scheme, or none.
     Scheme,
     /// No host name.
     Host,
@@ -41,17 +47,22 @@ pub enum UrlError {
 }
 
 impl<'a> Url<'a> {
-    /// Takes `http://host[:port][/path]` apart. A fragment (`#...`) is
-    /// dropped: it is not sent to servers.
+    /// Takes `http://host[:port][/path]` (or `https://...`) apart. A
+    /// fragment (`#...`) is dropped: it is not sent to servers.
     pub fn parse(text: &'a str) -> Result<Self, UrlError> {
         if text.bytes().any(|b| b <= b' ' || b == 0x7F) {
             return Err(UrlError::Character);
         }
-        let scheme_len = "http://".len();
-        if text.len() < scheme_len || !text[..scheme_len].eq_ignore_ascii_case("http://") {
-            return Err(UrlError::Scheme);
-        }
-        let rest = &text[scheme_len..];
+        let after = |scheme: &str| {
+            text.get(..scheme.len())
+                .filter(|start| start.eq_ignore_ascii_case(scheme))
+                .map(|_| &text[scheme.len()..])
+        };
+        let (secure, rest) = match (after("http://"), after("https://")) {
+            (Some(rest), _) => (false, rest),
+            (None, Some(rest)) => (true, rest),
+            (None, None) => return Err(UrlError::Scheme),
+        };
         let rest = rest.split('#').next().unwrap_or(rest);
         let (authority, path) = match rest.find(['/', '?']) {
             Some(at) => rest.split_at(at),
@@ -66,12 +77,17 @@ impl<'a> Url<'a> {
                 Ok(port) if port != 0 => (host, port),
                 _ => return Err(UrlError::Port),
             },
-            None => (authority, PORT),
+            None => (authority, if secure { SECURE_PORT } else { PORT }),
         };
         if host.is_empty() {
             return Err(UrlError::Host);
         }
-        Ok(Self { host, port, path })
+        Ok(Self {
+            secure,
+            host,
+            port,
+            path,
+        })
     }
 }
 
@@ -94,7 +110,7 @@ pub fn write_get(buffer: &mut [u8], url: &Url<'_>) -> Option<usize> {
     put(url.path)?;
     put(" HTTP/1.0\r\nHost: ")?;
     put(url.host)?;
-    if url.port != PORT {
+    if url.port != if url.secure { SECURE_PORT } else { PORT } {
         let mut digits = [0u8; 5];
         let mut value = url.port;
         let mut start = digits.len();
@@ -199,7 +215,14 @@ mod tests {
 
     #[test]
     fn addresses_are_taken_apart() {
-        let url = |host, port, path| Ok(Url { host, port, path });
+        let url = |host, port, path| {
+            Ok(Url {
+                secure: false,
+                host,
+                port,
+                path,
+            })
+        };
         assert_eq!(
             Url::parse("http://example.org"),
             url("example.org", 80, "/")
@@ -214,12 +237,34 @@ mod tests {
         );
         assert_eq!(Url::parse("http://host?q=1"), url("host", 80, "?q=1"));
         assert_eq!(Url::parse("http://host:65535/"), url("host", 65535, "/"));
+        // `https://` addresses: the same parts, another default port.
+        let secure = Url::parse("https://example.org/a").unwrap();
+        assert!(secure.secure);
+        assert_eq!(
+            (secure.host, secure.port, secure.path),
+            ("example.org", 443, "/a")
+        );
+        assert_eq!(Url::parse("HTTPS://h:8443").unwrap().port, 8443);
+        assert!(!Url::parse("http://example.org").unwrap().secure);
+        // Their request names the port only when it is not 443.
+        let mut buffer = [0u8; 256];
+        let length = write_get(&mut buffer, &secure).unwrap();
+        let request = core::str::from_utf8(&buffer[..length]).unwrap();
+        assert!(request.contains("\r\nHost: example.org\r\n"), "{request}");
+        let other = Url::parse("https://example.org:80/").unwrap();
+        let length = write_get(&mut buffer, &other).unwrap();
+        let request = core::str::from_utf8(&buffer[..length]).unwrap();
+        assert!(
+            request.contains("\r\nHost: example.org:80\r\n"),
+            "{request}"
+        );
     }
 
     #[test]
     fn addresses_that_cannot_be_fetched_are_refused() {
         for (text, error) in [
-            ("https://example.org/", UrlError::Scheme),
+            ("gopher://example.org/", UrlError::Scheme),
+            ("https:/example.org/", UrlError::Scheme),
             ("example.org", UrlError::Scheme),
             ("ftp://example.org", UrlError::Scheme),
             ("http:/", UrlError::Scheme),

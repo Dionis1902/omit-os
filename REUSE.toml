@@ -54,6 +54,15 @@ path = "libs/gfx/art/**"
 SPDX-FileCopyrightText = "2026 Omit OS contributors"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
 
+# The list of certificate authorities trusted by default, as a page for
+# people: derived from Mozilla's list (through the webpki-roots crate),
+# and under that data's licence.
+[[annotations]]
+path = "docs/TRUSTED_AUTHORITIES.md"
+precedence = "override"
+SPDX-FileCopyrightText = ["Mozilla and the Common CA Database contributors (the list)", "2026 Omit OS contributors (this page)"]
+SPDX-License-Identifier = "CDLA-Permissive-2.0"
+
 # Imported Linux driver code. The files are kept exactly as upstream has
 # them, including their own notices; three of them use the older spelling
 # "GPL-2.0+" of the identifier GPL-2.0-or-later, which is restated here

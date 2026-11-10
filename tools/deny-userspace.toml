@@ -41,3 +41,11 @@ allow = ["GPL-2.0-only"]
 [[licenses.exceptions]]
 crate = "omit-gpt"
 allow = ["GPL-2.0-only"]
+
+# Mozilla's list of certificate authorities, as data: what encrypted
+# connections trust by default. The Community Data License Agreement
+# (permissive, version 2.0) asks only that its text accompany the data
+# when the data is passed on; it is allowed for this one crate.
+[[licenses.exceptions]]
+crate = "webpki-roots"
+allow = ["CDLA-Permissive-2.0"]

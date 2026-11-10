@@ -28,6 +28,7 @@ members = [
     "tools/xtask",
     "userspace/programs",
     "userspace/rt",
+    "userspace/tls",
 ]
 # Plain `cargo build` / `cargo test` operate on the host-buildable crates only.
 # The loader and kernel need bare-metal targets; `cargo xtask` drives those.
@@ -52,6 +53,7 @@ default-members = [
     "libs/window",
     "shell",
     "tools/xtask",
+    "userspace/tls",
 ]
 
 [workspace.package]
@@ -78,6 +80,7 @@ omit-ext2 = { path = "libs/ext2" }
 omit-hwdb = { path = "libs/hwdb" }
 omit-mm = { path = "libs/mm" }
 omit-rt = { path = "userspace/rt" }
+omit-tls = { path = "userspace/tls" }
 omit-shell = { path = "shell" }
 omit-term = { path = "libs/term" }
 omit-vfs = { path = "libs/vfs" }
@@ -102,6 +105,16 @@ codegen-units = 1
 [profile.dev.package.omit-user-programs]
 debug = false
 strip = "debuginfo"
+opt-level = 1
+
+# Third-party crates are lightly optimised in debug builds too. The
+# reason is the cryptography behind TLS: unoptimised, a handshake takes
+# far longer and `fetch` is 4.8 MB — more than one file of the RAM
+# filesystem can hold (4 MiB, the largest single allocation), so the
+# debug image would not even unpack. The project's own crates stay
+# unoptimised, the kernel and the boot loader included; of what they
+# link, this touches only the font data and the UEFI bindings.
+[profile.dev.package."*"]
 opt-level = 1
 
 # Drawing is loops over pixels; without optimisation the desktop is

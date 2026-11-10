@@ -102,7 +102,8 @@ host example.org     look a name up (needs a network that reaches a name
                      server)
 tftp 10.0.2.2 FILE   fetch a file from a TFTP server
 fetch http://HOST/FILE [DEST]
-                     download over HTTP (no https)
+                     download over HTTP; https:// addresses too
+                     (TLS 1.3, unaudited cryptography)
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
                      machines provide, or USB); the power button in
                      the Start panel, or F12, returns to the console
@@ -128,8 +129,12 @@ type "Paravirtualized Network (virtio-net)") the system gets an address by
 DHCP; `ifconfig` and `ping` work, and programs can use UDP: `host` looks
 names up and `tftp` fetches files (QEMU has a TFTP server built in:
 `-netdev user,id=n,tftp=DIRECTORY`), and TCP: `fetch` downloads from
-`http://` addresses. There is no TLS, so no `https`, and no other
-network card has a driver. Only QEMU has been tried.
+`http://` and `https://` addresses. The encryption is TLS 1.3 through
+the rustls library with a cryptography provider that has **not been
+audited**; it does not learn of revoked certificates, and it has been
+tested only against a test server, never one on the Internet — treat it
+as a way to reach today's web, not as protection for anything that
+matters. No other network card has a driver. Only QEMU has been tried.
 
 On a real computer: the keyboard must be PS/2 (as built into many
 laptops) or USB. A serial port is not needed.

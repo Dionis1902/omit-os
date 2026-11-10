@@ -37,6 +37,7 @@ COMPONENTS = {
     "libs/vfs/": GPL2,
     "libs/abi/": SYSCALL,
     "userspace/programs/": GPL3,
+    "userspace/tls/": GPL3,
     "compat/windows/pe/": GPL3,
     "compat/windows/win32/": GPL3,
     "userspace/rt/": PERMISSIVE,

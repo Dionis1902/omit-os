@@ -38,7 +38,7 @@ on a compatibility layer, simple Windows console executables run natively
 It can install itself onto a SATA, NVMe or VirtIO disk — tested only in
 virtual machines so far. With a VirtIO network card it gets an address by
 DHCP, can `ping`, and programs can use UDP and TCP (there are a name
-lookup tool and TFTP and HTTP download tools); there is no TLS. See [Status](#status) for exactly what exists, how
+lookup tool and TFTP and HTTP download tools, the latter also over TLS — with unaudited cryptography, see ADR 0025). See [Status](#status) for exactly what exists, how
 narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -300,7 +300,8 @@ machine.
 | AHCI driver for SATA disks (first controller, ATA disks with 48-bit addressing and 512-byte sectors, polling, one 4 KiB command at a time; disks named by port: `sda` is port 0) | Working against QEMU's emulated controller; **never run on real hardware**. No CD/DVD drives. See ADR 0020 |
 | NVMe driver (first controller, namespace 1, 512-byte sectors, polling, one 4 KiB command at a time) | Working against QEMU's emulated controller; **never run on a real NVMe disk**. See ADR 0017 |
 | Networking, first steps: VirtIO network card driver (polling), ARP, IPv4, an address by DHCP, answering and sending echo requests (`ifconfig`, `ping`) | Working in QEMU: the test gets an address from QEMU's DHCP server and pings the gateway; protocol logic host-tested. No driver for a real network card. See ADR 0022 |
-| TCP for programs (`tcp_connect`, `tcp_listen`, `tcp_accept`; connections are read, written and polled like files); `fetch` downloads over HTTP, `echod` is an echo server | Working in QEMU: downloads from a web server run by the test are compared byte for byte, and the host exchanges 20 000 bytes with a server in the guest. The protocol is host-tested against a simulated network that loses, duplicates and reorders. **A small, slow TCP: no congestion control, no window scaling; and no TLS, so no `https`** |
+| TCP for programs (`tcp_connect`, `tcp_listen`, `tcp_accept`; connections are read, written and polled like files); `fetch` downloads over HTTP, `echod` is an echo server | Working in QEMU: downloads from a web server run by the test are compared byte for byte, and the host exchanges 20 000 bytes with a server in the guest. The protocol is host-tested against a simulated network that loses, duplicates and reorders. **A small, slow TCP: no congestion control, no window scaling** |
+| TLS 1.3 for programs (`omit-tls`: rustls with the pure-Rust RustCrypto provider; Mozilla's list of authorities, or one's own with `fetch --trust FILE`); `fetch` takes `https://` addresses; kernel random numbers (`random`) | Working in QEMU against a TLS server run by the test: downloads compared byte for byte, and refusals of an unknown authority, a cut connection and a server without TLS; the client is host-tested against a real TLS server (wrong name, expired, not yet valid). **The cryptography provider is an early, unaudited release; no revocation checks; no TLS 1.2; never tried against a server on the Internet.** See ADR 0024 and ADR 0025 |
 | UDP sockets for programs (`udp_bind`, `udp_send`, `udp_receive`, `net_info`; usable with `poll`); `tftp` fetches files, `host` looks names up | Working in QEMU: files fetched from QEMU's TFTP server and compared, names asked of a name server run by the test, and `/bin/nettest` checks the system calls and their refusals. IPv4 only; name lookup is a separate program, so other commands take addresses only |
 | ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
 | Hardware database: device names and support status in `lspci` | Working, host-tested |
@@ -383,8 +384,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Networking works on a VirtIO network card only — there is no driver
   for any real network card. Programs have UDP and a small TCP (no
   congestion control, so unsuited to anything but a local network),
-  and there is no TLS: `fetch` can download from `http://` addresses
-  only, which leaves out most of today's web (see ADR 0022).
+  and TLS 1.3 for `https://` addresses in `fetch`, on a cryptography
+  library that has **not been audited**, compiled without vector
+  instructions, with no knowledge of revoked certificates, and never
+  yet tried against a server on the Internet (see ADR 0025). It should
+  not carry anything whose secrecy matters.
 - Installation works onto SATA, NVMe and VirtIO disks and has only been
   tested with QEMU's emulated ones; there is no USB storage driver. An installed system still runs from memory; only `/data`
   persists.
@@ -527,6 +531,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0021 — Date and time](docs/adr/0021-date-and-time.md)
 - [ADR 0023 — The desktop follows the Omit OS design system](docs/adr/0023-design-system.md)
 - [ADR 0024 — Random numbers](docs/adr/0024-random-numbers.md)
+- [ADR 0025 — Encrypted connections (TLS)](docs/adr/0025-tls.md)
 - [ADR 0022 — Networking: a first network card and the base of IPv4](docs/adr/0022-networking.md)
 
 ## Testing
