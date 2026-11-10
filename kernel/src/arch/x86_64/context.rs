@@ -89,7 +89,7 @@ pub unsafe fn initial_stack(stack_top: u64, entry: usize, argument: usize) -> u6
             entry as u64,
             0,
             0,
-            thread_trampoline as usize as u64,
+            thread_trampoline as *const () as u64,
         ]);
     }
     rsp

@@ -42,6 +42,8 @@ impl MemoryKind {
     pub const RESERVED: Self = Self(12);
     /// Persistent (non-volatile) memory.
     pub const PERSISTENT: Self = Self(13);
+    /// The initial ramdisk loaded by the boot loader.
+    pub const INITRD: Self = Self(14);
 
     /// Human-readable name, for diagnostics.
     pub const fn name(self) -> &'static str {
@@ -59,6 +61,7 @@ impl MemoryKind {
             Self::UNUSABLE => "unusable",
             Self::RESERVED => "reserved",
             Self::PERSISTENT => "persistent",
+            Self::INITRD => "initrd",
             _ => "unknown",
         }
     }
@@ -70,7 +73,7 @@ impl MemoryKind {
             self,
             Self::MMIO | Self::RESERVED | Self::UNUSABLE | Self::PERSISTENT
         ) && self.0 >= Self::USABLE.0
-            && self.0 <= Self::PERSISTENT.0
+            && self.0 <= Self::INITRD.0
     }
 }
 

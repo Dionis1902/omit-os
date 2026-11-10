@@ -15,9 +15,11 @@ mod fbcon;
 mod log;
 mod mm;
 mod panic;
+mod process;
 mod sched;
 mod shell;
 mod sync;
+mod syscall;
 mod time;
 mod ui;
 
@@ -111,8 +113,8 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     // SAFETY: forwarded from this function's contract.
     let result = unsafe { init(boot_info) };
 
-    let cmdline = match result {
-        Ok(cmdline) => cmdline,
+    let (cmdline, initrd) = match result {
+        Ok(context) => context,
         Err(error) => {
             error!("kernel initialization failed: {error}");
             qemu::exit(ExitCode::Failure);
@@ -127,7 +129,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     if !cmdline.flag("noshell") {
-        shell::run();
+        shell::run(initrd);
     }
 
     qemu::exit(ExitCode::Success);
@@ -143,7 +145,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
 /// # Safety
 ///
 /// Same contract as [`_start`].
-unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError> {
+unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static [u8]), InitError> {
     // 1. Console. Its result is checked only after the command line has been
     //    read, so that a failure can still be reported to the test harness
     //    through the QEMU exit device.
@@ -253,6 +255,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
     // memory map, the command line) points into the direct map.
     unsafe { arch::paging::unmap_identity(boot_info) }.map_err(InitError::Paging)?;
     mm::init_direct_map(boot_info);
+    arch::uspace::init();
     info!(
         "paging: identity map removed; direct map of {} MiB at {:#x}",
         boot_info.phys_map_size >> 20,
@@ -364,6 +367,8 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
     sched::self_test().map_err(InitError::SchedulerSelfTest)?;
     info!("sched: round-robin scheduler started; preemption self-test passed");
     sched::spawn("status-bar", ui::status_thread, 0).map_err(InitError::Scheduler)?;
+    arch::syscall::init();
+    info!("syscall: user mode and system call entry enabled");
 
     // 10. Audit the final address space, including the mappings made above.
     // SAFETY: `boot_info` is validated and describes the active address
@@ -383,7 +388,22 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         warn!("irq: {unhandled} interrupt(s) arrived on vectors without a handler");
     }
 
-    Ok(cmdline)
+    // The initial ramdisk: memory the loader tagged for that purpose, which
+    // the frame allocator therefore never hands out.
+    let initrd: &'static [u8] = if boot_info.initrd_len == 0 {
+        &[]
+    } else {
+        let pointer = mm::phys_to_virt(boot_info.initrd_phys, boot_info.initrd_len)
+            .ok_or(InitError::BootInfo(BootInfoError::BadField("initrd_*")))?;
+        // SAFETY: `validate` checked that the range lies inside the direct
+        // map (so `phys_to_virt` succeeded); the loader filled it with the
+        // ramdisk file and tagged it `INITRD`, a kind the kernel neither
+        // allocates nor writes, so the bytes are initialised and immutable
+        // for the lifetime of the kernel.
+        unsafe { core::slice::from_raw_parts(pointer, boot_info.initrd_len as usize) }
+    };
+
+    Ok((cmdline, initrd))
 }
 
 fn on_off(enabled: bool) -> &'static str {

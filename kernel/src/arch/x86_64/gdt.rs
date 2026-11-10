@@ -13,7 +13,16 @@ use core::sync::atomic::{AtomicBool, Ordering};
 pub const KERNEL_CS: u16 = 0x08;
 /// Selector of the kernel data segment.
 pub const KERNEL_DS: u16 = 0x10;
-const TSS_SELECTOR: u16 = 0x18;
+/// Selector of the user data segment (requested privilege level 3).
+pub const USER_DS: u16 = 0x18 | 3;
+/// Selector of the user code segment (requested privilege level 3).
+pub const USER_CS: u16 = 0x20 | 3;
+const TSS_SELECTOR: u16 = 0x28;
+
+// `syscall` and `sysret` derive their selectors from fixed offsets, which
+// dictates this order: kernel code, kernel data, user data, user code.
+const _: () = assert!(KERNEL_DS == KERNEL_CS + 8);
+const _: () = assert!(USER_DS == (KERNEL_DS + 8) | 3 && USER_CS == (KERNEL_DS + 16) | 3);
 
 /// Interrupt Stack Table slot (1-based, as encoded in IDT entries) used by
 /// the double-fault handler.
@@ -43,9 +52,10 @@ const _: () = assert!(TSS_SIZE == 104);
 #[repr(C, align(16))]
 struct DoubleFaultStack([u8; DOUBLE_FAULT_STACK_SIZE]);
 
-/// Null, kernel code, kernel data, and the two-slot 64-bit TSS descriptor.
+/// Null, kernel code, kernel data, user data, user code, and the two-slot
+/// 64-bit TSS descriptor.
 #[repr(C, align(8))]
-struct Gdt([u64; 5]);
+struct Gdt([u64; 7]);
 
 /// Operand of `lgdt`/`lidt`.
 #[repr(C, packed)]
@@ -58,6 +68,10 @@ pub(super) struct DescriptorTablePointer {
 const KERNEL_CODE_DESCRIPTOR: u64 = 0x00AF_9A00_0000_FFFF;
 // Present, ring 0, data, read/write.
 const KERNEL_DATA_DESCRIPTOR: u64 = 0x00CF_9200_0000_FFFF;
+// Present, ring 3, data, read/write.
+const USER_DATA_DESCRIPTOR: u64 = 0x00CF_F200_0000_FFFF;
+// Present, ring 3, code, execute/read, 64-bit (L=1).
+const USER_CODE_DESCRIPTOR: u64 = 0x00AF_FA00_0000_FFFF;
 
 // These tables are read by the CPU for as long as the kernel runs, so they
 // need a fixed address and static lifetime. They are written exactly once,
@@ -73,7 +87,7 @@ static mut TSS: Tss = Tss {
     reserved3: 0,
     iomap_base: TSS_SIZE as u16,
 };
-static mut GDT: Gdt = Gdt([0; 5]);
+static mut GDT: Gdt = Gdt([0; 7]);
 
 static INITIALISED: AtomicBool = AtomicBool::new(false);
 
@@ -113,6 +127,8 @@ pub fn init() {
             0,
             KERNEL_CODE_DESCRIPTOR,
             KERNEL_DATA_DESCRIPTOR,
+            USER_DATA_DESCRIPTOR,
+            USER_CODE_DESCRIPTOR,
             // Low half: limit, base[0..32], type 0x9 (available 64-bit TSS),
             // present.
             (limit & 0xFFFF)
@@ -134,7 +150,7 @@ pub fn init() {
     // Selector 0x08 is a valid 64-bit ring-0 code segment and 0x10 a valid
     // data segment, so reloading CS (via a far return to the next
     // instruction) and the data segment registers keeps the CPU in the same
-    // mode and privilege level. Selector 0x18 is a valid available TSS, as
+    // mode and privilege level. `TSS_SELECTOR` is a valid available TSS, as
     // `ltr` requires. FS and GS are loaded with the null selector, which is
     // permitted in 64-bit mode. Interrupts are disabled, so nothing can
     // observe the intermediate state.
@@ -161,4 +177,22 @@ pub fn init() {
             options(preserves_flags),
         );
     }
+}
+
+/// Sets the stack the CPU switches to when an interrupt or exception
+/// arrives while it is executing user code (`TSS.RSP0`).
+///
+/// Called by the scheduler with the top of the next thread's kernel stack.
+///
+/// # Safety
+///
+/// `stack_top` must be the top of a mapped kernel stack that is in use by
+/// nothing but the thread about to run, and interrupts must be disabled.
+pub unsafe fn set_kernel_stack(stack_top: u64) {
+    let tss = &raw mut TSS;
+    // SAFETY: the TSS is only written here and in `init`. Interrupts are
+    // disabled (function contract) and there is one CPU, so the CPU cannot
+    // read `rsp[0]` during the update. The field is in a packed struct and
+    // is written unaligned.
+    unsafe { (&raw mut (*tss).rsp[0]).write_unaligned(stack_top) };
 }

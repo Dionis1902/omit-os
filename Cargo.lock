@@ -56,6 +56,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09b7b72dee69e4110d1b91fb8d497c1b74a54082da5738dff84136142c4f767b"
 
 [[package]]
+name = "omit-abi"
+version = "0.1.0"
+
+[[package]]
 name = "omit-acpi"
 version = "0.1.0"
 
@@ -81,8 +85,10 @@ name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
  "noto-sans-mono-bitmap",
+ "omit-abi",
  "omit-acpi",
  "omit-bootproto",
+ "omit-elf",
  "omit-mm",
  "omit-shell",
  "omit-term",
@@ -94,6 +100,13 @@ name = "omit-mm"
 version = "0.1.0"
 
 [[package]]
+name = "omit-rt"
+version = "0.1.0"
+dependencies = [
+ "omit-abi",
+]
+
+[[package]]
 name = "omit-shell"
 version = "0.1.0"
 dependencies = [
@@ -103,6 +116,13 @@ dependencies = [
 [[package]]
 name = "omit-term"
 version = "0.1.0"
+
+[[package]]
+name = "omit-user-programs"
+version = "0.1.0"
+dependencies = [
+ "omit-rt",
+]
 
 [[package]]
 name = "omit-vfs"
@@ -220,4 +240,5 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "fatfs",
+ "omit-vfs",
 ]

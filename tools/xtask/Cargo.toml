@@ -11,5 +11,8 @@ publish = false
 # no wall-clock timestamps leak into the image (reproducible builds).
 fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
 
+# Used to write (and round-trip test) the initial ramdisk archive.
+omit-vfs.workspace = true
+
 [lints]
 workspace = true

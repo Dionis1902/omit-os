@@ -52,6 +52,10 @@ const MEM_KERNEL_IMAGE: MemoryType = MemoryType::custom(0x8000_0001);
 const MEM_KERNEL_STACK: MemoryType = MemoryType::custom(0x8000_0002);
 const MEM_PAGE_TABLES: MemoryType = MemoryType::custom(0x8000_0003);
 const MEM_BOOT_INFO: MemoryType = MemoryType::custom(0x8000_0004);
+const MEM_INITRD: MemoryType = MemoryType::custom(0x8000_0005);
+
+/// Upper bound on the size of the initial ramdisk.
+const INITRD_MAX: u64 = 64 << 20;
 
 /// Upper bound on the size of the kernel ELF file, as a sanity check.
 const KERNEL_FILE_MAX: u64 = 256 << 20;
@@ -140,6 +144,7 @@ fn read_file(
     root: &mut Directory,
     path: &str,
     max_size: u64,
+    memory_type: MemoryType,
 ) -> Result<Option<&'static [u8]>, Error> {
     let mut path_buf = [0u16; 64];
     let path = CStr16::from_str_with_buf(path, &mut path_buf)
@@ -168,7 +173,7 @@ fn read_file(
         return Ok(Some(&[]));
     }
 
-    let address = alloc_zeroed_pages(MemoryType::LOADER_DATA, pages_for(size))?;
+    let address = alloc_zeroed_pages(memory_type, pages_for(size))?;
     // SAFETY: `address` is a fresh, zero-initialised allocation of at least
     // `size` bytes that is never freed or otherwise referenced, so a unique
     // `'static` slice over it is sound.
@@ -303,6 +308,7 @@ fn memory_kind(ty: MemoryType) -> MemoryKind {
         MEM_KERNEL_STACK => MemoryKind::KERNEL_STACK,
         MEM_PAGE_TABLES => MemoryKind::PAGE_TABLES,
         MEM_BOOT_INFO => MemoryKind::BOOT_INFO,
+        MEM_INITRD => MemoryKind::INITRD,
         _ => MemoryKind::RESERVED,
     }
 }
@@ -432,17 +438,38 @@ fn run() -> Result<core::convert::Infallible, Error> {
     let cpu = check_cpu()?;
 
     // --- Load files -------------------------------------------------------
-    let (kernel_file, cmdline) = {
+    let (kernel_file, cmdline, initrd) = {
         let mut fs = boot::get_image_file_system(boot::image_handle())
             .map_err(Error::uefi("cannot access the boot volume"))?;
         let mut root = fs
             .open_volume()
             .map_err(Error::uefi("cannot open the boot volume"))?;
-        let kernel = read_file(&mut root, KERNEL_PATH, KERNEL_FILE_MAX)?
-            .ok_or(Error::new("kernel image \\EFI\\OMIT\\KERNEL.ELF not found"))?;
-        let cmdline = read_file(&mut root, CMDLINE_PATH, CMDLINE_MAX_LEN as u64)?.unwrap_or(&[]);
-        (kernel, cmdline)
+        let kernel = read_file(
+            &mut root,
+            KERNEL_PATH,
+            KERNEL_FILE_MAX,
+            MemoryType::LOADER_DATA,
+        )?
+        .ok_or(Error::new("kernel image \\EFI\\OMIT\\KERNEL.ELF not found"))?;
+        let cmdline = read_file(
+            &mut root,
+            CMDLINE_PATH,
+            CMDLINE_MAX_LEN as u64,
+            MemoryType::LOADER_DATA,
+        )?
+        .unwrap_or(&[]);
+        // Unlike the kernel file, the ramdisk is handed to the kernel as
+        // is, so it gets its own memory type.
+        let initrd = read_file(
+            &mut root,
+            omit_bootproto::INITRD_PATH,
+            INITRD_MAX,
+            MEM_INITRD,
+        )?
+        .unwrap_or(&[]);
+        (kernel, cmdline, initrd)
     };
+    println!("initial ramdisk: {} bytes", initrd.len());
     println!("kernel image: {} bytes", kernel_file.len());
 
     // --- Build the kernel address space -----------------------------------
@@ -585,6 +612,12 @@ fn run() -> Result<core::convert::Infallible, Error> {
         framebuffer_height: framebuffer.height,
         framebuffer_stride: framebuffer.stride,
         framebuffer_format: framebuffer.format,
+        initrd_phys: if initrd.is_empty() {
+            0
+        } else {
+            initrd.as_ptr() as u64
+        },
+        initrd_len: initrd.len() as u64,
     };
     // SAFETY: `info_phys` is the page-aligned start of the boot-info
     // allocation, large enough for a `BootInfo` and not aliased.

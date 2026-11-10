@@ -45,7 +45,7 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_be_bytes(*b"OMITBOOT");
 
 /// Version of the protocol described by this crate. Bumped on any
 /// incompatible change to [`BootInfo`] or the hand-off contract.
-pub const BOOT_PROTOCOL_VERSION: u32 = 2;
+pub const BOOT_PROTOCOL_VERSION: u32 = 3;
 
 /// Start of the higher half (first canonical kernel address); all physical
 /// memory is mapped here ("direct map").
@@ -134,7 +134,15 @@ pub struct BootInfo {
     /// Pixel layout: [`FRAMEBUFFER_NONE`], [`FRAMEBUFFER_RGB`] or
     /// [`FRAMEBUFFER_BGR`].
     pub framebuffer_format: u32,
+    /// Physical address of the initial ramdisk (a tar archive), inside the
+    /// direct map; meaningful only if `initrd_len` is not zero.
+    pub initrd_phys: u64,
+    /// Length of the initial ramdisk in bytes; zero if there is none.
+    pub initrd_len: u64,
 }
+
+/// Path of the optional initial ramdisk on the EFI system partition.
+pub const INITRD_PATH: &str = "\\EFI\\OMIT\\INITRD";
 
 /// No usable framebuffer was found.
 pub const FRAMEBUFFER_NONE: u32 = 0;
@@ -222,6 +230,14 @@ impl BootInfo {
         }
         if self.rsdp_phys >= self.phys_map_size {
             return Err(BootInfoError::BadField("rsdp_phys"));
+        }
+        if self.initrd_len != 0
+            && self
+                .initrd_phys
+                .checked_add(self.initrd_len)
+                .is_none_or(|end| end > self.phys_map_size)
+        {
+            return Err(BootInfoError::BadField("initrd_*"));
         }
         match self.framebuffer_format {
             FRAMEBUFFER_NONE => {}
@@ -320,7 +336,23 @@ mod tests {
             framebuffer_height: 800,
             framebuffer_stride: 1280,
             framebuffer_format: FRAMEBUFFER_BGR,
+            initrd_phys: 0x30_0000,
+            initrd_len: 0x2000,
         }
+    }
+
+    #[test]
+    fn validates_initrd_range() {
+        let mut bi = valid();
+        bi.initrd_len = 0;
+        bi.initrd_phys = u64::MAX;
+        assert_eq!(bi.validate(), Ok(()), "absent initrd needs no address");
+        let mut bi = valid();
+        bi.initrd_phys = bi.phys_map_size - 0x1000;
+        assert_eq!(bi.validate(), Err(BootInfoError::BadField("initrd_*")));
+        let mut bi = valid();
+        bi.initrd_phys = u64::MAX - 1;
+        assert_eq!(bi.validate(), Err(BootInfoError::BadField("initrd_*")));
     }
 
     #[test]

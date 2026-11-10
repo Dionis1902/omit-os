@@ -328,13 +328,41 @@ pub fn self_test() -> bool {
 
 /// Rust entry point for all CPU exceptions; called from `exc_common`.
 extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
+    // The low two bits of the saved CS are the privilege level that was
+    // interrupted.
+    let from_user = frame.cs & 3 == 3;
     if frame.vector >= EXCEPTION_COUNT as u64 {
         interrupts::dispatch(frame.vector);
         // The interrupt has been acknowledged; if the time slice is over
         // or a thread was woken, switch now. The interrupted thread resumes
         // here later and returns through the normal trap exit.
         crate::sched::preempt_if_needed();
+        if from_user {
+            crate::process::exit_if_killed();
+        }
         return;
+    }
+    if from_user {
+        // A fault in a user program is that program's problem: report it
+        // and end the process. The kernel and everything else carry on.
+        let (pid, process_name) = crate::process::describe_current();
+        let name = EXCEPTION_NAMES
+            .get(frame.vector as usize)
+            .copied()
+            .unwrap_or("unknown exception");
+        if frame.vector == VECTOR_PAGE_FAULT {
+            kprintln!(
+                "[process {pid} ({process_name}) terminated: {name} accessing {:#x} at rip {:#x}]",
+                cpu::read_cr2(),
+                frame.rip
+            );
+        } else {
+            kprintln!(
+                "[process {pid} ({process_name}) terminated: {name} at rip {:#x}]",
+                frame.rip
+            );
+        }
+        crate::process::exit(omit_abi::EXIT_FAULT);
     }
     if frame.vector == VECTOR_BREAKPOINT {
         BREAKPOINTS.fetch_add(1, Ordering::Relaxed);

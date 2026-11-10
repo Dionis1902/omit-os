@@ -25,6 +25,8 @@ pub struct CommandLine {
     pub words: Vec<String>,
     /// Output redirection, if any.
     pub redirect: Option<Redirect>,
+    /// The line ended with `&`: do not wait for the program to finish.
+    pub background: bool,
 }
 
 /// Why a line could not be parsed.
@@ -38,6 +40,8 @@ pub enum ParseError {
     DuplicateRedirect,
     /// The line ends with a lone backslash.
     TrailingBackslash,
+    /// `&` appears somewhere other than at the end of the line.
+    MisplacedBackground,
 }
 
 impl core::fmt::Display for ParseError {
@@ -47,6 +51,7 @@ impl core::fmt::Display for ParseError {
             Self::MissingRedirectTarget => "missing file name after redirection",
             Self::DuplicateRedirect => "more than one output redirection",
             Self::TrailingBackslash => "trailing backslash",
+            Self::MisplacedBackground => "'&' is only allowed at the end of a command",
         })
     }
 }
@@ -54,6 +59,7 @@ impl core::fmt::Display for ParseError {
 enum Token {
     Word(String),
     Redirect { append: bool },
+    Background,
 }
 
 fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
@@ -75,6 +81,12 @@ fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
                 }
                 let append = chars.next_if_eq(&'>').is_some();
                 tokens.push(Token::Redirect { append });
+            }
+            '&' => {
+                if let Some(done) = word.take() {
+                    tokens.push(Token::Word(done));
+                }
+                tokens.push(Token::Background);
             }
             '\'' => {
                 let current = word.get_or_insert_with(String::new);
@@ -122,7 +134,16 @@ pub fn parse(line: &str) -> Result<CommandLine, ParseError> {
     let mut command = CommandLine::default();
     let mut tokens = tokenize(line)?.into_iter();
     while let Some(token) = tokens.next() {
+        if command.background {
+            return Err(ParseError::MisplacedBackground);
+        }
         match token {
+            Token::Background => {
+                if command.words.is_empty() {
+                    return Err(ParseError::MisplacedBackground);
+                }
+                command.background = true;
+            }
             Token::Word(word) => command.words.push(word),
             Token::Redirect { append } => {
                 let Some(Token::Word(path)) = tokens.next() else {
@@ -186,6 +207,19 @@ mod tests {
                 append: true
             })
         );
+    }
+
+    #[test]
+    fn background() {
+        let c = parse("spin &").unwrap();
+        assert_eq!(c.words, ["spin"]);
+        assert!(c.background);
+        assert!(parse("spin&").unwrap().background);
+        assert!(!parse("echo '&'").unwrap().background);
+        assert!(!parse("echo a\\&").unwrap().background);
+        assert_eq!(parse("&"), Err(ParseError::MisplacedBackground));
+        assert_eq!(parse("a & b"), Err(ParseError::MisplacedBackground));
+        assert_eq!(parse("a & &"), Err(ParseError::MisplacedBackground));
     }
 
     #[test]

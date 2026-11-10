@@ -120,6 +120,28 @@ fn out_dir(options: &Options) -> Result<PathBuf> {
 struct Artifacts {
     loader: PathBuf,
     kernel: PathBuf,
+    /// The initial ramdisk: a tar archive of the user programs.
+    initrd: Vec<u8>,
+}
+
+/// User programs shipped in `/bin` of the initial ramdisk.
+const USER_PROGRAMS: &[&str] = &["crash", "hello", "sleeper", "spin"];
+
+/// Packs `files` (archive path, contents) into a `ustar` archive with no
+/// timestamps, so identical inputs give identical output.
+fn build_tar(files: &[(String, Vec<u8>)]) -> Result<Vec<u8>> {
+    use omit_vfs::tar::{EntryKind, header};
+    let mut archive = Vec::new();
+    for (path, data) in files {
+        let block = header(path, EntryKind::File, data.len())
+            .ok_or_else(|| format!("cannot archive `{path}`"))?;
+        archive.extend_from_slice(&block);
+        archive.extend_from_slice(data);
+        archive.resize(archive.len().div_ceil(512) * 512, 0);
+    }
+    // End-of-archive marker: two zero blocks.
+    archive.resize(archive.len() + 1024, 0);
+    Ok(archive)
 }
 
 fn cargo_build(package: &str, target: &str, options: &Options) -> Result<()> {
@@ -140,7 +162,15 @@ fn cargo_build(package: &str, target: &str, options: &Options) -> Result<()> {
 fn build(options: &Options) -> Result<Artifacts> {
     cargo_build("omit-boot", "x86_64-unknown-uefi", options)?;
     cargo_build("omit-kernel", "x86_64-unknown-none", options)?;
+    cargo_build("omit-user-programs", "x86_64-unknown-none", options)?;
     let target = workspace_root().join("target");
+    let user_dir = target
+        .join("x86_64-unknown-none")
+        .join(options.profile_dir());
+    let mut files = Vec::new();
+    for program in USER_PROGRAMS {
+        files.push((format!("bin/{program}"), fs::read(user_dir.join(program))?));
+    }
     Ok(Artifacts {
         loader: target
             .join("x86_64-unknown-uefi")
@@ -150,6 +180,7 @@ fn build(options: &Options) -> Result<Artifacts> {
             .join("x86_64-unknown-none")
             .join(options.profile_dir())
             .join("omit-kernel"),
+        initrd: build_tar(&files)?,
     })
 }
 
@@ -203,6 +234,7 @@ fn write_esp(
     // boot-manager configuration.
     put(&boot, "BOOTX64.EFI", &fs::read(&artifacts.loader)?)?;
     put(&omit, "KERNEL.ELF", &fs::read(&artifacts.kernel)?)?;
+    put(&omit, "INITRD", &artifacts.initrd)?;
     if !cmdline.is_empty() {
         put(&omit, "CMDLINE", cmdline.as_bytes())?;
     }
@@ -445,6 +477,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] time: timer interrupt self-test passed",
             "[INFO ] console: serial input enabled",
             "[INFO ] sched: round-robin scheduler started; preemption self-test passed",
+            "[INFO ] syscall: user mode and system call entry enabled",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
@@ -492,10 +525,30 @@ const BOOT_TESTS: &[BootTest] = &[
             ("cd /", ""),
             ("ls /home/user", "ls /home/user\nomit:/# "),
             ("nosuchcommand", "\nnosuchcommand: command not found\n"),
+            // User programs: each runs in ring 3 in its own address space.
             (
-                "ps",
-                "\nps: not available: Omit OS has no process management yet\n",
+                "hello",
+                "\nHello from user mode! I am process 1 and the system has been up for ",
             ),
+            ("ls /bin", "\ncrash\nhello\nsleeper\nspin\n"),
+            // A program that misbehaves is stopped; the shell carries on.
+            (
+                "crash",
+                "write(kernel address) -> Some(Fault)\nwrite(unmapped address) -> Some(Fault)\nsyscall 9999 -> Some(NoSuchSyscall)\nnow reading kernel memory directly...\n[process 2 (crash) terminated: #PF page fault accessing 0xffffffff80000000 at rip 0x4",
+            ),
+            ("echo still-alive", "\nstill-alive\n"),
+            // Exit statuses reach the shell, and sleeping works.
+            (
+                "sleeper",
+                "sleeper: tick 5\nsleeper: exited with status 7\n",
+            ),
+            // A program that never yields is preempted, visible and killable.
+            ("spin &", "\n[4] spin\n"),
+            ("ps", " spin\n"),
+            ("kill 4", ""),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("kill 4", "\nkill: 4: no such process\n"),
+            ("free", "\nMemory: "),
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],

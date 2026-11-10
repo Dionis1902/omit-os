@@ -23,6 +23,7 @@ pub mod parse;
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
 use omit_vfs::{FileType, FsError, Vfs, WriteMode, path};
@@ -38,6 +39,52 @@ pub struct SystemInfo {
     pub release: &'static str,
     /// Hardware architecture.
     pub machine: &'static str,
+}
+
+/// One line of `ps` output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskInfo {
+    /// Kernel thread ID.
+    pub thread: u64,
+    /// Process ID, for threads that run a user program.
+    pub pid: Option<u64>,
+    /// Scheduler state, e.g. `running`.
+    pub state: &'static str,
+    /// CPU time consumed, in milliseconds.
+    pub cpu_ms: u64,
+    /// Thread or program name.
+    pub name: String,
+}
+
+/// What the shell needs from the system it runs on, beyond the filesystem.
+pub trait Host {
+    /// Starts the program whose executable image is `image` as a new
+    /// process called `name`; returns its process ID.
+    fn spawn(&mut self, name: &str, image: &[u8]) -> Result<u64, String>;
+
+    /// Blocks until process `pid` ends and returns its exit status, or
+    /// `None` if there is no such process.
+    fn wait(&mut self, pid: u64) -> Option<i32>;
+
+    /// Requests termination of process `pid`; `false` if it does not exist.
+    fn kill(&mut self, pid: u64) -> bool;
+
+    /// Lists all threads and processes.
+    fn tasks(&mut self) -> Vec<TaskInfo>;
+
+    /// Current memory usage.
+    fn memory(&mut self) -> MemoryInfo;
+}
+
+/// Memory usage figures for `free`, in KiB.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryInfo {
+    /// Physical memory managed by the kernel.
+    pub total_kib: u64,
+    /// Physical memory currently unallocated.
+    pub free_kib: u64,
+    /// Bytes handed out by the kernel heap, in KiB.
+    pub kernel_heap_kib: u64,
 }
 
 /// What the caller should do after a command has run.
@@ -60,6 +107,15 @@ impl From<fmt::Error> for Failure {
 
 type CommandResult = Result<(), Failure>;
 
+/// Names handled by the shell itself (`exit` is handled before dispatch).
+const BUILTINS: &[&str] = &[
+    "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
+    "ps", "kill", "free",
+];
+
+/// Internal marker returned by `run` for names that are not built-ins.
+const NOT_BUILTIN: &str = "\0not-builtin";
+
 /// Formats a filesystem error the conventional way: `path: reason`.
 fn fs_failure(path: &str, error: FsError) -> Failure {
     Failure(format!("{path}: {error}"))
@@ -78,11 +134,15 @@ Built-in commands:
   cp SOURCE DEST       copy a file
   mv SOURCE DEST       move or rename a file or directory
   rm [-r] PATH...      remove files (-r: and directories, recursively)
+  ps                   list threads and processes
+  kill PID             terminate a process
+  free                 show memory usage
   uname [-a]           print system information
   clear                clear the screen
   exit                 leave the shell
-Output of any command can be redirected with '> FILE' or '>> FILE'.
-Not available yet: ps, kill (there is no process management).
+Output of a built-in command can be redirected with '> FILE' or '>> FILE'.
+Anything else is run as a program from /bin (or by path); end the line with
+'&' to run it in the background.
 ";
 
 /// Shell state: the current directory and the last exit status.
@@ -125,7 +185,13 @@ impl Shell {
     /// Parses and runs one line. Normal output and error messages are both
     /// written to `out` unless the line redirects output to a file, in which
     /// case only error messages reach `out`.
-    pub fn execute(&mut self, line: &str, vfs: &mut Vfs, out: &mut dyn Write) -> Outcome {
+    pub fn execute(
+        &mut self,
+        line: &str,
+        vfs: &mut Vfs,
+        host: &mut dyn Host,
+        out: &mut dyn Write,
+    ) -> Outcome {
         let command = match parse::parse(line) {
             Ok(command) => command,
             Err(error) => {
@@ -150,7 +216,25 @@ impl Shell {
             } else {
                 &mut *out
             };
-            self.run(name, args, vfs, stdout)
+            if command.background && BUILTINS.contains(&name.as_str()) {
+                // `&` is meaningless for commands that run inside the shell.
+                Err(Failure(
+                    "built-in commands cannot run in the background".into(),
+                ))
+            } else {
+                match self.run(name, args, vfs, host, stdout) {
+                    Err(Failure(message)) if message == NOT_BUILTIN => self.run_program(
+                        name,
+                        args,
+                        command.redirect.is_some(),
+                        command.background,
+                        vfs,
+                        host,
+                        stdout,
+                    ),
+                    result => result,
+                }
+            }
         };
         let result = result.and_then(|()| match &command.redirect {
             Some(redirect) => {
@@ -181,6 +265,7 @@ impl Shell {
         name: &str,
         args: &[String],
         vfs: &mut Vfs,
+        host: &mut dyn Host,
         out: &mut dyn Write,
     ) -> CommandResult {
         match name {
@@ -197,10 +282,106 @@ impl Shell {
             "rm" => self.rm(args, vfs),
             "uname" => self.uname(args, out),
             "clear" => Ok(out.write_str("\x1b[2J\x1b[H")?),
-            "ps" | "kill" => Err(Failure(
-                "not available: Omit OS has no process management yet".into(),
-            )),
-            _ => Err(Failure("command not found".into())),
+            "ps" => self.ps(args, host, out),
+            "kill" => self.kill(args, host),
+            "free" => {
+                let memory = host.memory();
+                writeln!(out, "             total        used        free (KiB)")?;
+                writeln!(
+                    out,
+                    "Memory: {:>10}  {:>10}  {:>10}",
+                    memory.total_kib,
+                    memory.total_kib - memory.free_kib,
+                    memory.free_kib
+                )?;
+                Ok(writeln!(
+                    out,
+                    "Kernel heap in use: {} KiB",
+                    memory.kernel_heap_kib
+                )?)
+            }
+            _ => Err(Failure(NOT_BUILTIN.into())),
+        }
+    }
+
+    /// Runs `name` as a program: `/bin/<name>`, or the path itself if it
+    /// contains a slash.
+    #[allow(clippy::too_many_arguments)]
+    fn run_program(
+        &mut self,
+        name: &str,
+        args: &[String],
+        redirected: bool,
+        background: bool,
+        vfs: &mut Vfs,
+        host: &mut dyn Host,
+        out: &mut dyn Write,
+    ) -> CommandResult {
+        let path = if name.contains('/') {
+            self.resolve(name)?
+        } else {
+            path::join("/bin", name)
+        };
+        let image = match vfs.read_file(&path) {
+            Ok(image) => image,
+            Err(FsError::NotFound | FsError::NotADirectory) if !name.contains('/') => {
+                return Err(Failure("command not found".into()));
+            }
+            Err(error) => return Err(Failure(format!("{error}"))),
+        };
+        // Programs write straight to the console and take no arguments yet;
+        // say so rather than silently ignoring what was typed.
+        if redirected {
+            return Err(Failure(
+                "output redirection is not supported for programs yet".into(),
+            ));
+        }
+        if !args.is_empty() {
+            return Err(Failure("program arguments are not supported yet".into()));
+        }
+
+        let display_name = path::file_name(&path).unwrap_or(name);
+        let pid = host.spawn(display_name, &image).map_err(Failure)?;
+        if background {
+            writeln!(out, "[{pid}] {display_name}")?;
+            return Ok(());
+        }
+        match host.wait(pid) {
+            Some(0) | None => Ok(()),
+            Some(status) => Err(Failure(format!("exited with status {status}"))),
+        }
+    }
+
+    fn ps(&self, args: &[String], host: &mut dyn Host, out: &mut dyn Write) -> CommandResult {
+        if !args.is_empty() {
+            return Err(Failure("extra operand".into()));
+        }
+        writeln!(out, "  PID   TID STATE     CPU(ms) NAME")?;
+        for task in host.tasks() {
+            match task.pid {
+                Some(pid) => write!(out, "{pid:>5}")?,
+                None => write!(out, "    -")?,
+            }
+            writeln!(
+                out,
+                " {:>5} {:<8} {:>8} {}",
+                task.thread, task.state, task.cpu_ms, task.name
+            )?;
+        }
+        Ok(())
+    }
+
+    fn kill(&self, args: &[String], host: &mut dyn Host) -> CommandResult {
+        let [arg] = args else {
+            return Err(Failure("usage: kill PID".into()));
+        };
+        let pid: u64 = arg
+            .parse()
+            .map_err(|_| Failure(format!("{arg}: not a process ID")))?;
+        if host.kill(pid) {
+            Ok(())
+        } else {
+            Err(Failure(format!("{pid}: no such process")))
         }
     }
 
@@ -471,9 +652,65 @@ mod tests {
         machine: "x86_64",
     };
 
+    /// A stand-in for the kernel: records what was started and reports
+    /// preset exit statuses.
+    #[derive(Default)]
+    struct MockHost {
+        spawned: Vec<(String, Vec<u8>)>,
+        exit_status: i32,
+        killed: Vec<u64>,
+    }
+
+    impl Host for MockHost {
+        fn spawn(&mut self, name: &str, image: &[u8]) -> Result<u64, String> {
+            if image.starts_with(b"bad") {
+                return Err("not an executable".into());
+            }
+            self.spawned.push((name.into(), image.to_vec()));
+            Ok(self.spawned.len() as u64)
+        }
+
+        fn wait(&mut self, _pid: u64) -> Option<i32> {
+            Some(self.exit_status)
+        }
+
+        fn kill(&mut self, pid: u64) -> bool {
+            self.killed.push(pid);
+            pid as usize <= self.spawned.len()
+        }
+
+        fn memory(&mut self) -> MemoryInfo {
+            MemoryInfo {
+                total_kib: 1000,
+                free_kib: 750,
+                kernel_heap_kib: 12,
+            }
+        }
+
+        fn tasks(&mut self) -> Vec<TaskInfo> {
+            alloc::vec![
+                TaskInfo {
+                    thread: 1,
+                    pid: None,
+                    state: "running",
+                    cpu_ms: 120,
+                    name: "kernel".into(),
+                },
+                TaskInfo {
+                    thread: 9,
+                    pid: Some(3),
+                    state: "ready",
+                    cpu_ms: 40,
+                    name: "spin".into(),
+                },
+            ]
+        }
+    }
+
     struct Session {
         shell: Shell,
         vfs: Vfs,
+        host: MockHost,
     }
 
     impl Session {
@@ -481,6 +718,7 @@ mod tests {
             Self {
                 shell: Shell::new(SYSTEM),
                 vfs: Vfs::new(Box::new(RamFs::new())),
+                host: MockHost::default(),
             }
         }
 
@@ -488,7 +726,8 @@ mod tests {
         fn run(&mut self, line: &str) -> String {
             let mut out = String::new();
             assert_eq!(
-                self.shell.execute(line, &mut self.vfs, &mut out),
+                self.shell
+                    .execute(line, &mut self.vfs, &mut self.host, &mut out),
                 Outcome::Continue
             );
             out
@@ -660,17 +899,102 @@ mod tests {
         assert!(s.ok("help").contains("mkdir [-p] DIR..."));
         assert_eq!(s.ok("clear"), "\x1b[2J\x1b[H");
         assert_eq!(s.err("frobnicate"), "frobnicate: command not found\n");
-        assert!(s.err("ps").contains("no process management"));
-        assert!(s.err("kill 1").contains("no process management"));
+    }
+
+    #[test]
+    fn runs_programs_from_bin_or_by_path() {
+        let mut s = Session::new();
+        s.ok("mkdir /bin /opt");
+        s.ok("echo -n image-of-hello > /bin/hello");
+        s.ok("echo -n other > /opt/tool");
+
+        assert_eq!(s.ok("hello"), "");
+        assert_eq!(
+            s.host.spawned[0],
+            ("hello".into(), b"image-of-hello".to_vec())
+        );
+        s.ok("cd /opt");
+        s.ok("./tool");
+        s.ok("/bin/hello");
+        assert_eq!(s.host.spawned.len(), 3);
+        assert_eq!(s.host.spawned[1].0, "tool");
+
+        // A bare name is only looked up in /bin, never the current directory.
+        assert_eq!(s.err("tool"), "tool: command not found\n");
+        assert_eq!(s.err("./missing"), "./missing: No such file or directory\n");
+        assert_eq!(s.err("/opt"), "/opt: Is a directory\n");
+
+        s.host.exit_status = 7;
+        assert_eq!(s.err("hello"), "hello: exited with status 7\n");
+        assert_eq!(s.shell.last_status(), 1);
+
+        s.ok("echo -n bad-image > /bin/broken");
+        assert_eq!(s.err("broken"), "broken: not an executable\n");
+    }
+
+    #[test]
+    fn background_jobs_and_unsupported_program_features() {
+        let mut s = Session::new();
+        s.ok("mkdir /bin");
+        s.ok("echo -n x > /bin/spin");
+        s.host.exit_status = 9;
+        assert_eq!(
+            s.ok("spin &"),
+            "[1] spin\n",
+            "background jobs are not waited for"
+        );
+        assert_eq!(
+            s.err("spin > out"),
+            "spin: output redirection is not supported for programs yet\n"
+        );
+        assert_eq!(
+            s.err("spin fast"),
+            "spin: program arguments are not supported yet\n"
+        );
+        assert_eq!(s.host.spawned.len(), 1, "rejected commands start nothing");
+        assert_eq!(
+            s.err("pwd &"),
+            "pwd: built-in commands cannot run in the background\n"
+        );
+        assert_eq!(
+            s.err("a & b"),
+            "omsh: syntax error: '&' is only allowed at the end of a command\n"
+        );
+    }
+
+    #[test]
+    fn ps_and_kill() {
+        let mut s = Session::new();
+        assert_eq!(
+            s.ok("ps"),
+            "  PID   TID STATE     CPU(ms) NAME\n    -     1 running       120 kernel\n    3     9 ready          40 spin\n"
+        );
+        s.ok("mkdir /bin");
+        s.ok("echo -n x > /bin/spin");
+        s.ok("spin &");
+        s.ok("kill 1");
+        assert_eq!(s.host.killed, [1]);
+        assert_eq!(s.err("kill 42"), "kill: 42: no such process\n");
+        assert_eq!(s.err("kill abc"), "kill: abc: not a process ID\n");
+        assert_eq!(s.err("kill"), "kill: usage: kill PID\n");
+        assert_eq!(s.err("ps -x"), "ps: extra operand\n");
+        assert_eq!(
+            s.ok("free"),
+            "             total        used        free (KiB)\nMemory:       1000         250         750\nKernel heap in use: 12 KiB\n"
+        );
     }
 
     #[test]
     fn exit_is_reported() {
         let mut s = Session::new();
         let mut out = String::new();
-        assert_eq!(s.shell.execute("exit", &mut s.vfs, &mut out), Outcome::Exit);
         assert_eq!(
-            s.shell.execute("  exit  now", &mut s.vfs, &mut out),
+            s.shell.execute("exit", &mut s.vfs, &mut s.host, &mut out),
+            Outcome::Exit
+        );
+        assert_eq!(
+            s.shell
+                .execute("  exit  now", &mut s.vfs, &mut s.host, &mut out),
             Outcome::Exit
         );
     }

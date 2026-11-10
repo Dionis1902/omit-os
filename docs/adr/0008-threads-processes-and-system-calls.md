@@ -1,0 +1,93 @@
+# ADR 0008: Threads, processes and system calls
+
+- Status: accepted
+- Date: 2026-11-10
+
+## Decisions
+
+### Scheduler
+
+- **Preemptive round-robin, one CPU, 10 ms time slice.** It is the simplest
+  scheduler that is correct, and it establishes the interfaces everything
+  else builds on: threads, context switches, wait queues, sleep and join.
+  The project's real scheduling goals (latency classes, SMP, topology and
+  P/E-core awareness, workload modes) are deliberately not attempted yet;
+  they need measurements on real workloads that do not exist until there is
+  a userspace to run them.
+- **Context switch in ~20 lines of assembly**: push the callee-saved
+  registers, swap stack pointers, pop, return. Preemption needs no separate
+  path: the timer interrupt handler calls the same `reschedule`, and the
+  preempted thread later resumes inside its own trap frame.
+- **One lock** protects all scheduler state. Switches are prepared under it
+  and performed after it is released with interrupts still off.
+- **Kernel stacks** are 64 KiB, each in its own virtual slot with an unmapped
+  guard page below, so an overflow faults instead of corrupting memory.
+- **Blocking is explicit**: `WaitQueue::wait_until(condition)` re-checks the
+  condition with interrupts disabled and enqueues before switching, so
+  wake-ups cannot be lost. Console input uses it; the idle thread halts the
+  CPU when nothing is runnable.
+
+### Processes
+
+- A process is a user address space plus one kernel thread. Multi-threaded
+  processes are not supported yet.
+- **Address spaces** have a private lower half; the upper-half top-level
+  entries are copied from the kernel's table at creation and share its
+  lower-level tables. This relies on the kernel never creating a new
+  top-level entry after boot, which holds because all four kernel regions
+  are populated during initialisation.
+- **Programs** are static, fixed-address ELF64 executables. The loader
+  enforces page alignment, the user address range and W^X per segment, and
+  gives each process a 256 KiB stack. There is no dynamic linking, no ASLR
+  and no demand paging: every page is allocated and filled at load time.
+- **Exit and cleanup**: when a process's thread is reaped, dropping its
+  address space walks the lower half and frees every frame and page table.
+  Verified by running 32 processes (15 of them crashing) and observing
+  identical free-memory figures before and after.
+
+### System calls
+
+- **`syscall`/`sysret`**, not a software interrupt: it is the fast path on
+  x86-64 and the one a performance-oriented kernel has to get right
+  eventually. The GDT is ordered as the instruction pair requires.
+- The entry code switches to the thread's kernel stack by hand. On one CPU
+  the two per-CPU values it needs are statics; with SMP they move behind
+  `swapgs`.
+- Registers the ABI does not preserve are zeroed before returning, so kernel
+  values do not leak to user code.
+- **User pointers are never dereferenced.** The kernel copies through the
+  process's page tables and the direct map, checking each page is mapped for
+  user access. A bad pointer yields `EFAULT`; it cannot fault the kernel and
+  needs no SMAP override. This costs a table walk per page and will be
+  revisited (direct access with fault fix-up) when measurements justify it.
+- The ABI lives in `libs/abi` and is shared by the kernel and the userspace
+  runtime. It has six calls: `exit`, `write` (console only), `getpid`,
+  `yield`, `sleep`, `uptime`. It is explicitly unstable.
+
+### Fault containment
+
+A CPU exception raised in user mode ends that process (exit status 139) with
+a one-line report; the kernel and all other processes continue. `kill` marks
+a process, which exits the next time it is about to return to user mode —
+so even a program that never makes a system call dies at the next timer
+tick.
+
+### Getting programs onto the system
+
+- User programs are built as part of the workspace (`userspace/`), packed
+  into a `ustar` archive by `xtask`, and placed on the boot volume as
+  `\EFI\OMIT\INITRD`. The loader passes it through (boot protocol v3) and the
+  kernel unpacks it into the RAM filesystem as `/bin/*`.
+- tar was chosen over a custom format because standard tools can create and
+  inspect it and the reader is about a hundred lines.
+
+## Not done
+
+- No file, memory-management or process-creation system calls: a program
+  cannot open a file, allocate memory beyond its image and stack, or start
+  another program. Only the shell can start processes.
+- No program arguments or environment, no standard input, no output
+  redirection for programs.
+- No signals; `kill` is unconditional termination.
+- Panic and exception backtraces only cover the boot thread's stack.
+- SMP: everything here assumes one CPU.

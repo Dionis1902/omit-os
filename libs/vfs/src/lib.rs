@@ -26,6 +26,7 @@ extern crate std;
 
 pub mod path;
 pub mod ramfs;
+pub mod tar;
 
 use alloc::boxed::Box;
 use alloc::string::String;

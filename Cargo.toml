@@ -3,6 +3,8 @@ resolver = "3"
 members = [
     "boot",
     "kernel",
+    "libs/abi",
+    "libs/abi",
     "libs/acpi",
     "libs/bootproto",
     "libs/elf",
@@ -11,6 +13,8 @@ members = [
     "libs/vfs",
     "shell",
     "tools/xtask",
+    "userspace/programs",
+    "userspace/rt",
 ]
 # Plain `cargo build` / `cargo test` operate on the host-buildable crates only.
 # The loader and kernel need bare-metal targets; `cargo xtask` drives those.
@@ -33,10 +37,12 @@ repository = "https://github.com/dionis1902/omit-os"
 rust-version = "1.97"
 
 [workspace.dependencies]
+omit-abi = { path = "libs/abi" }
 omit-acpi = { path = "libs/acpi" }
 omit-bootproto = { path = "libs/bootproto" }
 omit-elf = { path = "libs/elf" }
 omit-mm = { path = "libs/mm" }
+omit-rt = { path = "userspace/rt" }
 omit-shell = { path = "shell" }
 omit-term = { path = "libs/term" }
 omit-vfs = { path = "libs/vfs" }
@@ -55,3 +61,14 @@ missing_safety_doc = "deny"
 # Debug sections are not loaded into memory by the boot loader.
 debug = "line-tables-only"
 codegen-units = 1
+
+# User programs are shipped inside the initial ramdisk, where every byte of
+# debug information costs RAM at run time.
+[profile.dev.package.omit-user-programs]
+debug = false
+strip = "debuginfo"
+opt-level = 1
+
+[profile.release.package.omit-user-programs]
+debug = false
+strip = "debuginfo"

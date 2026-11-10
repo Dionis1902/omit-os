@@ -14,7 +14,9 @@ test = false
 bench = false
 
 [dependencies]
+omit-abi.workspace = true
 omit-acpi.workspace = true
+omit-elf.workspace = true
 omit-bootproto.workspace = true
 omit-mm.workspace = true
 omit-shell.workspace = true

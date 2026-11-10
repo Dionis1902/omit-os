@@ -23,7 +23,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-use crate::arch::{context, interrupts};
+use crate::arch::uspace::{self, AddressSpace};
+use crate::arch::{context, cpu, gdt, interrupts, syscall};
 use crate::mm::kstack::KernelStack;
 use crate::sync::SpinLock;
 use crate::time;
@@ -67,6 +68,13 @@ struct Thread {
     wake_tick: Option<u64>,
     /// Timer ticks during which this thread was the one running.
     cpu_ticks: u64,
+    /// The user address space, for threads that run a process.
+    address_space: Option<AddressSpace>,
+    /// The process this thread belongs to, if any.
+    pid: Option<u64>,
+    /// Set by [`kill`]; the thread exits the next time it is about to
+    /// return to user mode.
+    killed: bool,
 }
 
 /// A snapshot of one thread, for `ps`.
@@ -80,6 +88,8 @@ pub struct ThreadInfo {
     pub state: ThreadState,
     /// Timer ticks of CPU time consumed.
     pub cpu_ticks: u64,
+    /// The process ID, for threads that run a user process.
+    pub pid: Option<u64>,
 }
 
 struct Scheduler {
@@ -116,6 +126,9 @@ pub fn init() -> Result<(), SpawnError> {
             stack: None,
             wake_tick: None,
             cpu_ticks: 0,
+            address_space: None,
+            pid: None,
+            killed: false,
         }),
     );
     *SCHEDULER.lock() = Some(Scheduler {
@@ -142,8 +155,31 @@ fn idle_loop(_: usize) {
     }
 }
 
-/// Creates a thread that runs `entry(argument)` and exits when it returns.
+/// Creates a kernel thread that runs `entry(argument)` and exits when it
+/// returns.
 pub fn spawn(name: &str, entry: fn(usize), argument: usize) -> Result<ThreadId, SpawnError> {
+    spawn_with(name, entry, argument, None, None)
+}
+
+/// Creates the thread of a user process: like [`spawn`], but the thread
+/// runs with `address_space` active and is labelled with `pid`.
+pub fn spawn_process(
+    name: &str,
+    entry: fn(usize),
+    argument: usize,
+    address_space: AddressSpace,
+    pid: u64,
+) -> Result<ThreadId, SpawnError> {
+    spawn_with(name, entry, argument, Some(address_space), Some(pid))
+}
+
+fn spawn_with(
+    name: &str,
+    entry: fn(usize),
+    argument: usize,
+    address_space: Option<AddressSpace>,
+    pid: Option<u64>,
+) -> Result<ThreadId, SpawnError> {
     let stack = KernelStack::new().ok_or(SpawnError::OutOfMemory)?;
     // SAFETY: `stack.top()` is the aligned end of a freshly mapped 64 KiB
     // stack that only this new thread will use.
@@ -162,6 +198,9 @@ pub fn spawn(name: &str, entry: fn(usize), argument: usize) -> Result<ThreadId, 
             stack: Some(stack),
             wake_tick: None,
             cpu_ticks: 0,
+            address_space,
+            pid,
+            killed: false,
         }),
     );
     scheduler.ready.push_back(id);
@@ -214,17 +253,40 @@ fn reschedule() {
                 return None;
             }
             scheduler.current = next;
-            let load = scheduler.threads.get(&next)?.rsp;
+            let next_thread = scheduler.threads.get(&next)?;
+            let load = next_thread.rsp;
+            let root = next_thread
+                .address_space
+                .as_ref()
+                .map_or_else(uspace::kernel_root, AddressSpace::root);
+            let kernel_stack = next_thread
+                .stack
+                .as_ref()
+                .map_or(omit_bootproto::KERNEL_STACK_TOP, KernelStack::top);
             // The thread lives in a `Box`, so this pointer stays valid
             // after the lock is released, until the thread is removed —
             // which cannot happen before it has been switched away from.
             let save = &raw mut scheduler.threads.get_mut(&current)?.rsp;
-            Some((save, load))
+            Some((save, load, root, kernel_stack))
         })
     };
+    // Safe to release now: a dead thread was switched away from when it
+    // died, so neither its stack nor its page table is in use.
     drop(finished);
 
-    if let Some((save, load)) = switch {
+    if let Some((save, load, root, kernel_stack)) = switch {
+        // SAFETY: interrupts are disabled. `kernel_stack` is the top of the
+        // next thread's own kernel stack. `root` is either the kernel's
+        // page table or the next thread's address space, which lives as
+        // long as the thread does; both map the kernel identically, so the
+        // code and stack in use right now stay valid across the switch.
+        unsafe {
+            gdt::set_kernel_stack(kernel_stack);
+            syscall::set_kernel_stack(kernel_stack);
+            if cpu::read_cr3() & !0xFFF != root {
+                cpu::write_cr3(root);
+            }
+        }
         // SAFETY: `save` points into the current thread's control block
         // (see above). `load` was saved by an earlier switch away from the
         // next thread or built by `initial_stack`; that thread's stack is
@@ -319,11 +381,6 @@ pub fn join(id: ThreadId) {
     EXITED.wait_until(|| !is_alive(id));
 }
 
-/// The ID of the calling thread (0 before [`init`]).
-pub fn current() -> ThreadId {
-    SCHEDULER.lock().as_ref().map_or(0, |s| s.current)
-}
-
 /// A snapshot of all threads, ordered by ID.
 pub fn threads() -> Vec<ThreadInfo> {
     SCHEDULER
@@ -338,9 +395,67 @@ pub fn threads() -> Vec<ThreadInfo> {
                     name: thread.name.clone(),
                     state: thread.state,
                     cpu_ticks: thread.cpu_ticks,
+                    pid: thread.pid,
                 })
                 .collect()
         })
+}
+
+/// The process ID of the calling thread, if it runs a user process.
+pub fn current_pid() -> Option<u64> {
+    let guard = SCHEDULER.lock();
+    let scheduler = guard.as_ref()?;
+    scheduler.threads.get(&scheduler.current)?.pid
+}
+
+/// Runs `f` on the calling thread's user address space. Returns `None` for
+/// kernel threads.
+///
+/// `f` runs under the scheduler lock with interrupts disabled, so it must
+/// be short and must not block.
+pub fn with_address_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
+    let mut guard = SCHEDULER.lock();
+    let scheduler = guard.as_mut()?;
+    let current = scheduler.current;
+    scheduler
+        .threads
+        .get_mut(&current)?
+        .address_space
+        .as_mut()
+        .map(f)
+}
+
+/// Asks the process `pid` to terminate. It exits the next time it is about
+/// to return to user mode; if it is blocked, it is woken first. Returns
+/// `false` if there is no such process.
+pub fn kill(pid: u64) -> bool {
+    let mut guard = SCHEDULER.lock();
+    let Some(scheduler) = guard.as_mut() else {
+        return false;
+    };
+    let Some((&id, thread)) = scheduler
+        .threads
+        .iter_mut()
+        .find(|(_, thread)| thread.pid == Some(pid) && thread.state != ThreadState::Dead)
+    else {
+        return false;
+    };
+    thread.killed = true;
+    if thread.state == ThreadState::Blocked {
+        thread.state = ThreadState::Ready;
+        thread.wake_tick = None;
+        scheduler.ready.push_back(id);
+    }
+    true
+}
+
+/// Whether the calling thread has been asked to terminate.
+pub fn current_killed() -> bool {
+    let guard = SCHEDULER.lock();
+    guard
+        .as_ref()
+        .and_then(|scheduler| scheduler.threads.get(&scheduler.current))
+        .is_some_and(|thread| thread.killed)
 }
 
 /// A set of threads waiting for an event.
@@ -434,7 +549,7 @@ pub fn self_test() -> Result<(), &'static str> {
     fn worker(index: usize) {
         for round in 0..ROUNDS {
             COUNTER.fetch_add(1, Ordering::Relaxed);
-            if round % 10 == 0 && index % 2 == 0 {
+            if round.is_multiple_of(10) && index.is_multiple_of(2) {
                 sleep_ticks(1);
             } else {
                 yield_now();

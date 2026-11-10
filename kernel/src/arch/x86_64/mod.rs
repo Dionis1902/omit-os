@@ -20,6 +20,8 @@ mod port;
 pub mod ps2;
 pub mod qemu;
 pub mod serial;
+pub mod syscall;
+pub mod uspace;
 
 /// Name of the architecture, for the boot banner.
 pub const NAME: &str = "x86_64";
