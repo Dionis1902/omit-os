@@ -18,10 +18,18 @@
 //! The runtime provides the `_start` entry point, safe wrappers for the
 //! system calls, `print!`/`println!`, and a panic handler that reports the
 //! panic and exits with status 101. Programs can read their arguments,
-//! standard input and files. There is no heap and no environment yet.
+//! standard input and files, list and modify directories, start other
+//! programs, and use the `alloc` crate (`Box`, `Vec`, `String`, ...): the
+//! runtime provides the global allocator. There is no environment yet.
 
 #![no_std]
 
+extern crate alloc;
+
+mod heap;
+
+use alloc::string::String;
+use alloc::vec::Vec;
 use core::arch::{asm, global_asm};
 use core::ffi::{CStr, c_char};
 use core::fmt;
@@ -84,6 +92,16 @@ macro_rules! entry {
 /// in the `omit_abi` crate; in particular, pointer arguments must refer to
 /// memory the kernel is allowed to read or write on the caller's behalf.
 pub unsafe fn syscall(number: u64, a0: u64, a1: u64, a2: u64) -> i64 {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { syscall4(number, a0, a1, a2, 0) }
+}
+
+/// Performs a raw system call with four arguments.
+///
+/// # Safety
+///
+/// Same contract as [`syscall`].
+pub unsafe fn syscall4(number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
     let result: i64;
     // SAFETY: the `syscall` instruction transfers to the kernel, which
     // preserves all registers except those declared here (see the ABI
@@ -95,8 +113,9 @@ pub unsafe fn syscall(number: u64, a0: u64, a1: u64, a2: u64) -> i64 {
             inlateout("rdi") a0 => _,
             inlateout("rsi") a1 => _,
             inlateout("rdx") a2 => _,
+            inlateout("r10") a3 => _,
             lateout("rcx") _, lateout("r8") _, lateout("r9") _,
-            lateout("r10") _, lateout("r11") _,
+            lateout("r11") _,
             options(nostack),
         );
     }
@@ -185,6 +204,138 @@ pub fn read(fd: u64, buffer: &mut [u8]) -> Result<usize, Errno> {
 pub fn close(fd: u64) -> Result<(), Errno> {
     // SAFETY: plain integer argument.
     result(unsafe { syscall(nr::CLOSE, fd, 0, 0) }).map(|_| ())
+}
+
+/// Maps `length` bytes of zeroed memory at an address that is a multiple
+/// of `align` (a power of two).
+pub fn map(length: usize, align: usize) -> Result<*mut u8, Errno> {
+    // SAFETY: plain integer arguments.
+    result(unsafe { syscall(nr::MAP, length as u64, align as u64, 0) }).map(|addr| addr as *mut u8)
+}
+
+/// Releases memory obtained from [`map`].
+///
+/// # Safety
+///
+/// Nothing may use the memory afterwards.
+pub unsafe fn unmap(address: *mut u8, length: usize) -> Result<(), Errno> {
+    // SAFETY: the caller guarantees the range is no longer in use.
+    result(unsafe { syscall(nr::UNMAP, address as u64, length as u64, 0) }).map(|_| ())
+}
+
+/// Information about the file or directory at `path`.
+pub fn stat(path: &str) -> Result<abi::Stat, Errno> {
+    let mut stat = abi::Stat::default();
+    // SAFETY: the path is a live string and `stat` a live, writable value
+    // of exactly the type the kernel fills in.
+    result(unsafe {
+        syscall(
+            nr::STAT,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            &raw mut stat as u64,
+        )
+    })?;
+    Ok(stat)
+}
+
+/// One entry of a directory listing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirEntry {
+    /// The entry's name.
+    pub name: String,
+    /// Whether it is a directory.
+    pub is_dir: bool,
+}
+
+/// Lists the directory at `path`, sorted by name.
+pub fn read_dir(path: &str) -> Result<Vec<DirEntry>, Errno> {
+    let mut buffer = alloc::vec![0u8; 1024];
+    loop {
+        // SAFETY: the path is a live string and the buffer a live, writable
+        // allocation of the stated length.
+        let needed = result(unsafe {
+            syscall4(
+                nr::READDIR,
+                path.as_ptr() as u64,
+                path.len() as u64,
+                buffer.as_mut_ptr() as u64,
+                buffer.len() as u64,
+            )
+        })? as usize;
+        if needed > buffer.len() {
+            // Did not fit (or the directory grew): retry with room to spare.
+            buffer.resize(needed * 2, 0);
+            continue;
+        }
+        return Ok(buffer[..needed]
+            .split_inclusive(|&byte| byte == 0)
+            .filter_map(|record| {
+                let (&kind, name) = record.split_first()?;
+                let name = core::str::from_utf8(name.strip_suffix(&[0])?).ok()?;
+                Some(DirEntry {
+                    name: name.into(),
+                    is_dir: u64::from(kind) == abi::KIND_DIRECTORY,
+                })
+            })
+            .collect());
+    }
+}
+
+fn path_call(number: u64, path: &str) -> Result<(), Errno> {
+    // SAFETY: the pointer and length describe a live, readable string.
+    result(unsafe { syscall(number, path.as_ptr() as u64, path.len() as u64, 0) }).map(|_| ())
+}
+
+/// Creates the directory `path`.
+pub fn mkdir(path: &str) -> Result<(), Errno> {
+    path_call(nr::MKDIR, path)
+}
+
+/// Removes the file or empty directory `path`.
+pub fn remove(path: &str) -> Result<(), Errno> {
+    path_call(nr::REMOVE, path)
+}
+
+/// Moves or renames `from` to `to`.
+pub fn rename(from: &str, to: &str) -> Result<(), Errno> {
+    // SAFETY: both pointer/length pairs describe live, readable strings.
+    result(unsafe {
+        syscall4(
+            nr::RENAME,
+            from.as_ptr() as u64,
+            from.len() as u64,
+            to.as_ptr() as u64,
+            to.len() as u64,
+        )
+    })
+    .map(|_| ())
+}
+
+/// Starts the program at `path` with `arguments` (conventionally starting
+/// with the program's name) and returns its process ID.
+pub fn spawn(path: &str, arguments: &[&str]) -> Result<u64, Errno> {
+    let mut block = Vec::new();
+    for argument in arguments {
+        block.extend_from_slice(argument.as_bytes());
+        block.push(0);
+    }
+    // SAFETY: both pointer/length pairs describe live, readable buffers.
+    result(unsafe {
+        syscall4(
+            nr::SPAWN,
+            path.as_ptr() as u64,
+            path.len() as u64,
+            block.as_ptr() as u64,
+            block.len() as u64,
+        )
+    })
+}
+
+/// Waits for process `pid` to end and returns its exit status.
+pub fn wait(pid: u64) -> Result<i32, Errno> {
+    // SAFETY: plain integer argument.
+    result(unsafe { syscall(nr::WAIT, pid, 0, 0) }).map(|status| status as i32)
 }
 
 /// The calling process's ID.

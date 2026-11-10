@@ -125,7 +125,9 @@ struct Artifacts {
 }
 
 /// User programs shipped in `/bin` of the initial ramdisk.
-const USER_PROGRAMS: &[&str] = &["cat", "crash", "echo", "hello", "sleeper", "spin", "tee"];
+const USER_PROGRAMS: &[&str] = &[
+    "cat", "crash", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper", "spin", "tee",
+];
 
 /// Packs `files` (archive path, contents) into a `ustar` archive with no
 /// timestamps, so identical inputs give identical output.
@@ -530,7 +532,10 @@ const BOOT_TESTS: &[BootTest] = &[
                 "hello",
                 "\nHello from user mode! I am process 1 and the system has been up for ",
             ),
-            ("ls /bin", "\ncat\ncrash\necho\nhello\nsleeper\nspin\ntee\n"),
+            (
+                "ls /bin",
+                "\ncat\ncrash\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\n",
+            ),
             // A program that misbehaves is stopped; the shell carries on.
             (
                 "crash",
@@ -569,6 +574,34 @@ const BOOT_TESTS: &[BootTest] = &[
                 "first line\nfirst line\nsecond line\nsecond line\n",
             ),
             ("cat /typed", "\nfirst line\nsecond line\n"),
+            // The program heap (the `alloc` crate in user space).
+            (
+                "memtest",
+                "memtest: vector of 1000000 numbers ok\nmemtest: map of 5000 strings ok\nmemtest: 8 MiB block allocated and released 3 times ok\nomit:/# ",
+            ),
+            // Directory system calls, checked by the program itself.
+            ("mkdir /scratch", ""),
+            ("fileops /scratch", "\nfileops: all checks passed\n"),
+            ("ls /scratch", "ls /scratch\nomit:/# "),
+            // The user-space `ls` (by path; the built-in takes precedence).
+            (
+                "/bin/ls -l /typed /home",
+                "\n-         23 /typed\n\n/home:\nd          0 user\n",
+            ),
+            ("/bin/ls /nope", "\nls: /nope: No such file or directory\n"),
+            // Output redirection for programs.
+            (
+                "/bin/echo redirected > /out",
+                "/bin/echo redirected > /out\nomit:/# ",
+            ),
+            ("/bin/echo appended >> /out", ""),
+            ("cat /out", "\nredirected\nappended\n"),
+            // A program starting other programs and collecting their status.
+            (
+                "run /bin/hello /bin/sleeper /bin/nothere",
+                "run: /bin/hello exited with status 0\n",
+            ),
+            ("echo marker", "\nmarker\n"),
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],

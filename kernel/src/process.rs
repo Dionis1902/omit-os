@@ -12,7 +12,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt;
 
-use omit_abi::{ARGS_MAX, EXIT_KILLED, MAX_OPEN_FILES, USER_STACK_SIZE, USER_STACK_TOP};
+use omit_abi::{
+    ARGS_MAX, EXIT_KILLED, MAP_MAX, MAX_OPEN_FILES, USER_MAP_BASE, USER_MAP_END, USER_STACK_SIZE,
+    USER_STACK_TOP,
+};
 use omit_elf::{EM_X86_64, ET_EXEC, Elf64, ElfError};
 
 use crate::arch::gdt::{USER_CS, USER_DS};
@@ -78,6 +81,10 @@ struct Record {
     cwd: String,
     /// Open files, indexed by descriptor minus 3 (0-2 are the console).
     files: Vec<Option<OpenFile>>,
+    /// Where standard output goes instead of the console, if redirected.
+    stdout: Option<OpenFile>,
+    /// Next unused address in the `map` area.
+    map_next: u64,
 }
 
 struct Table {
@@ -244,7 +251,16 @@ fn enter(start: usize) {
 /// Starts the program in `image` as a new process called `name`, with
 /// arguments `args` and working directory `cwd` (a normalised absolute
 /// path).
-pub fn spawn(name: &str, image: &[u8], args: &[String], cwd: &str) -> Result<Pid, ExecError> {
+///
+/// With `stdout`, the program's standard output is written to that file
+/// (which must exist) instead of the console.
+pub fn spawn(
+    name: &str,
+    image: &[u8],
+    args: &[String],
+    cwd: &str,
+    stdout: Option<OpenFile>,
+) -> Result<Pid, ExecError> {
     let (space, start) = load(image, args)?;
     let start = Box::into_raw(Box::new(start));
 
@@ -260,6 +276,8 @@ pub fn spawn(name: &str, image: &[u8], args: &[String], cwd: &str) -> Result<Pid
                     exit_status: None,
                     cwd: cwd.into(),
                     files: Vec::new(),
+                    stdout,
+                    map_next: USER_MAP_BASE,
                 },
             );
             Ok(pid)
@@ -390,4 +408,99 @@ pub fn close_file(fd: u64) -> bool {
     };
     with_current(|record| record.files.get_mut(slot).and_then(Option::take).is_some())
         .unwrap_or(false)
+}
+
+/// The calling process's standard output redirection, if any.
+pub fn stdout_file() -> Option<OpenFile> {
+    with_current(|record| record.stdout.clone()).flatten()
+}
+
+/// Records the new end position of the calling process's redirected
+/// standard output.
+pub fn set_stdout_offset(offset: u64) {
+    with_current(|record| {
+        if let Some(file) = &mut record.stdout {
+            file.offset = offset;
+        }
+    });
+}
+
+/// Number of pages mapped or unmapped per acquisition of the scheduler
+/// lock, to bound the time interrupts stay disabled.
+const MAP_BATCH: u64 = 32;
+
+/// Maps `length` bytes (rounded up to pages) of zeroed, writable memory
+/// into the calling process at an address that is a multiple of `align`,
+/// and returns that address. `None` if the request is invalid or memory is
+/// exhausted; nothing stays mapped in that case.
+pub fn map_memory(length: u64, align: u64) -> Option<u64> {
+    if length == 0 || length > MAP_MAX || !align.is_power_of_two() || align > MAP_MAX {
+        return None;
+    }
+    let align = align.max(PAGE_SIZE);
+    let pages = length.div_ceil(PAGE_SIZE);
+
+    // Reserve the address range first; it is never reused, so a failure
+    // below only wastes address space.
+    let base = with_current(|record| {
+        let base = record.map_next.checked_next_multiple_of(align)?;
+        let end = base.checked_add(pages * PAGE_SIZE)?;
+        (end <= USER_MAP_END).then(|| {
+            record.map_next = end;
+            base
+        })
+    })??;
+
+    let mut mapped = 0;
+    while mapped < pages {
+        let batch = (pages - mapped).min(MAP_BATCH);
+        let ok = sched::with_address_space(|space| {
+            (0..batch).all(|index| {
+                let virt = base + (mapped + index) * PAGE_SIZE;
+                frame::alloc_zeroed(0).is_some_and(|phys| {
+                    let result = space.map(virt, phys, true, false);
+                    if result.is_err() {
+                        // SAFETY: the frame was not mapped, so it is still
+                        // exclusively ours.
+                        let _ = unsafe { frame::free(phys, 0) };
+                    }
+                    result.is_ok()
+                })
+            })
+        });
+        if ok != Some(true) {
+            unmap_memory(base, (mapped + batch) * PAGE_SIZE);
+            return None;
+        }
+        mapped += batch;
+    }
+    Some(base)
+}
+
+/// Unmaps and frees every mapped page of the calling process in
+/// `[address, address + length)`, which must lie in the `map` area and be
+/// page-aligned. Returns `false` for an invalid range.
+pub fn unmap_memory(address: u64, length: u64) -> bool {
+    let Some(end) = address.checked_add(length) else {
+        return false;
+    };
+    if !address.is_multiple_of(PAGE_SIZE) || address < USER_MAP_BASE || end > USER_MAP_END {
+        return false;
+    }
+    let pages = length.div_ceil(PAGE_SIZE);
+    let mut done = 0;
+    while done < pages {
+        let batch = (pages - done).min(MAP_BATCH);
+        sched::with_address_space(|space| {
+            for index in 0..batch {
+                if let Some(phys) = space.unmap(address + (done + index) * PAGE_SIZE) {
+                    // SAFETY: the page was just unmapped from the only
+                    // address space that referenced the frame.
+                    let _ = unsafe { frame::free(phys, 0) };
+                }
+            }
+        });
+        done += batch;
+    }
+    true
 }

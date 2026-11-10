@@ -104,6 +104,7 @@ name = "omit-rt"
 version = "0.1.0"
 dependencies = [
  "omit-abi",
+ "omit-mm",
 ]
 
 [[package]]

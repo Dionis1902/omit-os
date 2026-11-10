@@ -143,6 +143,41 @@ impl AddressSpace {
         Ok(())
     }
 
+    /// Removes the mapping of the user page at `virt` and returns the frame
+    /// it was mapped to, which the caller now owns. Returns `None` if the
+    /// page was not mapped.
+    pub fn unmap(&mut self, virt: u64) -> Option<u64> {
+        if !virt.is_multiple_of(PAGE_SIZE) || !is_user_range(virt, PAGE_SIZE) {
+            return None;
+        }
+        let path = indices(virt);
+        let mut current = self.root;
+        for &index in &path[..3] {
+            // SAFETY: `current` is a page-table frame owned by this address
+            // space; the entry is only read.
+            let entry = unsafe { (*table(current)?)[index] };
+            if entry & PRESENT == 0 || entry & HUGE != 0 {
+                return None;
+            }
+            current = entry & ADDRESS_MASK;
+        }
+        let entries = table(current)?;
+        // SAFETY: `entries` is the level-1 table for `virt`, owned by this
+        // address space, to which `&mut self` gives exclusive access.
+        // `invlpg` only drops a TLB entry; it is needed because this may be
+        // the active address space.
+        unsafe {
+            let slot = &raw mut (*entries)[path[3]];
+            let entry = slot.read();
+            if entry & PRESENT == 0 {
+                return None;
+            }
+            slot.write(0);
+            core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+            Some(entry & ADDRESS_MASK)
+        }
+    }
+
     /// Looks up the user page containing `virt`. Returns the frame it is
     /// mapped to and whether user code may write to it.
     pub fn translate(&self, virt: u64) -> Option<(u64, bool)> {

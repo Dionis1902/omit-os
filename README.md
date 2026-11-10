@@ -11,8 +11,8 @@ the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
 (with a PS/2 keyboard) and on the serial console. There is no persistent
-storage and no driver model yet, and programs are limited to arguments,
-console and file I/O (no memory allocation, no starting other programs). See [Status](#status) for exactly what exists and what
+storage and no driver model yet. Programs can use files, directories,
+dynamic memory and start other programs, but there are no pipes yet. See [Status](#status) for exactly what exists and what
 has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -206,17 +206,19 @@ addition from Milestone 8: a framebuffer text console.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `getpid`, `yield`, `sleep`, `uptime` | Working, tested. No memory-management or process-creation calls yet |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `getpid`, `yield`, `sleep`, `uptime` | Working, tested |
+| Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
+| Output redirection (`>`, `>>`) for programs | Working, tested |
 | Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
 | Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `hello`, `sleeper`, `spin`, `crash` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
-| Dynamic memory for programs, pipes and redirection for programs, directory system calls, `fork`/`exec` | Not started |
+| Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
 | SMP | Not started |
 | Persistent storage, drivers, Windows/Linux compatibility | Not started |
 
@@ -281,10 +283,12 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   rather than being a kernel-wide object (see ADR 0006).
 - Built-in shell commands cannot be interrupted, there are no pipes,
   variables or globs, and `cp` does not copy directories.
-- Programs cannot allocate memory beyond their image and stack, list or
-  create directories, or start other programs, and their output cannot be
-  redirected or piped. Open files are tracked by path, so renaming a file
-  that is open confuses its descriptor. The system call ABI is unstable.
+- There are no pipes, no input redirection and no environment variables.
+  Open files are tracked by path, so renaming a file that is open confuses
+  its descriptor. Memory a program maps is never shared and address space
+  in the map area is not reused. The system call ABI is unstable.
+- The shell's own file commands (`ls`, `cat`, ...) are still built in and
+  take precedence over the programs of the same name in `/bin`.
 - The scheduler is plain round-robin on one CPU with a 10 ms slice; it has
   no priorities and has not been measured.
 - Panic and exception backtraces only cover the boot thread's stack.
@@ -379,11 +383,8 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step:** dynamic memory for programs (so the Rust `alloc` crate works in
-userspace), directory and process system calls, and pipes — the remaining
-prerequisites for porting real utilities. Then Milestone 5 proper: a VirtIO
-block driver and a persistent filesystem, which is also what an installer
-needs.
+**Next step (Milestone 5):** PCI device discovery, a VirtIO block driver and
+a persistent filesystem, which is also what an installer needs.
 
 ## Licence
 

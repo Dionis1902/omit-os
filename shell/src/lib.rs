@@ -62,12 +62,17 @@ pub trait Host {
     /// process called `name`, with arguments `args` (the first being the
     /// program name as typed) and working directory `cwd`; returns its
     /// process ID.
+    ///
+    /// With `stdout`, the program's standard output goes to the existing
+    /// file at that (normalised absolute) path, starting at its end if the
+    /// flag is set and at its beginning otherwise.
     fn spawn(
         &mut self,
         name: &str,
         image: &[u8],
         args: &[String],
         cwd: &str,
+        stdout: Option<(&str, bool)>,
     ) -> Result<u64, String>;
 
     /// Requests termination of process `pid`; `false` if it does not exist.
@@ -151,9 +156,9 @@ Built-in commands:
   uname [-a]           print system information
   clear                clear the screen
   exit                 leave the shell
-Output of a built-in command can be redirected with '> FILE' or '>> FILE'.
 Anything else is run as a program from /bin (or by path); end the line with
-'&' to run it in the background.
+'&' to run it in the background. Output of any command can be redirected
+with '> FILE' or '>> FILE'.
 ";
 
 /// Shell state: the current directory and the last exit status.
@@ -226,46 +231,43 @@ impl Shell {
 
         // With a redirection, standard output is collected and written to
         // the file afterwards; otherwise it streams straight to `out`.
-        let mut captured = String::new();
-        let result = {
-            let stdout: &mut dyn Write = if command.redirect.is_some() {
-                &mut captured
-            } else {
-                &mut *out
-            };
-            if command.background && BUILTINS.contains(&name.as_str()) {
-                // `&` is meaningless for commands that run inside the shell.
-                Err(Failure(
-                    "built-in commands cannot run in the background".into(),
-                ))
-            } else {
-                match self.run(name, args, vfs, host, stdout) {
-                    Err(Failure(message)) if message == NOT_BUILTIN => self.run_program(
-                        name,
-                        args,
-                        command.redirect.is_some(),
-                        command.background,
-                        vfs,
-                        host,
-                        stdout,
-                    ),
-                    result => result,
-                }
-            }
+        let is_builtin = BUILTINS.contains(&name.as_str());
+        let result = if !is_builtin {
+            // A program writes to its redirection target itself, so the
+            // "[pid] name" line for a background job always goes to the
+            // terminal.
+            self.run_program(
+                name,
+                args,
+                command.redirect.as_ref(),
+                command.background,
+                vfs,
+                host,
+                out,
+            )
+        } else if command.background {
+            // `&` is meaningless for commands that run inside the shell.
+            Err(Failure(
+                "built-in commands cannot run in the background".into(),
+            ))
+        } else if let Some(redirect) = &command.redirect {
+            // Output of a built-in is collected and written afterwards, so
+            // a failing command leaves the target untouched.
+            let mut captured = String::new();
+            self.run(name, args, vfs, host, &mut captured)
+                .and_then(|()| {
+                    let target = self.resolve(&redirect.path)?;
+                    let mode = if redirect.append {
+                        WriteMode::Append
+                    } else {
+                        WriteMode::Truncate
+                    };
+                    vfs.write_file(&target, captured.as_bytes(), mode)
+                        .map_err(|e| fs_failure(&redirect.path, e))
+                })
+        } else {
+            self.run(name, args, vfs, host, out)
         };
-        let result = result.and_then(|()| match &command.redirect {
-            Some(redirect) => {
-                let target = self.resolve(&redirect.path)?;
-                let mode = if redirect.append {
-                    WriteMode::Append
-                } else {
-                    WriteMode::Truncate
-                };
-                vfs.write_file(&target, captured.as_bytes(), mode)
-                    .map_err(|e| fs_failure(&redirect.path, e))
-            }
-            None => Ok(()),
-        });
 
         self.last_status = match result {
             Ok(()) => 0,
@@ -315,6 +317,7 @@ impl Shell {
             "clear" => Ok(out.write_str("\x1b[2J\x1b[H")?),
             "ps" => self.ps(args, host, out),
             "kill" => self.kill(args, host),
+            _ if !BUILTINS.contains(&name) => Err(Failure(NOT_BUILTIN.into())),
             "free" => {
                 let memory = host.memory();
                 writeln!(out, "             total        used        free (KiB)")?;
@@ -342,7 +345,7 @@ impl Shell {
         &mut self,
         name: &str,
         args: &[String],
-        redirected: bool,
+        redirect: Option<&parse::Redirect>,
         background: bool,
         vfs: &mut Vfs,
         host: &mut dyn Host,
@@ -360,13 +363,22 @@ impl Shell {
             }
             Err(error) => return Err(Failure(format!("{error}"))),
         };
-        // Programs write straight to the console; say so rather than
-        // silently ignoring the redirection.
-        if redirected {
-            return Err(Failure(
-                "output redirection is not supported for programs yet".into(),
-            ));
-        }
+        // Prepare the redirection target: it must exist, and `>` empties
+        // it, before the program starts writing.
+        let target = match redirect {
+            Some(redirect) => {
+                let target = self.resolve(&redirect.path)?;
+                let mode = if redirect.append {
+                    WriteMode::Append
+                } else {
+                    WriteMode::Truncate
+                };
+                vfs.write_file(&target, b"", mode)
+                    .map_err(|e| fs_failure(&redirect.path, e))?;
+                Some((target, redirect.append))
+            }
+            None => None,
+        };
 
         let display_name = path::file_name(&path).unwrap_or(name);
         // By convention the first argument is the name the program was
@@ -374,8 +386,11 @@ impl Shell {
         let mut argv = Vec::with_capacity(args.len() + 1);
         argv.push(String::from(name));
         argv.extend_from_slice(args);
+        let stdout = target
+            .as_ref()
+            .map(|(path, append)| (path.as_str(), *append));
         let pid = host
-            .spawn(display_name, &image, &argv, &self.cwd)
+            .spawn(display_name, &image, &argv, &self.cwd, stdout)
             .map_err(Failure)?;
         if background {
             writeln!(out, "[{pid}] {display_name}")?;
@@ -695,6 +710,7 @@ mod tests {
         killed: Vec<u64>,
         last_args: Vec<String>,
         last_cwd: String,
+        last_stdout: Option<(String, bool)>,
     }
 
     impl Host for MockHost {
@@ -704,7 +720,9 @@ mod tests {
             image: &[u8],
             args: &[String],
             cwd: &str,
+            stdout: Option<(&str, bool)>,
         ) -> Result<u64, String> {
+            self.last_stdout = stdout.map(|(path, append)| (path.into(), append));
             if image.starts_with(b"bad") {
                 return Err("not an executable".into());
             }
@@ -997,11 +1015,28 @@ mod tests {
             "[1] spin\n",
             "background jobs are not waited for"
         );
+        // Redirection: the target is prepared before the program starts.
+        s.host.exit_status = 0;
+        s.ok("echo old > out");
+        s.ok("spin > out");
+        assert_eq!(s.host.last_stdout, Some(("/out".into(), false)));
+        assert_eq!(s.ok("cat out"), "", "'>' empties the target first");
+        s.ok("echo kept > log");
+        s.ok("spin >> log &");
+        assert_eq!(s.host.last_stdout, Some(("/log".into(), true)));
+        assert_eq!(s.ok("cat log"), "kept\n", "'>>' keeps existing contents");
+        s.ok("spin");
+        assert_eq!(s.host.last_stdout, None);
+        let before = s.host.spawned.len();
         assert_eq!(
-            s.err("spin > out"),
-            "spin: output redirection is not supported for programs yet\n"
+            s.err("spin > /nope/out"),
+            "spin: /nope/out: No such file or directory\n"
         );
-        assert_eq!(s.host.spawned.len(), 1, "rejected commands start nothing");
+        assert_eq!(
+            s.host.spawned.len(),
+            before,
+            "rejected commands start nothing"
+        );
         assert_eq!(
             s.err("pwd &"),
             "pwd: built-in commands cannot run in the background\n"

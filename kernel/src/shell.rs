@@ -12,6 +12,7 @@ use alloc::vec::Vec;
 use omit_shell::{Host, LineEditor, MemoryInfo, Outcome, Shell, SystemInfo, TaskInfo};
 
 use crate::console::{self, Writer};
+use crate::process::OpenFile;
 use crate::{arch, fs, info, kprintln, mm, process, sched, time, warn};
 
 /// Connects the shell's process commands to the kernel.
@@ -24,8 +25,15 @@ impl Host for KernelHost {
         image: &[u8],
         args: &[String],
         cwd: &str,
+        stdout: Option<(&str, bool)>,
     ) -> Result<u64, String> {
-        process::spawn(name, image, args, cwd).map_err(|error| format!("{error}"))
+        let stdout = stdout.map(|(path, append)| OpenFile {
+            path: path.into(),
+            offset: 0,
+            writable: true,
+            append,
+        });
+        process::spawn(name, image, args, cwd, stdout).map_err(|error| format!("{error}"))
     }
 
     fn kill(&mut self, pid: u64) -> bool {

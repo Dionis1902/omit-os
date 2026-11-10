@@ -46,7 +46,56 @@ pub mod nr {
     pub const READ: u64 = 7;
     /// `close(fd)`.
     pub const CLOSE: u64 = 8;
+    /// `map(len, align) -> address` — maps `len` bytes (rounded up to whole
+    /// pages) of zero-filled, readable and writable memory at an address
+    /// that is a multiple of `align` (a power of two, at least one page).
+    pub const MAP: u64 = 9;
+    /// `unmap(address, len)` — releases memory obtained from `map`.
+    pub const UNMAP: u64 = 10;
+    /// `stat(path, path_len, out: *mut Stat)`.
+    pub const STAT: u64 = 11;
+    /// `readdir(path, path_len, buf, buf_len) -> bytes needed` — fills
+    /// `buf` with one record per entry: a type byte ([`super::KIND_FILE`]
+    /// or [`super::KIND_DIRECTORY`]), the name, and a NUL. If the result is
+    /// larger than `buf_len` the listing did not fit and must be retried
+    /// with a larger buffer.
+    pub const READDIR: u64 = 12;
+    /// `mkdir(path, path_len)`.
+    pub const MKDIR: u64 = 13;
+    /// `remove(path, path_len)` — removes a file or an empty directory.
+    pub const REMOVE: u64 = 14;
+    /// `rename(from, from_len, to, to_len)`.
+    pub const RENAME: u64 = 15;
+    /// `spawn(path, path_len, args, args_len) -> pid` — starts the program
+    /// at `path`. `args` is the argument list as NUL-terminated strings,
+    /// one after another. The child inherits the working directory and
+    /// standard output of the caller.
+    pub const SPAWN: u64 = 16;
+    /// `wait(pid) -> exit status` — blocks until the process ends.
+    pub const WAIT: u64 = 17;
 }
+
+/// [`Stat::kind`] of a regular file.
+pub const KIND_FILE: u64 = 1;
+/// [`Stat::kind`] of a directory.
+pub const KIND_DIRECTORY: u64 = 2;
+
+/// File information returned by the `stat` system call.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Stat {
+    /// [`KIND_FILE`] or [`KIND_DIRECTORY`].
+    pub kind: u64,
+    /// Size in bytes for files; number of entries for directories.
+    pub size: u64,
+}
+
+/// Lowest address the kernel hands out for `map` requests.
+pub const USER_MAP_BASE: u64 = 0x0000_1000_0000_0000;
+/// Exclusive upper bound of the `map` area.
+pub const USER_MAP_END: u64 = 0x0000_2000_0000_0000;
+/// Largest single `map` request, in bytes.
+pub const MAP_MAX: u64 = 256 << 20;
 
 /// Flags for the `open` system call.
 pub mod open {
@@ -106,6 +155,12 @@ pub enum Errno {
     TooManyOpenFiles = 24,
     /// Out of memory or storage.
     NoSpace = 28,
+    /// The directory is not empty.
+    NotEmpty = 39,
+    /// No such process.
+    NoSuchProcess = 3,
+    /// The file is not an executable program.
+    NotExecutable = 8,
     /// Unknown system call number.
     NoSuchSyscall = 38,
 }
@@ -122,6 +177,9 @@ impl core::fmt::Display for Errno {
             Self::InvalidArgument => "Invalid argument",
             Self::TooManyOpenFiles => "Too many open files",
             Self::NoSpace => "No space left on device",
+            Self::NotEmpty => "Directory not empty",
+            Self::NoSuchProcess => "No such process",
+            Self::NotExecutable => "Exec format error",
             Self::NoSuchSyscall => "Function not implemented",
         })
     }
@@ -145,6 +203,9 @@ impl Errno {
             22 => Some(Self::InvalidArgument),
             24 => Some(Self::TooManyOpenFiles),
             28 => Some(Self::NoSpace),
+            39 => Some(Self::NotEmpty),
+            3 => Some(Self::NoSuchProcess),
+            8 => Some(Self::NotExecutable),
             38 => Some(Self::NoSuchSyscall),
             _ => None,
         }
@@ -182,6 +243,9 @@ mod tests {
             Errno::IsADirectory,
             Errno::TooManyOpenFiles,
             Errno::NoSpace,
+            Errno::NotEmpty,
+            Errno::NoSuchProcess,
+            Errno::NotExecutable,
             Errno::BadFileDescriptor,
             Errno::Fault,
             Errno::InvalidArgument,

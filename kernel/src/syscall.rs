@@ -10,7 +10,10 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
-use omit_abi::{Errno, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, WRITE_MAX, nr, open};
+use omit_abi::{
+    ARGS_MAX, Errno, KIND_DIRECTORY, KIND_FILE, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, Stat,
+    WRITE_MAX, nr, open,
+};
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
 
@@ -23,7 +26,7 @@ type SysResult = Result<u64, Errno>;
 
 /// Entry point for all system calls; called by the assembly entry code
 /// with interrupts enabled, on the calling thread's kernel stack.
-pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _a4: u64) -> i64 {
+pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u64) -> i64 {
     process::exit_if_killed();
     let result: SysResult = match number {
         nr::EXIT => process::exit(a0 as i32),
@@ -37,6 +40,45 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, _a3: u64, _a4
                 Err(Errno::BadFileDescriptor)
             }
         }
+        nr::MAP => process::map_memory(a0, a1).ok_or(Errno::NoSpace),
+        nr::UNMAP => {
+            if process::unmap_memory(a0, a1) {
+                Ok(0)
+            } else {
+                Err(Errno::InvalidArgument)
+            }
+        }
+        nr::STAT => stat(a0, a1, a2),
+        nr::READDIR => read_dir(a0, a1, a2, a3),
+        nr::MKDIR => path_argument(a0, a1).and_then(|path| {
+            fs::root()
+                .ok_or(Errno::NotFound)?
+                .create_dir(&path)
+                .map_err(errno)
+                .map(|()| 0)
+        }),
+        nr::REMOVE => path_argument(a0, a1).and_then(|path| {
+            fs::root()
+                .ok_or(Errno::NotFound)?
+                .remove(&path)
+                .map_err(errno)
+                .map(|()| 0)
+        }),
+        nr::RENAME => {
+            let from = path_argument(a0, a1);
+            let to = path_argument(a2, a3);
+            from.and_then(|from| {
+                fs::root()
+                    .ok_or(Errno::NotFound)?
+                    .rename(&from, &to?)
+                    .map_err(errno)
+                    .map(|()| 0)
+            })
+        }
+        nr::SPAWN => spawn(a0, a1, a2, a3),
+        nr::WAIT => process::wait(a0)
+            .map(|status| status as u32 as u64)
+            .ok_or(Errno::NoSuchProcess),
         nr::GETPID => Ok(sched::current_pid().unwrap_or(0)),
         nr::YIELD => {
             sched::yield_now();
@@ -65,9 +107,8 @@ fn errno(error: FsError) -> Errno {
         FsError::IsADirectory => Errno::IsADirectory,
         FsError::AlreadyExists => Errno::Exists,
         FsError::NoSpace => Errno::NoSpace,
-        FsError::DirectoryNotEmpty | FsError::InvalidName | FsError::InvalidArgument => {
-            Errno::InvalidArgument
-        }
+        FsError::DirectoryNotEmpty => Errno::NotEmpty,
+        FsError::InvalidName | FsError::InvalidArgument => Errno::InvalidArgument,
     }
 }
 
@@ -148,6 +189,75 @@ fn open_file(path_address: u64, path_length: u64, flags: u64) -> SysResult {
     .ok_or(Errno::TooManyOpenFiles)
 }
 
+fn stat(path_address: u64, path_length: u64, out: u64) -> SysResult {
+    let path = path_argument(path_address, path_length)?;
+    let metadata = fs::root()
+        .ok_or(Errno::NotFound)?
+        .metadata(&path)
+        .map_err(errno)?;
+    let kind = match metadata.file_type {
+        FileType::File => KIND_FILE,
+        FileType::Directory => KIND_DIRECTORY,
+    };
+    // The layout of `omit_abi::Stat`: two little-endian 64-bit fields.
+    let mut bytes = [0u8; size_of::<Stat>()];
+    bytes[..8].copy_from_slice(&kind.to_le_bytes());
+    bytes[8..].copy_from_slice(&metadata.size.to_le_bytes());
+    copy_out(out, &bytes)?;
+    Ok(0)
+}
+
+fn read_dir(path_address: u64, path_length: u64, buffer: u64, buffer_length: u64) -> SysResult {
+    let path = path_argument(path_address, path_length)?;
+    let entries = fs::root()
+        .ok_or(Errno::NotFound)?
+        .read_dir(&path)
+        .map_err(errno)?;
+    let mut records = Vec::new();
+    for entry in entries {
+        records
+            .try_reserve(entry.name.len() + 2)
+            .map_err(|_| Errno::NoSpace)?;
+        records.push(match entry.file_type {
+            FileType::File => KIND_FILE as u8,
+            FileType::Directory => KIND_DIRECTORY as u8,
+        });
+        records.extend_from_slice(entry.name.as_bytes());
+        records.push(0);
+    }
+    if records.len() as u64 <= buffer_length {
+        copy_out(buffer, &records)?;
+    }
+    Ok(records.len() as u64)
+}
+
+fn spawn(path_address: u64, path_length: u64, args_address: u64, args_length: u64) -> SysResult {
+    let path = path_argument(path_address, path_length)?;
+    if args_length > ARGS_MAX as u64 {
+        return Err(Errno::InvalidArgument);
+    }
+    let raw = copy_in(args_address, args_length as usize)?;
+    let mut args = Vec::new();
+    for piece in raw.split(|&byte| byte == 0) {
+        if !piece.is_empty() {
+            let text = core::str::from_utf8(piece).map_err(|_| Errno::InvalidArgument)?;
+            args.push(String::from(text));
+        }
+    }
+
+    let image = fs::root()
+        .ok_or(Errno::NotFound)?
+        .read_file(&path)
+        .map_err(errno)?;
+    let cwd = process::current_dir().ok_or(Errno::InvalidArgument)?;
+    let name = path::file_name(&path).unwrap_or("program");
+    process::spawn(name, &image, &args, &cwd, process::stdout_file()).map_err(|error| match error {
+        process::ExecError::Elf(_) | process::ExecError::Unsupported(_) => Errno::NotExecutable,
+        process::ExecError::ArgumentsTooLong => Errno::InvalidArgument,
+        process::ExecError::Map(_) | process::ExecError::Spawn(_) => Errno::NoSpace,
+    })
+}
+
 fn read(fd: u64, address: u64, length: u64) -> SysResult {
     let length = length.min(READ_MAX) as usize;
     if fd == STDIN {
@@ -214,8 +324,23 @@ fn write(fd: u64, address: u64, length: u64) -> SysResult {
     if length > WRITE_MAX {
         return Err(Errno::InvalidArgument);
     }
-    if fd == STDOUT || fd == STDERR {
+    if fd == STDERR {
         return write_console(address, length);
+    }
+    if fd == STDOUT {
+        // Standard output may have been redirected to a file when the
+        // process was started.
+        let Some(file) = process::stdout_file() else {
+            return write_console(address, length);
+        };
+        let data = copy_in(address, length as usize)?;
+        let offset = (!file.append).then_some(file.offset);
+        let end = fs::root()
+            .ok_or(Errno::NotFound)?
+            .write_at(&file.path, offset, &data)
+            .map_err(errno)?;
+        process::set_stdout_offset(end);
+        return Ok(length);
     }
     let file = process::file(fd).ok_or(Errno::BadFileDescriptor)?;
     if !file.writable {
