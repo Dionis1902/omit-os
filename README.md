@@ -2,6 +2,26 @@
 
 > Everything you need. Nothing you don't.
 
+## What it is, and what it is not
+
+Omit OS aims to feel familiar to people coming from Windows — the same
+kind of workflows, shortcuts, task bar and file management — and to run
+Windows applications through its own compatibility layer. That layer is
+at an early stage: today it runs small test programs written for it, not
+existing applications (see [Status](#status)).
+
+Omit OS is an independent, open-source project. It is not affiliated
+with, sponsored by, or endorsed by Microsoft Corporation or Apple Inc.
+Windows is a trademark of Microsoft Corporation; macOS is a trademark of
+Apple Inc. These names are used only to describe compatibility.
+
+All code and visual assets are original or used under open licences. No
+proprietary code or assets from Microsoft or Apple are included. See
+[IP_POLICY.md](IP_POLICY.md) and [ATTRIBUTION.md](ATTRIBUTION.md); the
+project's own name is covered by [TRADEMARKS.md](TRADEMARKS.md).
+
+## Overview
+
 Omit OS is a from-scratch operating system for x86-64 with its own kernel,
 written in Rust. It is not a Linux distribution: the kernel is independent,
 and the only Linux code in the tree is individual device drivers reused

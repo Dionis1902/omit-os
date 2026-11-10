@@ -75,7 +75,12 @@ and contains no Linux source.
 ## User interface and assets
 
 - Icons, wallpapers, logos, sounds and cursors are original or under a
-  compatible open licence, and recorded in `REUSE.toml`.
+  compatible open licence, and recorded in `REUSE.toml` and
+  [`ATTRIBUTION.md`](ATTRIBUTION.md).
+- Features are not named after another vendor's branded features, and
+  nothing implies affiliation; see "Names and assets" in
+  [`CONTRIBUTING.md`](CONTRIBUTING.md) and
+  [`TRADEMARKS.md`](TRADEMARKS.md).
 - Nothing is extracted from Windows or macOS binaries.
 - No proprietary fonts (Segoe UI, SF Pro and the like) are bundled.
 - Interaction patterns may be inspired by other systems; visual designs

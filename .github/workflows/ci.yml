@@ -61,6 +61,8 @@ jobs:
         run: python3 tools/check-licenses.py
       - name: Sources stated for Windows compatibility code; Linux imports listed
         run: python3 tools/check-ip.py
+      - name: No borrowed feature names or claims; every asset attributed
+        run: python3 tools/check-branding.py
       - name: Dependency licences, per component policy
         run: sh tools/check-deps.sh
       - name: Developer Certificate of Origin sign-offs

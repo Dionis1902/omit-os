@@ -32,6 +32,34 @@ The full rules are in [`IP_POLICY.md`](IP_POLICY.md). In short:
 - Assets are original or openly licensed; nothing is extracted from
   other systems, and no proprietary fonts are bundled.
 
+## Names and assets
+
+Omit OS may feel familiar; it must not look like, or claim to be,
+somebody else's product. CI checks what it can
+(`tools/check-branding.py`).
+
+- **No logos, icons, cursors, sounds, wallpapers or fonts from Microsoft
+  or Apple** (Segoe UI, SF Pro, ...), and nothing extracted from
+  Windows or macOS.
+- **Our features get plain names, not another vendor's brand.** Not
+  "Snap Layouts" but Arrange; not "Control Center" but Quick panel; not
+  "Notification Center" or "Action Center" but Notifications; not
+  "Windows Update" but Updates; and none of Mission Control, Spotlight,
+  Launchpad, Cortana, Copilot, Task View, Start menu, File Explorer,
+  Finder, or "the Dock" as a name.
+- **Generic words are fine**: Start, Settings, Files, Desktop, Taskbar,
+  Bin, Notifications, Search.
+- **Nothing implies endorsement or identity**: no "Windows clone" or
+  "Windows replacement", no other company's name or logo on anything of
+  ours. Describe compatibility ("runs Windows programs"), nothing more.
+- **In the compatibility layer, Windows names that programs depend on
+  are necessary and allowed**: DLL names, function names, registry
+  paths. They are interfaces, not our branding, and do not appear as
+  feature names in the user interface.
+- **Every asset file gets a row in [`ATTRIBUTION.md`](ATTRIBUTION.md)**
+  and matching licensing information in `REUSE.toml`.
+- The project's own name and logo: see [`TRADEMARKS.md`](TRADEMARKS.md).
+
 ## One repository, several licences
 
 `COPYING` says which licence applies to which directory. When you add or
@@ -109,6 +137,10 @@ sh tools/check-deps.sh
 
 ```bash
 python3 tools/check-ip.py
+```
+
+```bash
+python3 tools/check-branding.py
 ```
 
 `reuse` is installed with `pip install reuse`, cargo-deny with
