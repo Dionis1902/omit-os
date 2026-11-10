@@ -3,12 +3,19 @@ name: Release
 # Publishes a GitHub release with a bootable disk image and ISO.
 #
 # Triggered by pushing a tag `vX.Y.Z` that matches the workspace version in
-# Cargo.toml, or manually (which builds the artifacts without publishing).
+# Cargo.toml, or manually. A manual run builds and tests the artifacts and
+# publishes only if asked to; it then creates the tag `vX.Y.Z` itself, on
+# the commit it ran on.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish a release (creates the tag vX.Y.Z on this commit)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -64,12 +71,13 @@ jobs:
           if-no-files-found: error
 
       - name: Publish GitHub release
-        if: github.ref_type == 'tag'
+        if: github.ref_type == 'tag' || inputs.publish
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "v$VERSION" \
+            --target "$GITHUB_SHA" \
             --title "Omit OS $VERSION" \
             --notes-file docs/RELEASE_NOTES.md \
             --prerelease \
