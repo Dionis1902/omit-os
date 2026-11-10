@@ -131,7 +131,7 @@ struct Artifacts {
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
     "cat", "crash", "desktop", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper",
-    "spin", "tee", "winrun",
+    "spin", "syscheck", "tee", "winrun",
 ];
 
 /// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
@@ -645,7 +645,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\nsyscheck\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -715,6 +715,10 @@ const BOOT_TESTS: &[BootTest] = &[
             ("echo marker", "\nmarker\n"),
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
+            // The CPU state after a system call return is what user mode
+            // expects (segment selectors, flags, preserved registers),
+            // including after being interrupted there.
+            ("syscheck", "\nsyscheck: all checks passed\n"),
         ],
         reboot_script: &[],
         ends_with_reset: false,

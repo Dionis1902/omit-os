@@ -110,3 +110,21 @@ tick.
 - No signals; `kill` is unconditional termination.
 - Panic and exception backtraces only cover the boot thread's stack.
 - SMP: everything here assumes one CPU.
+
+## Addendum: `sysret` and the stack segment on AMD CPUs
+
+The first version programmed the `STAR` register with a privilege-level-0
+base for the selectors `sysret` loads. Intel CPUs (and QEMU's software
+emulation) force privilege level 3 into both selectors, so everything
+worked. AMD CPUs force it only into CS and load SS exactly as computed:
+user code then runs with SS = 0x18, and the first interrupt that arrives
+in user mode after a system call cannot return (`iretq` raises a general
+protection fault in the kernel). CI caught this once the test suite
+contained a CPU-bound program that makes system calls, on a run that
+happened to land on an AMD host under KVM.
+
+The base now carries privilege level 3, a compile-time assertion ties it
+to the GDT layout, and `/bin/syscheck` — run by the shell test in every
+configuration — verifies the segment selectors, flags and preserved
+registers a program sees after a system call, and stays in user mode long
+enough to be interrupted there.

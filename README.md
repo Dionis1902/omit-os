@@ -230,7 +230,7 @@ system library; a desktop that is a single program.
 | Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |

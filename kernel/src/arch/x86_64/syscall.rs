@@ -103,9 +103,18 @@ unsafe extern "C" {
 /// code. Must run after the GDT is loaded.
 pub fn init() {
     // `syscall` loads CS from STAR[47:32] and SS from that + 8; `sysret`
-    // (64-bit) loads SS from STAR[63:48] + 8 and CS from STAR[63:48] + 16,
-    // both with privilege level 3. The GDT is laid out to match.
-    let star = (u64::from(KERNEL_DS) << 48) | (u64::from(KERNEL_CS) << 32);
+    // (64-bit) loads SS from STAR[63:48] + 8 and CS from STAR[63:48] + 16.
+    //
+    // The value for `sysret` carries privilege level 3 in its low bits.
+    // Intel CPUs force those bits to 3 in both selectors, but AMD CPUs
+    // only do so for CS and load SS exactly as computed. With level 0
+    // here, user code on AMD would run with SS = 0x18 instead of 0x1B,
+    // which goes unnoticed until an interrupt arrives in user mode: the
+    // CPU saves that SS, and returning with `iretq` then faults because
+    // its privilege level does not match CS. (Found by the KVM tests on
+    // an AMD host; software emulation behaves like Intel.)
+    let sysret_base = KERNEL_DS | 3;
+    let star = (u64::from(sysret_base) << 48) | (u64::from(KERNEL_CS) << 32);
     // SAFETY: these MSRs exist on every x86-64 CPU. The entry point is the
     // kernel's `syscall_entry`; the selectors match the GDT (checked by the
     // constant assertions in `gdt`); the flag mask guarantees interrupts

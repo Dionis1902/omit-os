@@ -23,6 +23,11 @@ const TSS_SELECTOR: u16 = 0x28;
 // dictates this order: kernel code, kernel data, user data, user code.
 const _: () = assert!(KERNEL_DS == KERNEL_CS + 8);
 const _: () = assert!(USER_DS == (KERNEL_DS + 8) | 3 && USER_CS == (KERNEL_DS + 16) | 3);
+// `sysret` computes the user selectors by plain addition from a base that
+// already has privilege level 3 (see `syscall::init`): the sums must be
+// exactly the user selectors, without relying on the CPU to fix up the
+// low bits.
+const _: () = assert!((KERNEL_DS | 3) + 8 == USER_DS && (KERNEL_DS | 3) + 16 == USER_CS);
 
 /// Interrupt Stack Table slot (1-based, as encoded in IDT entries) used by
 /// the double-fault handler.
