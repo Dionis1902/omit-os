@@ -124,10 +124,12 @@ Verified in QEMU by the `windows-programs` test:
   emulated mouse and keyboard, the test checks on screenshots that a
   click arrives as `WM_LBUTTONDOWN` with the right position, typed keys
   arrive as `WM_CHAR`, `SetWindowTextA` changes the title bar, a
-  `MessageBoxA` appears and is dismissed with Enter, and that after
+  `MessageBoxA` appears and is dismissed with Enter, a timer started
+  with `SetTimer` delivers five `WM_TIMER` messages and is then stopped
+  by the program, and that after
   `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage(7)` the loop ends
   with that code; the program also confirms `WM_CREATE`'s parameters,
-  `WM_SIZE`, a posted message and `WM_KEYUP`, and checks 32 results of
+  `WM_SIZE`, a posted message and `WM_KEYUP`, and checks 39 results of
   the remaining functions itself (sizes, error codes, device context
   state, text extents, object lifetime). Started without a desktop, it
   reports that its window cannot be created;
@@ -140,7 +142,7 @@ Verified in QEMU by the `windows-programs` test:
 This is a proof that the approach works, not Windows compatibility.
 
 - **Only programs whose imports are all satisfied by the implemented
-  functions — 66 of `KERNEL32.dll`, 26 of `USER32.dll`, 14 of
+  functions — 66 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
   `GDI32.dll` — or by DLL files that are present and themselves
   loadable, run.** That excludes practically all existing software:
   anything linked against the C runtime or the Rust standard library, or
@@ -152,7 +154,9 @@ This is a proof that the approach works, not Windows compatibility.
   windows and therefore no controls, menus or dialogs other than a
   one-button `MessageBoxA`; one fixed-width font; a dozen message
   types; solid brushes and one-pixel pens; no bitmaps, regions,
-  clipping, timers, clipboard, or `...W` functions. Windows need the
+  clipping, clipboard, or `...W` functions. Timers have the system
+  timer's 10 ms resolution and are only looked at when the program
+  asks for a message. Windows need the
   desktop to be running.
 - No registry, networking, processes started by Windows programs,
   structured exception handling, or environment.

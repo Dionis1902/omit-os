@@ -6,7 +6,8 @@
 //!
 //! * A click puts a red square where the pointer is and counts.
 //! * Typed characters are shown; `m` opens a message box, `t` puts the
-//!   number of clicks in the title, `q` closes the window.
+//!   number of clicks in the title, `x` starts a timer that counts to
+//!   five, `q` closes the window.
 //!
 //! On exit it reports what happened on standard output, which is how
 //! the test checks the parts that cannot be seen on the screen.
@@ -35,6 +36,12 @@ static LAST_Y: AtomicI32 = AtomicI32::new(-100);
 /// press was followed by its release.
 static SEEN: AtomicU32 = AtomicU32::new(0);
 static PAINTS: AtomicU32 = AtomicU32::new(0);
+/// `WM_TIMER` messages received from the timer that `x` starts.
+static TICKS: AtomicU32 = AtomicU32::new(0);
+/// Calls of [`timer_procedure`].
+static CALLBACKS: AtomicU32 = AtomicU32::new(0);
+/// The identifier of the timer that `x` starts.
+const TICK_TIMER: usize = 7;
 static TYPED_LENGTH: AtomicU32 = AtomicU32::new(0);
 /// The characters typed so far.
 static TYPED: [AtomicU8; 24] = [const { AtomicU8::new(0) }; 24];
@@ -66,6 +73,9 @@ fn paint(window: Handle) {
     text.clear();
     let _ = write!(text, "typed: {}", typed().as_str());
     line(2, text.as_bytes());
+    text.clear();
+    let _ = write!(text, "ticks: {}", TICKS.load(Ordering::Relaxed));
+    line(3, text.as_bytes());
 
     // A red square, outlined in black, where the last click was.
     let brush = CreateSolidBrush(rgb(200, 30, 30));
@@ -131,6 +141,15 @@ unsafe extern "system" fn window_procedure(
             unsafe { InvalidateRect(window, null(), 1) };
             0
         }
+        WM_TIMER if wparam == TICK_TIMER => {
+            // Five ticks, then the timer stops itself.
+            if TICKS.fetch_add(1, Ordering::Relaxed) + 1 == 5 {
+                KillTimer(window, TICK_TIMER);
+            }
+            // SAFETY: a null rectangle means the whole window.
+            unsafe { InvalidateRect(window, null(), 1) };
+            0
+        }
         WM_KEYUP => {
             SEEN.fetch_or(8, Ordering::Relaxed);
             0
@@ -150,6 +169,11 @@ unsafe extern "system" fn window_procedure(
                             0,
                         );
                     }
+                }
+                b'x' => {
+                    // SAFETY: no callback; the message goes to this
+                    // window procedure.
+                    unsafe { SetTimer(window, TICK_TIMER, 50, None) };
                 }
                 b't' => {
                     let mut title = Text::<48>::new();
@@ -176,6 +200,13 @@ unsafe extern "system" fn window_procedure(
             0
         }
         _ => DefWindowProcA(window, message, wparam, lparam),
+    }
+}
+
+/// Counts its calls; see the timer checks in [`startup_checks`].
+unsafe extern "system" fn timer_procedure(_window: Handle, message: u32, _id: usize, _time: u32) {
+    if message == WM_TIMER {
+        CALLBACKS.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -291,6 +322,39 @@ fn startup_checks(window: Handle, class: &WndClassA) {
     checks.check(
         PostMessageA(null_mut(), WM_USER, 0, 0) == 0,
         "nothing is posted to a window that does not exist",
+    );
+
+    // Timers: one without a window, delivered to a callback when its
+    // message is dispatched; it must fire repeatedly, at about the
+    // period asked for, and stop when killed.
+    // SAFETY: the callback has the signature of a `TIMERPROC`.
+    let timer = unsafe { SetTimer(null_mut(), 0, 30, Some(timer_procedure)) };
+    checks.check(timer != 0, "SetTimer without a window");
+    let started = GetTickCount64();
+    // SAFETY: as for the message checks above.
+    unsafe {
+        while CALLBACKS.load(Ordering::Relaxed) < 3 && GetTickCount64() - started < 5000 {
+            if GetMessageA(message.as_mut_ptr(), null_mut(), 0, 0) > 0 {
+                DispatchMessageA(message.as_ptr());
+            }
+        }
+    }
+    let elapsed = GetTickCount64() - started;
+    checks.check(
+        CALLBACKS.load(Ordering::Relaxed) == 3,
+        "the timer callback is called",
+    );
+    checks.check(
+        (60..1000).contains(&elapsed),
+        "three ticks of 30 ms take about 90 ms",
+    );
+    checks.check(KillTimer(null_mut(), timer) != 0, "KillTimer");
+    checks.check(KillTimer(null_mut(), timer) == 0, "a timer is killed once");
+    checks.check(KillTimer(window, 99) == 0, "no timer 99");
+    // SAFETY: a null window that is not null: an invalid handle.
+    checks.check(
+        unsafe { SetTimer(0x1234 as Handle, 1, 10, None) } == 0,
+        "no timer for a window that does not exist",
     );
 
     // Drawing objects and a device context outside WM_PAINT.
@@ -436,7 +500,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
         message.assume_init_ref().wparam
     };
     say!(
-        "wingui: quit code {exit_code}, {} click(s), typed \"{}\", checks {:#x}, paints {}",
+        "wingui: code {exit_code}, {} click(s), typed \"{}\", checks {:#x}, paints {}, ticks {}",
         CLICKS.load(Ordering::Relaxed),
         typed().as_str(),
         SEEN.load(Ordering::Relaxed),
@@ -445,6 +509,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
         } else {
             "missing"
         },
+        TICKS.load(Ordering::Relaxed),
     );
     ExitProcess(0)
 }

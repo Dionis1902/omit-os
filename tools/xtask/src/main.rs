@@ -1236,7 +1236,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!KillTimer, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!CloseClipboard, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),
@@ -2032,6 +2032,12 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         &check.screenshot,
         check.screenshot.with_extension("windows-gui.ppm"),
     );
+    // `x`: the program starts a 50 ms timer that it stops after five
+    // WM_TIMER messages.
+    type_on_keyboard(&check.monitor, &["x"])?;
+    wait_for_screen(check, "five timer ticks", patience, |image| {
+        win_text(image, "ticks: 5") && win_text(image, "typed: ab")
+    })?;
     // `m`: a message box, a window of its own, closed with Enter.
     type_on_keyboard(&check.monitor, &["m"])?;
     let box_text =
@@ -2052,8 +2058,8 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     wait_for_screen(check, "the report of wingui.exe", patience, |image| {
         screen_shows(
             image,
-            "wingui: quit code 7, 1 click(s), typed \"ab\", checks 0xf, paints ok",
-        ) && screen_shows(image, "wingui: 32 startup checks passed")
+            "wingui: code 7, 1 click(s), typed \"ab\", checks 0xf, paints ok, ticks 5",
+        ) && screen_shows(image, "wingui: 39 startup checks passed")
             && screen_shows(image, "> _")
     })?;
 

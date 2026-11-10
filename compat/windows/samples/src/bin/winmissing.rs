@@ -2,7 +2,7 @@
 //! A program that needs things the compatibility layer does not have:
 //! a function of a system library that is missing altogether (the
 //! registry, `ADVAPI32.dll`), a function that is missing from a library
-//! that exists (`USER32.dll` has no timers), and the current date and
+//! that exists (`USER32.dll` has no clipboard), and the current date and
 //! time (there is no real-time clock driver). It must be refused before
 //! it starts, with all three named.
 
@@ -20,7 +20,7 @@ unsafe extern "system" {
 
 #[link(name = "user32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn KillTimer(window: *mut c_void, id: usize) -> i32;
+    fn CloseClipboard() -> i32;
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
@@ -37,7 +37,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     // SAFETY: valid arguments for the calls; never reached on Omit OS.
     unsafe {
         RegCloseKey(core::ptr::null_mut());
-        KillTimer(core::ptr::null_mut(), 1);
+        CloseClipboard();
         let mut time = 0u64;
         GetSystemTimeAsFileTime(&raw mut time);
     }

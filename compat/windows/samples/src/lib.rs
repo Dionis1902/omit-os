@@ -152,12 +152,14 @@ unsafe extern "system" {
 }
 
 pub type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
+pub type TimerProcedure = unsafe extern "system" fn(Handle, u32, usize, u32);
 
 pub const WM_CREATE: u32 = 0x0001;
 pub const WM_DESTROY: u32 = 0x0002;
 pub const WM_SIZE: u32 = 0x0005;
 pub const WM_PAINT: u32 = 0x000F;
 pub const WM_CLOSE: u32 = 0x0010;
+pub const WM_TIMER: u32 = 0x0113;
 pub const WM_KEYDOWN: u32 = 0x0100;
 pub const WM_KEYUP: u32 = 0x0101;
 pub const WM_CHAR: u32 = 0x0102;
@@ -276,6 +278,13 @@ pub struct PaintStruct {
 unsafe extern "system" {
     pub fn RegisterClassA(class: *const WndClassA) -> u16;
     pub fn RegisterClassExA(class: *const WndClassExA) -> u16;
+    pub fn SetTimer(
+        window: Handle,
+        id: usize,
+        elapse: u32,
+        callback: Option<TimerProcedure>,
+    ) -> usize;
+    pub safe fn KillTimer(window: Handle, id: usize) -> Bool;
     pub safe fn GetSystemMetrics(index: i32) -> i32;
     pub fn CreateWindowExA(
         ex_style: u32,

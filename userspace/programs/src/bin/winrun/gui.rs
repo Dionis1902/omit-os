@@ -27,7 +27,10 @@
 //!   `WM_KEYDOWN`, `WM_CHAR`, `WM_KEYUP` (sent right after the key
 //!   press: the system has no key releases), `WM_LBUTTONDOWN`,
 //!   `WM_MOUSEMOVE` (only while the left button is held), `WM_LBUTTONUP`,
-//!   `WM_CLOSE`, `WM_DESTROY`, `WM_QUIT`, and whatever the program posts.
+//!   `WM_TIMER`, `WM_CLOSE`, `WM_DESTROY`, `WM_QUIT`, and whatever the
+//!   program posts.
+//! * Timers are checked when the program asks for a message and have
+//!   the resolution of the system timer, 10 ms.
 //! * Virtual-key codes are provided for letters, digits and the
 //!   navigation and function keys; other keys report code 0 and are
 //!   best read through `WM_CHAR`.
@@ -71,6 +74,7 @@ const WM_SIZE: u32 = 0x0005;
 const WM_PAINT: u32 = 0x000F;
 const WM_CLOSE: u32 = 0x0010;
 const WM_QUIT: u32 = 0x0012;
+const WM_TIMER: u32 = 0x0113;
 const WM_KEYDOWN: u32 = 0x0100;
 const WM_KEYUP: u32 = 0x0101;
 const WM_CHAR: u32 = 0x0102;
@@ -251,7 +255,21 @@ struct Dc {
     position: (i32, i32),
 }
 
+/// A timer set with `SetTimer`.
+struct Timer {
+    /// 0 for a timer that belongs to no window.
+    hwnd: usize,
+    id: usize,
+    period_ms: u64,
+    /// When it fires next, in milliseconds of uptime.
+    due: u64,
+    /// The program's `TIMERPROC`, or 0 to deliver `WM_TIMER` to the
+    /// window procedure.
+    callback: usize,
+}
+
 struct Gui {
+    timers: Vec<Timer>,
     classes: Vec<Class>,
     windows: Vec<Win>,
     queue: VecDeque<Msg>,
@@ -261,6 +279,7 @@ struct Gui {
 }
 
 static GUI: Mutex<Gui> = Mutex::new(Gui {
+    timers: Vec::new(),
     classes: Vec::new(),
     windows: Vec::new(),
     queue: VecDeque::new(),
@@ -460,16 +479,44 @@ impl Gui {
             }
             return Some(message);
         }
-        let window = self
+        let now = omit_rt::uptime_ms();
+        if let Some(window) = self
             .windows
             .iter()
-            .find(|window| window.invalid && !window.gone)?;
+            .find(|window| window.invalid && !window.gone)
+        {
+            return Some(Msg {
+                hwnd: window.hwnd,
+                message: WM_PAINT,
+                time: now as u32,
+                ..Msg::default()
+            });
+        }
+        // Timers come last, as on Windows: only when nothing else is
+        // waiting.
+        let timer = self.timers.iter_mut().find(|timer| timer.due <= now)?;
+        if remove {
+            // The next tick is one period from now: ticks the program
+            // was too busy for are dropped, not queued up.
+            timer.due = now + timer.period_ms;
+        }
         Some(Msg {
-            hwnd: window.hwnd,
-            message: WM_PAINT,
-            time: omit_rt::uptime_ms() as u32,
+            hwnd: timer.hwnd,
+            message: WM_TIMER,
+            wparam: timer.id,
+            lparam: timer.callback as isize,
+            time: now as u32,
             ..Msg::default()
         })
+    }
+
+    /// Milliseconds until the next timer fires, if there is a timer.
+    fn next_timer(&self) -> Option<u64> {
+        let now = omit_rt::uptime_ms();
+        self.timers
+            .iter()
+            .map(|timer| timer.due.saturating_sub(now))
+            .min()
     }
 }
 
@@ -719,7 +766,7 @@ extern "win64" fn UpdateWindow(hwnd: usize) -> Bool {
 /// Waits for the next message.
 fn wait_message() -> Msg {
     loop {
-        let (message, descriptors) = with_gui(|gui| {
+        let (message, descriptors, timer) = with_gui(|gui| {
             let message = gui.next_message(true);
             let descriptors: Vec<u64> = gui
                 .windows
@@ -727,17 +774,18 @@ fn wait_message() -> Msg {
                 .filter(|window| !window.gone)
                 .map(|window| window.window.descriptor())
                 .collect();
-            (message, descriptors)
+            (message, descriptors, gui.next_timer())
         });
         if let Some(message) = message {
             return message;
         }
+        // Sleep until the desktop sends something or a timer is due.
+        // (Another thread's `PostMessageA` is only noticed at the next
+        // look, hence the upper limit.)
         if descriptors.is_empty() {
-            // Nothing can arrive except through another thread's
-            // `PostMessageA`.
-            omit_rt::sleep_ms(20);
+            omit_rt::sleep_ms(timer.unwrap_or(20).clamp(1, 20));
         } else {
-            let _ = omit_rt::poll(&descriptors, 1000, false);
+            let _ = omit_rt::poll(&descriptors, timer.unwrap_or(1000).clamp(1, 1000), false);
         }
     }
 }
@@ -812,12 +860,71 @@ unsafe extern "win64" fn DispatchMessageA(message: *const Msg) -> isize {
     }
     // SAFETY: the program passes a pointer to a `MSG` it received.
     let message = unsafe { *message };
+    if message.message == WM_TIMER && message.lparam != 0 {
+        // A timer with a callback: `lparam` is the `TIMERPROC` that was
+        // given to `SetTimer` (the message was built from the timer
+        // table, or forged by the program itself, at its own risk — as
+        // on Windows).
+        // SAFETY: see above; the signature is that of `TIMERPROC`.
+        let callback: extern "win64" fn(usize, u32, usize, u32) =
+            unsafe { core::mem::transmute(message.lparam as usize) };
+        callback(message.hwnd, WM_TIMER, message.wparam, message.time);
+        return 0;
+    }
     send(
         message.hwnd,
         message.message,
         message.wparam,
         message.lparam,
     )
+}
+
+/// `SetTimer`: `WM_TIMER` every `elapse` milliseconds (at least 10),
+/// delivered to the window's procedure or, if `callback` is given, to
+/// that function when the message is dispatched. With a window, `id`
+/// names the timer and setting it again replaces it; without one, a new
+/// identifier is chosen. Returns the identifier, 0 on failure.
+extern "win64" fn SetTimer(hwnd: usize, id: usize, elapse: u32, callback: usize) -> usize {
+    let period_ms = u64::from(elapse.clamp(10, 0x7FFF_FFFF));
+    with_gui(|gui| {
+        if hwnd != 0 && gui.window(hwnd).is_none() {
+            set_last_error(ERROR_INVALID_WINDOW_HANDLE);
+            return 0;
+        }
+        let id = if hwnd != 0 {
+            id
+        } else {
+            // An identifier no window-less timer has.
+            (1..)
+                .find(|candidate| {
+                    gui.timers
+                        .iter()
+                        .all(|timer| timer.hwnd != 0 || timer.id != *candidate)
+                })
+                .unwrap_or(1)
+        };
+        gui.timers
+            .retain(|timer| timer.hwnd != hwnd || timer.id != id);
+        gui.timers.push(Timer {
+            hwnd,
+            id,
+            period_ms,
+            due: omit_rt::uptime_ms() + period_ms,
+            callback,
+        });
+        // The result must be nonzero even for a window's timer 0.
+        if id == 0 { 1 } else { id }
+    })
+}
+
+/// `KillTimer`.
+extern "win64" fn KillTimer(hwnd: usize, id: usize) -> Bool {
+    with_gui(|gui| {
+        let before = gui.timers.len();
+        gui.timers
+            .retain(|timer| timer.hwnd != hwnd || timer.id != id);
+        (gui.timers.len() != before) as Bool
+    })
 }
 
 /// `DefWindowProcA`: `WM_CLOSE` destroys the window, `WM_PAINT` erases
@@ -853,6 +960,7 @@ extern "win64" fn DestroyWindow(hwnd: usize) -> Bool {
     let closed = with_gui(|gui| {
         gui.queue
             .retain(|message| message.hwnd != hwnd || message.message == WM_QUIT);
+        gui.timers.retain(|timer| timer.hwnd != hwnd);
         for context in &mut gui.contexts {
             if context.as_ref().is_some_and(|context| context.hwnd == hwnd) {
                 *context = None;
@@ -1403,6 +1511,7 @@ exports! { USER32_NAMES, user32:
     GetMessageA,
     GetSystemMetrics,
     InvalidateRect,
+    KillTimer,
     LoadCursorA,
     LoadIconA,
     MessageBoxA,
@@ -1413,6 +1522,7 @@ exports! { USER32_NAMES, user32:
     RegisterClassExA,
     ReleaseDC,
     SendMessageA,
+    SetTimer,
     SetWindowTextA,
     ShowWindow,
     TranslateMessage,
