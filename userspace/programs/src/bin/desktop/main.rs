@@ -4,8 +4,8 @@
 //!
 //! Takes over the screen, keyboard and mouse from the text console and
 //! shows movable windows: a file browser, a text viewer, a window for
-//! running programs, and an information window. The task bar's **Exit**
-//! button, or F12, gives the screen back to the console.
+//! running programs, and an information window. The power button in the
+//! Start panel, or F12, gives the screen back to the console.
 //!
 //! The window manager and all drawing are in the `omit-gfx` library; this
 //! program provides the windows' contents ([`apps`]) and the loop that
@@ -23,11 +23,13 @@ mod remote;
 use alloc::boxed::Box;
 use alloc::format;
 use alloc::rc::Rc;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
 use omit_gfx::desktop::Desktop;
 use omit_gfx::surface::Surface;
+use omit_rt::abi::datetime::DateTime;
 use omit_rt::abi::{Errno, InputEvent, event, key};
 use omit_rt::{eprintln, println};
 
@@ -60,32 +62,31 @@ fn main() -> i32 {
     let mut surface = Surface::new(width, height, 0);
     let mut desktop = Desktop::new(width, height);
 
-    desktop.add_launcher("Files", |context| {
+    desktop.add_launcher("Files", "folder", |context| {
         context.open(Box::new(apps::Files::new("/")), 440, 330);
     });
-    desktop.add_launcher("Run", |context| {
+    desktop.add_launcher("Run", "term", |context| {
         context.open(Box::new(apps::Run::new()), 620, 360);
     });
-    desktop.add_launcher("About", move |context| {
-        context.open(Box::new(apps::About::new(width, height)), 470, 200);
+    desktop.add_launcher("About", "info", move |context| {
+        context.open(Box::new(apps::About::new(width, height)), 470, 230);
     });
     // Programs with windows of their own, started from the task bar.
     // They are only started here; their windows arrive through `server`.
     let children: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
-    for (label, program) in [
-        ("Scribble", "/bin/scribble"),
-        ("Clock", "/bin/clock"),
-        ("Pop", "/bin/pop"),
+    for (label, icon, program) in [
+        ("Scribble", "brush", "/bin/scribble"),
+        ("Clock", "clock", "/bin/clock"),
+        ("Pop", "play", "/bin/pop"),
     ] {
         let children = children.clone();
-        desktop.add_launcher(label, move |_| {
+        desktop.add_launcher(label, icon, move |_| {
             if let Ok(pid) = omit_rt::spawn(program, &[program]) {
                 children.borrow_mut().push(pid);
             }
         });
     }
-    desktop.add_launcher("Exit", |context| context.quit());
-    desktop.open(Box::new(apps::About::new(width, height)), 470, 200);
+    desktop.open(Box::new(apps::About::new(width, height)), 470, 230);
 
     // Windows of other programs. Without the channel (another desktop
     // has it?) there are simply none.
@@ -97,13 +98,8 @@ fn main() -> i32 {
     // When the oldest input not yet visible on the screen arrived.
     let mut pending_since: Option<u64> = None;
     'run: while !desktop.quit_requested() {
-        let seconds = omit_rt::uptime_ms() / 1000;
-        desktop.set_status(&format!(
-            "up {}:{:02}:{:02}",
-            seconds / 3600,
-            (seconds / 60) % 60,
-            seconds % 60
-        ));
+        let (time, date) = clock();
+        desktop.set_clock(&time, &date);
         let dirty = desktop.render(&mut surface);
         if !dirty.is_empty() {
             // The desktop only reports areas inside the screen.
@@ -173,6 +169,41 @@ fn main() -> i32 {
         let _ = omit_rt::wait(*pid);
     }
     finish(failure, &latency)
+}
+
+/// What the task bar's clock shows: the time and, under it, the date
+/// (UTC: there are no time zones). On a machine without a clock, how
+/// long the system has been running.
+fn clock() -> (String, String) {
+    const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let now =
+        omit_rt::realtime_us().and_then(|micros| DateTime::from_unix((micros / 1_000_000) as i64));
+    match now {
+        Some(now) => (
+            format!("{:02}:{:02}", now.hour, now.minute),
+            format!(
+                "{} {} {}",
+                DAYS[usize::from(now.weekday())],
+                now.day,
+                MONTHS[usize::from(now.month).clamp(1, 12) - 1]
+            ),
+        ),
+        None => {
+            let seconds = omit_rt::uptime_ms() / 1000;
+            (
+                format!(
+                    "{}:{:02}:{:02}",
+                    seconds / 3600,
+                    (seconds / 60) % 60,
+                    seconds % 60
+                ),
+                "running".into(),
+            )
+        }
+    }
 }
 
 /// Statistics of the time from an input event reaching the kernel to the

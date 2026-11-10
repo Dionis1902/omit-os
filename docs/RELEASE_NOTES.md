@@ -104,12 +104,14 @@ tftp 10.0.2.2 FILE   fetch a file from a TFTP server
 fetch http://HOST/FILE [DEST]
                      download over HTTP (no https)
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
-                     machines provide, or USB); Exit or F12 returns to the
-                     console
+                     machines provide, or USB); the power button in
+                     the Start panel, or F12, returns to the console
 ```
 
-On the desktop, the task bar starts programs with windows of their own
-(Scribble, Clock, the game Pop), and the Run window starts anything by
+On the desktop, the icons on the task bar start programs — hold the
+pointer over one to see its name — and the mark at the left lists them
+all. Some have windows of their own (Scribble, Clock, the game Pop), and
+the Run window starts anything by
 name — try `wingui.exe`, a graphical Windows program: click in its
 window, type, press `m` for a message box, `x` for a timer, `q` to quit.
 

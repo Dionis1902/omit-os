@@ -7,16 +7,20 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use omit_gfx::desktop::{App, Context, theme};
+use omit_gfx::desktop::{App, Context};
+use omit_gfx::font::{REGULAR_12, REGULAR_13, SEMIBOLD_20};
 use omit_gfx::geometry::Rect;
+use omit_gfx::icon::icon;
 use omit_gfx::surface::{CHAR_WIDTH, Canvas, TEXT_HEIGHT};
+use omit_gfx::theme::Theme;
 use omit_rt::abi::{Errno, key};
 
-const MARGIN: i32 = 8;
+/// Space around text set in the fixed-width font (the terminal and the
+/// viewer), and the height of one of its lines.
+const MARGIN: i32 = 12;
 const LINE: i32 = TEXT_HEIGHT + 2;
-const HIGHLIGHT: u32 = 0xC8_DC_F8;
-const DIM: u32 = 0x60_60_68;
-const ERROR: u32 = 0xB0_20_20;
+/// Space around the contents of the other windows.
+const PADDING: i32 = 22;
 
 const ENTER: i32 = 13;
 const BACKSPACE: i32 = 127;
@@ -67,22 +71,38 @@ impl App for About {
         "About Omit OS"
     }
 
-    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, _height: i32) {
+    fn icon(&self) -> &str {
+        "info"
+    }
+
+    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, _height: i32, theme: &Theme) {
+        canvas.write(PADDING, PADDING - 2, "Omit OS", SEMIBOLD_20, theme.text);
+        canvas.write(
+            PADDING,
+            PADDING + 28,
+            &format!("Version {}", env!("CARGO_PKG_VERSION")),
+            REGULAR_12,
+            theme.text_3,
+        );
         let lines = [
-            format!("Omit OS {}", env!("CARGO_PKG_VERSION")),
-            "Everything you need. Nothing you don't.".into(),
-            String::new(),
             format!(
                 "Screen {} x {}, running for {} s",
                 self.screen.0, self.screen.1, self.seconds
             ),
             String::new(),
-            "Drag a title bar to move a window, click to raise".into(),
-            "it. The task bar opens more windows. Exit or F12".into(),
-            "returns to the text console.".into(),
+            "Drag a title bar to move a window, and its bottom-right".into(),
+            "corner to resize it. The icons on the task bar start".into(),
+            "programs; the mark at its left lists them all, and ends".into(),
+            "the desktop. F12 returns to the text console at any time.".into(),
         ];
         for (index, line) in lines.iter().enumerate() {
-            canvas.text(MARGIN, MARGIN + index as i32 * LINE, line, theme::TEXT);
+            canvas.write(
+                PADDING,
+                PADDING + 60 + index as i32 * 20,
+                line,
+                REGULAR_13,
+                theme.text_2,
+            );
         }
     }
 
@@ -112,7 +132,9 @@ pub struct Files {
 }
 
 impl Files {
-    const LIST_TOP: i32 = MARGIN + LINE + 4;
+    /// Where the list starts, below the path, and the height of a row.
+    const LIST_TOP: i32 = 44;
+    const ROW: i32 = 30;
 
     pub fn new(path: &str) -> Self {
         let mut files = Self {
@@ -148,7 +170,7 @@ impl Files {
             }
             Err(error) => self.error = Some(error),
         }
-        self.title = format!("Files - {path}");
+        self.title = format!("Files — {path}");
         self.path = path;
         self.selected = 0;
         self.first_row = 0;
@@ -194,34 +216,58 @@ impl App for Files {
         &self.title
     }
 
-    fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32) {
-        canvas.text(MARGIN, MARGIN, &self.path, DIM);
-        canvas.fill(
-            Rect::new(MARGIN, Self::LIST_TOP - 3, width - 2 * MARGIN, 1),
-            DIM,
+    fn icon(&self) -> &str {
+        "folder"
+    }
+
+    fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
+        // The path, on a strip in the chrome colour like the title bar.
+        canvas.fill(Rect::new(0, 0, width, Self::LIST_TOP - 6), theme.chrome);
+        canvas.tint(
+            Rect::new(0, Self::LIST_TOP - 7, width, 1),
+            theme.separator.colour,
+            theme.separator.alpha,
         );
+        let (path, cut) = REGULAR_13.fit(&self.path, width - 2 * PADDING);
+        let end = canvas.write(PADDING, 10, path, REGULAR_13, theme.text_2);
+        if cut {
+            canvas.write(end, 10, "…", REGULAR_13, theme.text_2);
+        }
         if let Some(error) = self.error {
-            canvas.text(
-                MARGIN,
-                Self::LIST_TOP,
+            canvas.write(
+                PADDING,
+                Self::LIST_TOP + 6,
                 &format!("Cannot list: {error}"),
-                ERROR,
+                REGULAR_13,
+                theme.danger,
             );
         }
-        self.visible_rows = rows(Self::LIST_TOP, height);
+        self.visible_rows = ((height - Self::LIST_TOP - 6) / Self::ROW).max(1) as usize;
         self.keep_selection_visible();
         let shown = self.entries.iter().enumerate().skip(self.first_row);
         for (row, (index, entry)) in shown.take(self.visible_rows).enumerate() {
-            let y = Self::LIST_TOP + row as i32 * LINE;
+            let area = Rect::new(
+                8,
+                Self::LIST_TOP + row as i32 * Self::ROW,
+                width - 16,
+                Self::ROW,
+            );
             if index == self.selected {
-                canvas.fill(
-                    Rect::new(MARGIN - 2, y - 1, width - 2 * MARGIN + 4, LINE),
-                    HIGHLIGHT,
-                );
+                canvas.round_rect(area, 7, theme.accent_soft.colour, theme.accent_soft.alpha);
             }
-            let kind = if entry.is_dir { "[dir] " } else { "      " };
-            let x = canvas.text(MARGIN, y, kind, DIM);
-            canvas.text(x, y, &entry.name, theme::TEXT);
+            let (name, ink) = if entry.is_dir {
+                ("folder", theme.accent_text)
+            } else {
+                ("doc", theme.text_3)
+            };
+            if let Some(mask) = icon(name, 20) {
+                canvas.mask(area.x + 10, area.y + 5, mask, ink, 255);
+            }
+            let (text, cut) = REGULAR_13.fit(&entry.name, area.w - 54);
+            let end = canvas.write(area.x + 40, area.y + 7, text, REGULAR_13, theme.text);
+            if cut {
+                canvas.write(end, area.y + 7, "…", REGULAR_13, theme.text);
+            }
         }
     }
 
@@ -229,7 +275,7 @@ impl App for Files {
         if y < Self::LIST_TOP {
             return;
         }
-        let index = self.first_row + ((y - Self::LIST_TOP) / LINE) as usize;
+        let index = self.first_row + ((y - Self::LIST_TOP) / Self::ROW) as usize;
         if index < self.entries.len() {
             self.selected = index;
             self.activate(context);
@@ -308,11 +354,11 @@ impl App for Viewer {
         &self.title
     }
 
-    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, height: i32) {
+    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, height: i32, theme: &Theme) {
         let mut top = MARGIN;
         if let Some(note) = &self.note {
-            canvas.text(MARGIN, top, note, DIM);
-            top += LINE;
+            canvas.write(MARGIN, top, note, REGULAR_13, theme.text_3);
+            top += LINE + 4;
         }
         self.visible_rows = rows(top, height);
         self.first_row = self.first_row.min(self.last_first_row());
@@ -322,7 +368,7 @@ impl App for Viewer {
             .skip(self.first_row)
             .take(self.visible_rows);
         for (row, line) in shown.enumerate() {
-            canvas.text(MARGIN, top + row as i32 * LINE, line, theme::TEXT);
+            canvas.text(MARGIN, top + row as i32 * LINE, line, theme.text);
         }
     }
 
@@ -511,10 +557,18 @@ impl App for Run {
         "Run"
     }
 
-    fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32) {
+    fn icon(&self) -> &str {
+        "term"
+    }
+
+    fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
         let columns = columns(width);
         let prompt_y = height - MARGIN - LINE;
-        canvas.fill(Rect::new(MARGIN, prompt_y - 4, width - 2 * MARGIN, 1), DIM);
+        canvas.tint(
+            Rect::new(MARGIN, prompt_y - 4, width - 2 * MARGIN, 1),
+            theme.separator.colour,
+            theme.separator.alpha,
+        );
         // Show the end of a line that is too long to fit.
         let visible: String = {
             let count = self.input.chars().count();
@@ -528,7 +582,7 @@ impl App for Run {
             Some(child) => format!("{} (input ended)", child.name),
             None => format!("> {visible}_"),
         };
-        canvas.text(MARGIN, prompt_y, &prompt, theme::TEXT);
+        canvas.text(MARGIN, prompt_y, &prompt, theme.text);
 
         // Wrap the lines to the window and show the last ones that fit.
         let available = ((prompt_y - 4 - MARGIN) / LINE).max(1) as usize;
@@ -556,7 +610,7 @@ impl App for Run {
         }
         wrapped.truncate(available);
         for (row, text) in wrapped.iter().rev().enumerate() {
-            canvas.text(MARGIN, MARGIN + row as i32 * LINE, text, theme::TEXT);
+            canvas.text(MARGIN, MARGIN + row as i32 * LINE, text, theme.text);
         }
     }
 

@@ -3,12 +3,19 @@
 //! Graphics for Omit OS programs.
 //!
 //! * [`geometry`] — points and rectangles.
-//! * [`surface`] — an image in memory and the operations that draw on it:
-//!   filled rectangles, outlines and text, always clipped.
-//! * [`desktop`] — a window manager: overlapping windows with title bars
-//!   that can be moved, raised and closed with the mouse, a task bar with
-//!   buttons that open windows, and a pointer. What is *in* a window is
-//!   provided by the program through the [`desktop::App`] trait.
+//! * [`surface`] — an image in memory and the basic operations that draw
+//!   on it, always clipped: filled rectangles, outlines, fixed-width text.
+//! * [`paint`] — drawing with soft edges: translucency, rounded
+//!   rectangles, shadows, proportional text, icons.
+//! * [`font`], [`icon`] — the Inter typeface and the interface's icons,
+//!   ready-drawn.
+//! * [`theme`] — the colours of the Omit OS design system, light and
+//!   dark.
+//! * [`desktop`] — a window manager drawn to that design system:
+//!   overlapping windows that can be moved, resized, minimised and
+//!   maximised, a task bar, a Start panel and a pointer. What is *in* a
+//!   window is provided by the program through the [`desktop::App`]
+//!   trait.
 //!
 //! Nothing here touches hardware or makes system calls: the desktop takes
 //! mouse and keyboard events as method calls and draws into a
@@ -26,8 +33,12 @@ extern crate alloc;
 extern crate std;
 
 pub mod desktop;
+pub mod font;
 pub mod geometry;
+pub mod icon;
+pub mod paint;
 pub mod surface;
+pub mod theme;
 
 /// A colour: `0x00RRGGBB`.
 pub type Colour = u32;

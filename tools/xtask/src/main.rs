@@ -2038,8 +2038,46 @@ fn rgb(colour: omit_gfx::Colour) -> [u8; 3] {
 /// Whether `image` contains `text` exactly as the desktop draws it in a
 /// window (same font, same colours), anywhere on the screen.
 fn screen_shows(image: &Screenshot, text: &str) -> bool {
-    use omit_gfx::desktop::theme;
-    screen_shows_in(image, text, theme::TEXT, theme::WINDOW)
+    let theme = omit_gfx::theme::Theme::default();
+    screen_shows_in(image, text, theme.text, theme.window)
+}
+
+/// Whether `image` contains `text` as the desktop writes it in `font`,
+/// in `colour` on a plain `background`, anywhere on the screen.
+fn screen_writes(
+    image: &Screenshot,
+    text: &str,
+    font: omit_gfx::font::Font,
+    colour: omit_gfx::Colour,
+    background: omit_gfx::Colour,
+) -> bool {
+    use omit_gfx::surface::Surface;
+    // A margin, since letters may reach a little beyond their line.
+    let margin = 2;
+    let (width, height) = (
+        (font.width(text) + 2 * margin) as usize,
+        (font.height() + 2 * margin) as usize,
+    );
+    let mut rendered = Surface::new(width, height, background);
+    rendered.canvas().write(margin, margin, text, font, colour);
+    find_on_screen(image, &rendered)
+}
+
+/// Whether `image` contains the picture `rendered` anywhere.
+fn find_on_screen(image: &Screenshot, rendered: &omit_gfx::surface::Surface) -> bool {
+    let (width, height) = (rendered.width(), rendered.height());
+    let pattern: Vec<[u8; 3]> = rendered.pixels().iter().map(|&p| rgb(p)).collect();
+    if image.width < width || image.height < height {
+        return false;
+    }
+    (0..=image.height - height).any(|top| {
+        (0..=image.width - width).any(|left| {
+            // The first row decides almost always; look at it first.
+            pattern.iter().enumerate().all(|(index, &colour)| {
+                image.pixel(left + index % width, top + index / width) == colour
+            })
+        })
+    })
 }
 
 /// Whether `image` contains `text` drawn in `colour` on `background`.
@@ -2053,17 +2091,7 @@ fn screen_shows_in(
     let (width, height) = (text_width(text) as usize, TEXT_HEIGHT as usize);
     let mut rendered = Surface::new(width, height, background);
     rendered.canvas().text(0, 0, text, colour);
-    let pattern: Vec<[u8; 3]> = rendered.pixels().iter().map(|&p| rgb(p)).collect();
-    if image.width < width || image.height < height {
-        return false;
-    }
-    (0..=image.height - height).any(|top| {
-        (0..=image.width - width).any(|left| {
-            pattern.iter().enumerate().all(|(index, &colour)| {
-                image.pixel(left + index % width, top + index / width) == colour
-            })
-        })
-    })
+    find_on_screen(image, &rendered)
 }
 
 /// Takes screenshots until `accept` is satisfied or `timeout` passes.
@@ -2133,9 +2161,9 @@ impl<'a> Mouse<'a> {
     }
 }
 
-/// Labels of the desktop's task bar buttons; must match
+/// Labels of the programs on the desktop's task bar; must match
 /// `userspace/programs/src/bin/desktop/main.rs`.
-const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Pop", "Exit"];
+const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Pop"];
 
 /// Operates the graphical desktop, which the caller has just started from
 /// the serial console, and checks what it shows:
@@ -2150,29 +2178,57 @@ const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock
 /// 4. dragging the title bar moves the window, contents included;
 /// 5. the Exit button ends the desktop.
 fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
-    use omit_gfx::desktop::{BORDER, Desktop, TASKBAR_HEIGHT, TITLE_HEIGHT, theme};
+    use omit_gfx::desktop::{BORDER, Control, Desktop, TASKBAR_HEIGHT, TITLE_HEIGHT, wallpaper_at};
+    use omit_gfx::font::{MEDIUM_13, SEMIBOLD_20};
     let patience = Duration::from_secs(30);
-    let count_all =
-        |image: &Screenshot, colour: omit_gfx::Colour| image.count(0..image.height, rgb(colour));
+    let theme = omit_gfx::theme::Theme::default();
+    // What shows where nothing is drawn: the wallpaper, and on the task
+    // bar the bar's glass over it.
+    let wallpaper = |image: &Screenshot, x: usize, y: usize| {
+        rgb(wallpaper_at(
+            &theme,
+            image.width as i32,
+            image.height as i32,
+            x as i32,
+            y as i32,
+        ))
+    };
+    let bar_glass = |image: &Screenshot, x: usize, y: usize| {
+        rgb(theme.bar.over(wallpaper_at(
+            &theme,
+            image.width as i32,
+            image.height as i32,
+            x as i32,
+            y as i32,
+        )))
+    };
+    // A window's title as it is written in the window in front, and in
+    // the others.
+    let title = |image: &Screenshot, text: &str| {
+        screen_writes(image, text, MEDIUM_13, theme.text, theme.chrome)
+    };
 
     let image = wait_for_screen(check, "the desktop", patience, |image| {
         // The first frame is copied to the screen row by row, so wait for
         // its last part, the task bar at the bottom, as well.
-        image.pixel(image.width - 3, 3) == rgb(theme::BACKGROUND)
-            && image.pixel(image.width / 2, image.height - 2) == rgb(theme::TASKBAR)
-            && screen_shows(image, "Everything you need. Nothing you don't.")
+        image.pixel(image.width - 3, 3) == wallpaper(image, image.width - 3, 3)
+            && image.pixel(image.width / 2, image.height - 2)
+                == bar_glass(image, image.width / 2, image.height - 2)
+            && screen_writes(image, "Omit OS", SEMIBOLD_20, theme.text, theme.window)
     })?;
-    if count_all(&image, theme::TITLE_ACTIVE) < 5000 {
-        return Err("the About window has no active title bar".into());
+    if !title(&image, "About Omit OS") {
+        return Err("the About window's title is not that of the window in front".into());
     }
-    if count_all(&image, theme::TITLE_INACTIVE) != 0 {
-        return Err("an inactive title bar with only one window open".into());
+    // The Start mark, in the accent colour, at the left of the task bar.
+    let bar_rows = image.height - TASKBAR_HEIGHT as usize..image.height;
+    if image.count(bar_rows, rgb(theme.accent_text)) < 20 {
+        return Err("the task bar shows no Start mark".into());
     }
 
     // The same layout code the desktop uses says where its buttons are.
     let mut layout = Desktop::new(image.width, image.height);
     for label in DESKTOP_LAUNCHERS {
-        layout.add_launcher(label, |_| {});
+        layout.add_launcher(label, "doc", |_| {});
     }
     let button = |label: &str| {
         let index = DESKTOP_LAUNCHERS.iter().position(|l| *l == label)?;
@@ -2180,14 +2236,42 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         Some((frame.x + frame.w / 2, frame.y + frame.h / 2))
     };
     let (run_x, run_y) = button("Run").ok_or("no Run button")?;
-    let (exit_x, exit_y) = button("Exit").ok_or("no Exit button")?;
     debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
+    let start = layout.start_button();
+    let (start_x, start_y) = (start.x + start.w / 2, start.y + start.h / 2);
+    // Where the power button is once the Start panel is open: ask a
+    // second copy of the layout, with its panel opened.
+    let ((power_x, power_y), files_row) = {
+        let mut opened = Desktop::new(image.width, image.height);
+        for label in DESKTOP_LAUNCHERS {
+            opened.add_launcher(label, "doc", |_| {});
+        }
+        let at = opened.pointer();
+        opened.mouse(start_x - at.x, start_y - at.y, 0);
+        opened.mouse(0, 0, 1);
+        opened.mouse(0, 0, 0);
+        let power = opened
+            .power_button_frame()
+            .ok_or("the Start panel did not open in the layout")?;
+        let row = opened
+            .start_item_frame(0)
+            .ok_or("the Start panel lists no programs in the layout")?;
+        (
+            (power.x + power.w / 2, power.y + power.h / 2),
+            (row.x + row.w / 2, row.y + row.h / 2),
+        )
+    };
 
     let mut mouse = Mouse::new(&check.monitor)?;
     mouse.click(run_x, run_y)?;
     wait_for_screen(check, "the Run window", patience, |image| {
         screen_shows(image, "Type a program name and press Enter, for example:")
-            && count_all(image, theme::TITLE_INACTIVE) > 5000
+            && title(image, "Run")
+            // The About window is behind now: its title is no longer
+            // written as that of the window in front. (How it is
+            // written instead cannot be matched exactly: the shadow of
+            // the Run window falls across it.)
+            && !title(image, "About Omit OS")
     })?;
 
     // `hello`, then `winhello.exe`.
@@ -2250,9 +2334,16 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         fn title(&self) -> &str {
             ""
         }
-        fn draw(&mut self, _: &mut omit_gfx::surface::Canvas<'_>, _: i32, _: i32) {}
+        fn draw(
+            &mut self,
+            _: &mut omit_gfx::surface::Canvas<'_>,
+            _: i32,
+            _: i32,
+            _: &omit_gfx::theme::Theme,
+        ) {
+        }
     }
-    layout.open(Box::new(Blank), 470, 200);
+    layout.open(Box::new(Blank), 470, 230);
     let run_window = layout.open(Box::new(Blank), 620, 360);
     let scribble = layout.open(Box::new(Blank), 360, 240);
     let frame = layout
@@ -2263,9 +2354,6 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     let at =
         |image: &Screenshot, x: i32, y: i32| image.pixel((left + x) as usize, (top + y) as usize);
     let (paper, black, red) = (rgb(0xFF_FF_F0), rgb(0x20_20_20), rgb(0xC0_20_20));
-    let title = |image: &Screenshot, text: &str| {
-        screen_shows_in(image, text, theme::LIGHT_TEXT, theme::TITLE_ACTIVE)
-    };
     type_on_keyboard(
         &check.monitor,
         &["s", "c", "r", "i", "b", "b", "l", "e", "ret"],
@@ -2439,11 +2527,11 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     // The Run window is the second one opened; drag it by its title bar
     // (the About window does not reach this far right).
     let (grab_x, grab_y) = (560, 70);
-    if before.pixel(grab_x as usize, grab_y as usize) != rgb(theme::TITLE_ACTIVE) {
+    if before.pixel(grab_x as usize, grab_y as usize) != rgb(theme.chrome) {
         return Err("the Run window's title bar is not where it is expected".into());
     }
     let probe = (640usize, 300usize);
-    if before.pixel(probe.0, probe.1) != rgb(theme::WINDOW) {
+    if before.pixel(probe.0, probe.1) != rgb(theme.window) {
         return Err("the Run window does not cover the probe point".into());
     }
     mouse.move_to(grab_x, grab_y)?;
@@ -2455,11 +2543,11 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         "the Run window in its new place",
         patience,
         |image| {
-            image.pixel(probe.0, probe.1) == rgb(theme::BACKGROUND)
+            image.pixel(probe.0, probe.1) == wallpaper(image, probe.0, probe.1)
                 // (A point of the title bar that the pointer, which is
                 // now at the grab point, does not cover.)
                 && image.pixel(grab_x as usize + 320, grab_y as usize + 330)
-                    == rgb(theme::TITLE_ACTIVE)
+                    == rgb(theme.chrome)
                 && screen_shows(image, "Hello from a Windows executable!")
         },
     )?;
@@ -2470,23 +2558,34 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         .window_frame(run_window)
         .ok_or("no frame for the Run window")?
         .translate(420, 330);
-    // (The buttons are squares of the title bar's height less 8, 4 from
-    // its edge and from each other; close is the right one.)
-    let side = TITLE_HEIGHT - 8;
-    let maximise = |frame: omit_gfx::geometry::Rect| {
+    // The maximise button keeps its distance from the window's top-right
+    // corner wherever and however large the window is.
+    let (from_right, from_top) = {
+        let frame = layout
+            .window_frame(run_window)
+            .ok_or("no frame for the Run window")?;
+        let button = layout
+            .control_frame(run_window, Control::Maximise)
+            .ok_or("the Run window has no maximise button")?;
         (
-            frame.right() - BORDER - 2 * (side + 4) + side / 2,
-            frame.y + BORDER + 4 + side / 2,
+            frame.right() - (button.x + button.w / 2),
+            button.y + button.h / 2 - frame.y,
         )
     };
+    let maximise =
+        |frame: omit_gfx::geometry::Rect| (frame.right() - from_right, frame.y + from_top);
     let (x, y) = maximise(moved);
     mouse.click(x, y)?;
     let far = (image.width - 10, 400usize);
     wait_for_screen(check, "the Run window maximised", patience, |image| {
-        image.pixel(far.0, far.1) == rgb(theme::WINDOW)
-            && image.pixel(20, 400) == rgb(theme::WINDOW)
-            && image.pixel(image.width / 2, 12) == rgb(theme::TITLE_ACTIVE)
-            && image.pixel(image.width / 2, image.height - 2) == rgb(theme::TASKBAR)
+        image.pixel(far.0, far.1) == rgb(theme.window)
+            && image.pixel(20, 400) == rgb(theme.window)
+            // (Square corners when maximised: the title bar reaches the
+            // screen's corner.)
+            && image.pixel(image.width / 2, 4) == rgb(theme.chrome)
+            && image.pixel(3, 3) == rgb(theme.chrome)
+            && image.pixel(image.width / 2, image.height - 2)
+                == bar_glass(image, image.width / 2, image.height - 2)
             && screen_shows(image, "Hello from a Windows executable!")
     })?;
     let full = omit_gfx::geometry::Rect::new(
@@ -2497,14 +2596,75 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     );
     let (x, y) = maximise(full);
     mouse.click(x, y)?;
-    mouse.move_to(exit_x, exit_y - 60)?;
+    mouse.move_to(20, 300)?;
     wait_for_screen(check, "the Run window restored", patience, |image| {
-        image.pixel(far.0, far.1) == rgb(theme::BACKGROUND)
-            && image.pixel(20, 400) == rgb(theme::BACKGROUND)
-            && image.pixel(grab_x as usize + 320, grab_y as usize + 330) == rgb(theme::TITLE_ACTIVE)
+        image.pixel(far.0, far.1) == wallpaper(image, far.0, far.1)
+            && image.pixel(20, 400) == wallpaper(image, 20, 400)
+            && image.pixel(grab_x as usize + 320, grab_y as usize + 330) == rgb(theme.chrome)
     })?;
 
-    mouse.click(exit_x, exit_y)
+    // Minimise the Run window with its button; its task bar icon brings
+    // it back.
+    let minimise = {
+        let frame = layout
+            .window_frame(run_window)
+            .ok_or("no frame for the Run window")?;
+        let button = layout
+            .control_frame(run_window, Control::Minimise)
+            .ok_or("the Run window has no minimise button")?;
+        (
+            moved.right() - (frame.right() - (button.x + button.w / 2)),
+            moved.y + (button.y + button.h / 2 - frame.y),
+        )
+    };
+    mouse.click(minimise.0, minimise.1)?;
+    mouse.move_to(20, 300)?;
+    wait_for_screen(
+        check,
+        "the desktop without the Run window",
+        patience,
+        |image| {
+            image.pixel(grab_x as usize + 320, grab_y as usize + 330)
+            == wallpaper(image, grab_x as usize + 320, grab_y as usize + 330)
+            && !screen_shows(image, "Hello from a Windows executable!")
+            // The About window is in front again.
+            && title(image, "About Omit OS")
+        },
+    )?;
+    mouse.click(run_x, run_y)?;
+    mouse.move_to(20, 300)?;
+    wait_for_screen(
+        check,
+        "the Run window back from the task bar",
+        patience,
+        |image| {
+            image.pixel(grab_x as usize + 320, grab_y as usize + 330) == rgb(theme.chrome)
+                && screen_shows(image, "Hello from a Windows executable!")
+                && title(image, "Run")
+        },
+    )?;
+
+    // The Start mark opens the list of programs; the row under the
+    // pointer is filled with the accent colour. Its power button ends
+    // the desktop.
+    mouse.click(start_x, start_y)?;
+    mouse.move_to(files_row.0, files_row.1)?;
+    wait_for_screen(check, "the Start panel", patience, |image| {
+        let row = (files_row.1 - 10) as usize..(files_row.1 + 10) as usize;
+        image.count(row, rgb(theme.accent)) > 2000
+    })?;
+    mouse.move_to(power_x, power_y)?;
+    wait_for_screen(
+        check,
+        "the power button under the pointer",
+        patience,
+        |image| {
+            let rows = (power_y - 12) as usize..(power_y + 12) as usize;
+            image.count(rows, rgb(theme.danger)) > 300
+        },
+    )?;
+    mouse.button(true)?;
+    mouse.button(false)
 }
 
 /// Checks that a screenshot shows the kernel's console: a status bar with

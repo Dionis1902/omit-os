@@ -1,6 +1,6 @@
 [package]
 name = "omit-gfx"
-description = "Pixel drawing, text and a small window manager for Omit OS programs (no_std, host-tested)"
+description = "Drawing, text, icons, the design system's colours and a window manager for Omit OS programs (no_std, host-tested)"
 version.workspace = true
 edition.workspace = true
 license = "MIT OR Apache-2.0"

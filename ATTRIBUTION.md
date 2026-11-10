@@ -17,6 +17,8 @@ repository needs a row here (CI checks that; see
 | --- | --- | --- | --- | --- |
 | Noto Sans Mono, regular, 16 px, pre-rendered glyphs — the font of the console and the desktop | not in the repository: comes with the `noto-sans-mono-bitmap` crate (see `kernel/Cargo.toml`, `libs/gfx/Cargo.toml`) and is embedded in the kernel and in programs that draw text | The Noto Project Authors, <https://github.com/notofonts/latin-greek-cyrillic>; crate by Philipp Schuster, <https://github.com/phip1611/noto-sans-mono-bitmap-rs> | Font: SIL Open Font License 1.1. Crate: MIT | None by this project; the crate ships the glyphs rendered to bitmaps |
 
+| Inter 4.0, weights Regular, Medium and SemiBold, drawn at 11 to 20 px as bitmap fonts — the typeface of the desktop | `libs/gfx/fonts/inter-regular-11.omf`, `libs/gfx/fonts/inter-regular-12.omf`, `libs/gfx/fonts/inter-regular-13.omf`, `libs/gfx/fonts/inter-medium-13.omf`, `libs/gfx/fonts/inter-semibold-13.omf`, `libs/gfx/fonts/inter-semibold-15.omf`, `libs/gfx/fonts/inter-semibold-20.omf` | The Inter Project Authors, <https://github.com/rsms/inter>; taken from the Debian package `fonts-inter` 4.0 | SIL Open Font License 1.1 (`LICENSES/OFL-1.1.txt`); no reserved font name | Rendered to coverage bitmaps by `tools/gen-font.py`: printable ASCII and a few punctuation marks only, without hinting or kerning. The font files themselves are not in the repository |
+
 There are no third-party icons, cursors, sounds, images or wallpapers.
 
 ## Original work of the project
@@ -26,10 +28,15 @@ There are no third-party icons, cursors, sounds, images or wallpapers.
 | Screenshot of the console | `docs/screenshot.png` | Omit OS contributors | CC-BY-SA-4.0 | original work: taken from the system running in QEMU |
 | Screenshot of the desktop | `docs/screenshot-desktop.png` | Omit OS contributors | CC-BY-SA-4.0 | original work, as above |
 | Screenshot of a graphical Windows test program on the desktop | `docs/screenshot-windows-gui.png` | Omit OS contributors | CC-BY-SA-4.0 | original work; the program shown is `compat/windows/samples/src/bin/wingui.rs`, written for this project |
+| The interface's glyph icons (about fifty line drawings on a 24-unit grid) and the Start mark, from the Omit OS design system | `libs/gfx/icons/icons.json` (the drawings, as paths), `libs/gfx/icons/glyphs.omi` (drawn at 13, 16, 20 and 24 px by `tools/gen-icons.js`) | Omit OS contributors: designed by the maintainer in the project's design system | MIT OR Apache-2.0, as the library they are built into | original work |
+| The desktop's wallpaper | a gradient computed by `libs/gfx/src/desktop.rs` from three colours of the design system; there is no image file | Omit OS contributors | the licence of that code | original work |
 | Window decorations, task bar, mouse pointer, the drawings in the bundled programs | drawn by code in `libs/gfx/` and `userspace/programs/` | Omit OS contributors | the licence of that code (see `COPYING`) | original work; there are no image files |
 | Windows test programs and libraries (`*.exe`, `*.dll` on the system image) | built from `compat/windows/samples/`; no binaries in the repository | Omit OS contributors | MIT OR Apache-2.0 | original work, written against the public Windows API documentation |
 
-The project has no logo, wallpaper or sound yet. When it gets one it is
+The Start mark — a ring with one segment omitted and the dot that is
+left — serves as the project's mark on the task bar; see
+[`TRADEMARKS.md`](TRADEMARKS.md). The project has no wallpaper image or
+sound yet. When it gets one it is
 listed here, as original work under CC-BY-SA-4.0 unless stated
 otherwise; the name and logo are also covered by
 [`TRADEMARKS.md`](TRADEMARKS.md), which a copyright licence does not

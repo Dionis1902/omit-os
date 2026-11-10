@@ -83,6 +83,8 @@ ASSET_SUFFIXES = (
     ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".ico", ".icns",
     ".cur", ".ani", ".ttf", ".otf", ".ttc", ".woff", ".woff2", ".fon", ".pcf",
     ".bdf", ".psf", ".wav", ".mp3", ".ogg", ".flac", ".mid", ".exe", ".dll",
+    # This project's own formats for ready-drawn fonts and icons.
+    ".omf", ".omi",
 )  # fmt: skip
 TEXT_LIMIT = 2 << 20
 

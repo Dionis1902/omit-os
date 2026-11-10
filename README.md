@@ -43,11 +43,12 @@ narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
 
-Typing `desktop` at the prompt starts a small graphical desktop. In this
-screenshot (taken from QEMU) its Run window has started a native program
-and two Windows executables:
+Typing `desktop` at the prompt starts a small graphical desktop, drawn to
+the project's own design system (a first stage of it; see ADR 0023). In
+this screenshot, taken from QEMU by the automated test, the Run window
+has just been opened from the task bar:
 
-![Omit OS desktop: file browser and a window showing the output of Windows programs](docs/screenshot-desktop.png)
+![Omit OS desktop: task bar with the Start mark and program icons, and the Run window in front of the About window](docs/screenshot-desktop.png)
 
 Programs can have windows of their own — including Windows programs.
 Here `wingui.exe`, an ordinary PE executable using `USER32.dll` and
@@ -325,9 +326,9 @@ machine.
 | PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
-| Desktop (`/bin/desktop`): windows that can be moved, resized by a corner and maximised; task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window, maximises and restores it and exits, checking screenshots. Resizing by the corner is tested on the host only |
+| Desktop (`/bin/desktop`), drawn to the project's design system: rounded windows with shadows that can be moved, resized by a corner, minimised and maximised; a task bar with the Start mark, program icons and a clock; a Start panel; file browser, text viewer, program runner; the Inter typeface; light and dark colours with six accents | Working; the QEMU test opens windows from the task bar, types commands, runs a native and a Windows program, drags a window, maximises, minimises and restores it, and ends the desktop from the Start panel, checking screenshots. Resizing by the corner and the dark mode are tested on the host only. **A first stage: most screens of the design do not exist yet, and there is no way to choose the mode or accent.** See ADR 0023 |
 | Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
-| Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
+| Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (an average of about 8 ms in a release build with the current drawing code; see ADRs 0013 and 0023). No frame pacing: the display has no vertical-blank signal |
 | A terminal emulator, resizable windows for other programs, minimising, graphics modes | Not started |
 | A small game (`/bin/pop`: click the shrinking discs) redrawing 50 times a second, with frame pacing against the clock | Working; the QEMU test plays one move and the game reports its frame intervals (average 20.0 ms at the intended 20 ms, longest 25–30 ms under emulation; ADR 0013). Not synchronised to the display, and only multiples of the 10 ms timer tick can be paced |
 | GPU drivers and acceleration, Vulkan, Direct3D, existing games | Not started; requirements and a proposed order of work are in ADR 0013 |
@@ -522,6 +523,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0019 — USB keyboards and mice (xHCI)](docs/adr/0019-usb-input.md)
 - [ADR 0020 — AHCI driver (SATA disks)](docs/adr/0020-ahci.md)
 - [ADR 0021 — Date and time](docs/adr/0021-date-and-time.md)
+- [ADR 0023 — The desktop follows the Omit OS design system](docs/adr/0023-design-system.md)
 - [ADR 0022 — Networking: a first network card and the base of IPv4](docs/adr/0022-networking.md)
 
 ## Testing
@@ -538,7 +540,7 @@ checks both QEMU's exit status and the serial log:
 | `calibrate-with-pm-timer` | The clocks are measured against the ACPI power-management timer instead of the PIT (as on a machine without a working PIT); the other clock serves as a check, and the date and a program run |
 | `usb-keyboard-behind-hubs` | The same with the keyboard behind a USB hub and the mouse behind a second hub plugged into the first |
 | `usb-keyboard` | PS/2 devices switched off (`nops2`): the xHCI driver finds a USB keyboard and mouse, and a command typed on the USB keyboard runs |
-| `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, exit. The second variant uses USB input only |
+| `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, maximising, minimising to the task bar and back, the Start panel, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
 | `install-to-sata` | The same on a SATA disk, with the native AHCI driver |
@@ -561,8 +563,10 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next steps**, in no promised order: on the desktop, resizing for the
-windows of other programs and a terminal as a separate program; for Windows programs, what a C
+**Next steps**, in no promised order: on the desktop, the next screens of
+the design system (Settings with mode and accent, the full Files window,
+arranging and switching windows), resizing for the windows of other
+programs and a terminal as a separate program; for Windows programs, what a C
 runtime needs before any existing program can start (static thread-local
 storage, exception handling, a much larger part of the API); for
 hardware, USB storage, interrupts for device drivers (MSI-X)

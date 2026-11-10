@@ -22,6 +22,7 @@ use core::cell::RefCell;
 use omit_gfx::desktop::{App, Context, Desktop};
 use omit_gfx::geometry::Rect;
 use omit_gfx::surface::Canvas;
+use omit_gfx::theme::Theme;
 use omit_rt::abi::POLL_MAX;
 use omit_window::{CHANNEL, Decoder, Event, Request};
 
@@ -107,7 +108,7 @@ impl App for Remote {
         &self.title
     }
 
-    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, _height: i32) {
+    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, _height: i32, _: &Theme) {
         let (pixels, width) = (self.pixels, self.width);
         let area = Rect::new(0, 0, self.width as i32, self.height as i32);
         canvas.rows(area, |x, y, row| {

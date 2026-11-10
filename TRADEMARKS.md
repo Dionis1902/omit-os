@@ -6,8 +6,9 @@
 Start/launcher button — identify this project and what it releases.
 They are claimed as trademarks of the project. (The name is provisional,
 as the README says; this policy applies to whatever name the project
-carries. No logo or launcher mark exists yet, and nothing has been
-registered.)
+carries. The launcher mark is the ring with one segment omitted, and
+the dot that is left, shown at the left of the task bar. There is no
+other logo yet, and nothing has been registered.)
 
 The licences in this repository (GPL, MIT, Apache, CC-BY-SA; see
 [`COPYING`](COPYING)) cover code, documentation and artwork. **They do
