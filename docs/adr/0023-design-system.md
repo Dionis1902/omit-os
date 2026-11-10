@@ -160,9 +160,14 @@ update of 230 to 330 ms (two runs on an idle machine). The two are not
 the same experiment — the test now opens eleven windows instead of
 five, and some of what it does repaints the whole screen (a change of
 theme, every step of the window switcher) — so this is not a measured
-slowdown of any one thing; but nobody has looked into where the
-longest updates come from, and with many windows open the desktop is
-slower than the first figures say.
+slowdown of any one thing, but with many windows open the desktop is
+slower than the first figures say. The desktop now also reports what
+its longest update was: in both runs a repaint of the whole screen
+that took about 0.22 s, nearly all of it drawing. The likely cause —
+not verified — is the first repaint after a change between light and
+dark, for which the wallpaper is scaled to the screen again; the
+other whole-screen repaints (each step of the window switcher) are
+evidently much faster, or the average would be higher.
 
 ## Not yet, and differences from the design
 

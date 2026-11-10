@@ -130,6 +130,7 @@ fn main() -> i32 {
     'run: while !desktop.quit_requested() {
         let (time, date) = clock();
         desktop.set_clock(&time, &date);
+        let drawing_since = omit_rt::clock_us();
         let dirty = desktop.render(&mut surface);
         if !dirty.is_empty() {
             // The desktop only reports areas inside the screen.
@@ -147,7 +148,12 @@ fn main() -> i32 {
             }
             // What the input led to is on the screen now.
             if let Some(since) = pending_since.take() {
-                latency.record(omit_rt::clock_us().saturating_sub(since));
+                let now = omit_rt::clock_us();
+                latency.record(
+                    now.saturating_sub(since),
+                    now.saturating_sub(drawing_since),
+                    (dirty.w, dirty.h),
+                );
             }
         }
         pending_since = None;
@@ -278,13 +284,22 @@ struct Latency {
     updates: u64,
     total_us: u64,
     max_us: u64,
+    /// Of the longest update: the time spent drawing it and copying it
+    /// to the screen (the rest was spent before that: in the windows'
+    /// own work, or waiting to be scheduled), and the size of the area.
+    max_drawing_us: u64,
+    max_area: (i32, i32),
 }
 
 impl Latency {
-    fn record(&mut self, micros: u64) {
+    fn record(&mut self, micros: u64, drawing: u64, area: (i32, i32)) {
         self.updates += 1;
         self.total_us += micros;
-        self.max_us = self.max_us.max(micros);
+        if micros > self.max_us {
+            self.max_us = micros;
+            self.max_drawing_us = drawing;
+            self.max_area = area;
+        }
     }
 }
 
@@ -296,12 +311,15 @@ fn finish(failure: Option<Errno>, latency: &Latency) -> i32 {
             if let Some(average) = latency.total_us.checked_div(latency.updates) {
                 println!(
                     "desktop: input-to-screen latency over {} updates: average {}.{} ms, \
-                     longest {}.{} ms",
+                     longest {}.{} ms (of which {} ms drawing {}x{} pixels)",
                     latency.updates,
                     average / 1000,
                     (average % 1000) / 100,
                     latency.max_us / 1000,
-                    (latency.max_us % 1000) / 100
+                    (latency.max_us % 1000) / 100,
+                    latency.max_drawing_us / 1000,
+                    latency.max_area.0,
+                    latency.max_area.1
                 );
             }
             0
