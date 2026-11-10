@@ -86,11 +86,18 @@ this ADR records how the system implements it and how far it has got.
   now follows the Alt keys and tells the program that has the input
   which modifier keys are held: with every key press, and in an event
   of its own when one is pressed or let go (key releases were not
-  reported at all before, and still are not for other keys).
+  reported at all before, and still are not for other keys). The
+  sixth: **Notes**, a plain text editor in the fixed-width font — one
+  file per window, line numbers, the cursor moved by keys or mouse,
+  Enter keeping the indent, Save by button or Ctrl+S. It replaces the
+  old read-only viewer: Files opens text in it. A file's line ends
+  and final line end are written back as they were found; what is not
+  UTF-8 text, or is larger than 256 KB, is shown but cannot be
+  changed.
 
 ## What works
 
-- 111 host tests in `libs/gfx`: the font and icon files (every
+- 121 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -116,7 +123,8 @@ this ADR records how the system implements it and how far it has got.
   Ending a process from it is tested on the host only. Since the
   fifth, a quick Alt+Tab must bring the Calculator back in front, and
   with the keys held the switcher must be on the screen and gone when
-  they are let go.
+  they are let go. Since the sixth, a note is typed and saved with
+  Ctrl+S, and its file read after the desktop has closed.
   That the settings file is read back at the next start is tested on
   the host only (the parser), not across a restart in QEMU.
 
@@ -141,6 +149,11 @@ halved that.) Debug builds are slower by the same factor as before.
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
+- Notes has no selection, clipboard, undo or search, wraps no lines,
+  and **closing its window discards unsaved changes without asking**
+  (the title shows a dot while there are any). A new note is named by
+  the system (`note-1.txt`, ...): there is no dialog to choose a name
+  or folder.
 - The window switcher shows icons and titles, not pictures of the
   windows.
 - The System Monitor does not show memory per process (the kernel

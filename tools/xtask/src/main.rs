@@ -2167,6 +2167,7 @@ impl<'a> Mouse<'a> {
 const DESKTOP_LAUNCHERS: &[&str] = &[
     "Files",
     "Run",
+    "Notes",
     "Settings",
     "Calculator",
     "System Monitor",
@@ -2250,6 +2251,7 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     let (settings_x, settings_y) = button("Settings").ok_or("no Settings button")?;
     let (calculator_x, calculator_y) = button("Calculator").ok_or("no Calculator button")?;
     let (monitor_x, monitor_y) = button("System Monitor").ok_or("no System Monitor button")?;
+    let (notes_x, notes_y) = button("Notes").ok_or("no Notes button")?;
     let (files_x, files_y) = button("Files").ok_or("no Files button")?;
     debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
     let start = layout.start_button();
@@ -2943,6 +2945,42 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         })?;
     }
 
+    // Notes: a new note, two lines typed, saved with Ctrl+S. (What is
+    // in the file is looked at after the desktop has closed.)
+    {
+        use omit_gfx::font::REGULAR_12;
+        layout.open(
+            Box::new(Blank),
+            omit_gfx::notes::SIZE.0,
+            omit_gfx::notes::SIZE.1,
+        );
+        mouse.click(notes_x, notes_y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the Notes window", patience, |image| {
+            title(image, "Notes — note-1.txt")
+        })?;
+        type_on_keyboard(
+            &check.monitor,
+            &[
+                "h", "e", "l", "l", "o", "spc", "n", "o", "t", "e", "s", "ret", "s", "e", "c", "o",
+                "n", "d",
+            ],
+        )?;
+        wait_for_screen(check, "the note typed", patience, |image| {
+            title(image, "Notes — note-1.txt •") && screen_shows(image, "hello notes")
+        })?;
+        type_on_keyboard(&check.monitor, &["ctrl-s"])?;
+        wait_for_screen(check, "the note saved", patience, |image| {
+            title(image, "Notes — note-1.txt")
+                && screen_writes(image, "Saved", REGULAR_12, theme.success, theme.chrome)
+        })?;
+        // Kept next to the serial log: the desktop with Notes in front.
+        let _ = fs::copy(
+            &check.screenshot,
+            check.screenshot.with_extension("notes.ppm"),
+        );
+    }
+
     // The Start mark opens the list of programs; the row under the
     // pointer is filled with the accent colour. Its power button ends
     // the desktop.
@@ -3311,6 +3349,11 @@ fn run_qemu_captured(
                         "/typed",
                         "\nkeyboard input\n",
                         "the line typed into tee is not in its file",
+                    ),
+                    (
+                        "/note-1.txt",
+                        "\nhello notes\nsecond\n",
+                        "the note saved in Notes is not in its file",
                     ),
                     (
                         "/desktop.conf",

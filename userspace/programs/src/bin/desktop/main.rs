@@ -3,7 +3,7 @@
 //! `desktop` — a graphical desktop.
 //!
 //! Takes over the screen, keyboard and mouse from the text console and
-//! shows movable windows: a file browser, a text viewer, a window for
+//! shows movable windows: a file browser, a text editor, a window for
 //! running programs, and an information window. The power button in the
 //! Start panel, or F12, gives the screen back to the console.
 //!
@@ -81,6 +81,10 @@ fn main() -> i32 {
     });
     desktop.add_launcher("Run", "terminal", |context| {
         context.open(Box::new(apps::Run::new()), 620, 360);
+    });
+    desktop.add_launcher("Notes", "notes", |context| {
+        let (width, height) = omit_gfx::notes::SIZE;
+        context.open(Box::new(apps::notes(None)), width, height);
     });
     desktop.add_launcher("Settings", "settings", |context| {
         let (width, height) = settings::SIZE;

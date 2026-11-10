@@ -40,6 +40,7 @@ pub mod font;
 pub mod geometry;
 pub mod icon;
 pub mod monitor;
+pub mod notes;
 pub mod paint;
 pub mod settings;
 pub mod surface;

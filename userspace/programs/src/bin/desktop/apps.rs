@@ -13,10 +13,10 @@ use omit_gfx::font::{REGULAR_12, REGULAR_13, SEMIBOLD_20};
 use omit_gfx::geometry::Rect;
 use omit_gfx::surface::{CHAR_WIDTH, Canvas, TEXT_HEIGHT};
 use omit_gfx::theme::Theme;
-use omit_rt::abi::{Errno, key};
+use omit_rt::abi::Errno;
 
-/// Space around text set in the fixed-width font (the terminal and the
-/// viewer), and the height of one of its lines.
+/// Space around text set in the fixed-width font (the terminal), and
+/// the height of one of its lines.
 const MARGIN: i32 = 12;
 const LINE: i32 = TEXT_HEIGHT + 2;
 /// Space around the contents of the other windows.
@@ -25,11 +25,6 @@ const PADDING: i32 = 22;
 const ENTER: i32 = 13;
 const BACKSPACE: i32 = 127;
 const CONTROL_C: i32 = 3;
-
-/// Number of text rows that fit in `height` pixels below `top`.
-fn rows(top: i32, height: i32) -> usize {
-    ((height - top - MARGIN) / LINE).max(1) as usize
-}
 
 /// Number of characters that fit in `width` pixels.
 fn columns(width: i32) -> usize {
@@ -161,97 +156,52 @@ pub fn files(path: &str) -> Files<SystemFiles> {
         SystemFiles,
         places,
         path,
-        Box::new(|file, context| context.open(Box::new(Viewer::new(file)), 600, 380)),
+        Box::new(|file, context| {
+            let (width, height) = omit_gfx::notes::SIZE;
+            context.open(Box::new(notes(Some(file))), width, height);
+        }),
     )
 }
 
 // ---------------------------------------------------------------------
 
-/// Shows a text file. Arrow keys, Page Up/Down, Home and End scroll.
-pub struct Viewer {
-    title: String,
-    lines: Vec<String>,
-    note: Option<String>,
-    first_row: usize,
-    visible_rows: usize,
-}
+/// Text files, for Notes.
+pub struct SystemDocuments;
 
-impl Viewer {
-    /// Larger files are shown truncated.
-    const LIMIT: usize = 256 * 1024;
-
-    pub fn new(path: &str) -> Self {
-        let name = path.rsplit('/').next().unwrap_or(path);
-        let mut viewer = Self {
-            title: format!("{name} - Viewer"),
-            lines: Vec::new(),
-            note: None,
-            first_row: 0,
-            visible_rows: 1,
-        };
-        match omit_rt::read_file(path) {
-            Err(error) => viewer.note = Some(format!("Cannot read {path}: {error}")),
-            Ok(data) if data.iter().take(4096).any(|&byte| byte == 0) => {
-                viewer.note = Some(format!("{path}: binary file, {} bytes", data.len()));
-            }
-            Ok(data) => {
-                let shown = &data[..data.len().min(Self::LIMIT)];
-                viewer.lines = shown
-                    .split(|&byte| byte == b'\n')
-                    .map(|line| printable(line.strip_suffix(b"\r").unwrap_or(line)))
-                    .collect();
-                if data.len() > shown.len() {
-                    viewer.note = Some(format!("(first {} KiB shown)", Self::LIMIT / 1024));
-                }
-            }
-        }
-        viewer
+impl omit_gfx::notes::Documents for SystemDocuments {
+    fn read(&mut self, path: &str) -> Result<Vec<u8>, String> {
+        omit_rt::read_file(path).map_err(|error| format!("{error}"))
     }
 
-    fn last_first_row(&self) -> usize {
-        self.lines.len().saturating_sub(self.visible_rows)
+    fn write(&mut self, path: &str, data: &[u8]) -> Result<(), String> {
+        use omit_rt::abi::open;
+        let fd = omit_rt::open(path, open::WRITE | open::CREATE | open::TRUNCATE)
+            .map_err(|error| format!("{error}"))?;
+        let outcome = omit_rt::write_all(fd, data);
+        let _ = omit_rt::close(fd);
+        outcome.map_err(|error| format!("{error}"))
+    }
+
+    /// New notes go to the data partition if the system has one (they
+    /// then survive a restart), otherwise to the top folder, in memory.
+    fn fresh(&mut self) -> String {
+        let folder = if omit_rt::read_dir("/data").is_ok() {
+            "/data/"
+        } else {
+            "/"
+        };
+        (1u32..)
+            .map(|number| format!("{folder}note-{number}.txt"))
+            .find(|path| omit_rt::stat(path).is_err())
+            .unwrap_or_else(|| format!("{folder}note.txt"))
     }
 }
 
-impl App for Viewer {
-    fn title(&self) -> &str {
-        &self.title
-    }
-
-    fn draw(&mut self, canvas: &mut Canvas<'_>, _width: i32, height: i32, theme: &Theme) {
-        let mut top = MARGIN;
-        if let Some(note) = &self.note {
-            canvas.write(MARGIN, top, note, REGULAR_13, theme.text_3);
-            top += LINE + 4;
-        }
-        self.visible_rows = rows(top, height);
-        self.first_row = self.first_row.min(self.last_first_row());
-        let shown = self
-            .lines
-            .iter()
-            .skip(self.first_row)
-            .take(self.visible_rows);
-        for (row, line) in shown.enumerate() {
-            canvas.text(MARGIN, top + row as i32 * LINE, line, theme.text);
-        }
-    }
-
-    fn key(&mut self, code: i32, context: &mut Context) {
-        let page = self.visible_rows.saturating_sub(1).max(1);
-        let target = match code {
-            key::UP => self.first_row.saturating_sub(1),
-            key::DOWN => self.first_row + 1,
-            key::PAGE_UP => self.first_row.saturating_sub(page),
-            key::PAGE_DOWN | 0x20 => self.first_row + page,
-            key::HOME => 0,
-            key::END => usize::MAX,
-            27 => {
-                context.close();
-                return;
-            }
-            _ => return,
-        };
-        self.first_row = target.min(self.last_first_row());
+/// A Notes window with the file at `path`, or with a new note.
+pub fn notes(path: Option<&str>) -> omit_gfx::notes::Notes<SystemDocuments> {
+    match path {
+        Some(path) => omit_gfx::notes::Notes::open(SystemDocuments, path),
+        None => omit_gfx::notes::Notes::new(SystemDocuments),
     }
 }
 

@@ -455,7 +455,7 @@ impl<S: Source> Monitor<S> {
             let (name, cut) = REGULAR_13.fit(&row.name, name_width);
             let end = canvas.write(MARGIN, y, name, REGULAR_13, theme.text);
             if cut {
-                canvas.write(end, y, "...", REGULAR_13, theme.text_3);
+                canvas.write(end, y, "…", REGULAR_13, theme.text_3);
             }
             if let Some(pid_number) = row.pid {
                 right_aligned(

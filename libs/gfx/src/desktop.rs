@@ -1716,7 +1716,7 @@ impl Desktop {
             } else {
                 theme.text
             };
-            let width = REGULAR_12.width(title) + if cut { REGULAR_12.width("...") } else { 0 };
+            let width = REGULAR_12.width(title) + if cut { REGULAR_12.width("…") } else { 0 };
             let end = canvas.write(
                 tile.x + (tile.w - width) / 2,
                 tile.y + 58,
@@ -1725,7 +1725,7 @@ impl Desktop {
                 ink,
             );
             if cut {
-                canvas.write(end, tile.y + 58, "...", REGULAR_12, theme.text_3);
+                canvas.write(end, tile.y + 58, "…", REGULAR_12, theme.text_3);
             }
         }
     }
