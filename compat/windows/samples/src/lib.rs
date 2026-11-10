@@ -45,11 +45,75 @@ pub const MEM_RELEASE: u32 = 0x8000;
 pub const PAGE_READWRITE: u32 = 0x04;
 pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+pub const FILE_ATTRIBUTE_NORMAL: u32 = 0x80;
 pub const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 pub const INFINITE: u32 = u32::MAX;
 pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 258;
 pub const STILL_ACTIVE: u32 = 259;
+
+pub const FILE_BEGIN: u32 = 0;
+pub const FILE_CURRENT: u32 = 1;
+pub const FILE_END: u32 = 2;
+pub const ERROR_FILE_NOT_FOUND: u32 = 2;
+pub const ERROR_PATH_NOT_FOUND: u32 = 3;
+pub const ERROR_NO_MORE_FILES: u32 = 18;
+pub const ERROR_NEGATIVE_SEEK: u32 = 131;
+
+/// `WIN32_FIND_DATAA`.
+#[repr(C)]
+pub struct FindData {
+    pub attributes: u32,
+    pub creation_time: FileTime,
+    pub last_access_time: FileTime,
+    pub last_write_time: FileTime,
+    pub size_high: u32,
+    pub size_low: u32,
+    pub reserved: [u32; 2],
+    pub file_name: [u8; 260],
+    pub alternate_name: [u8; 14],
+}
+
+impl FindData {
+    pub const fn new() -> Self {
+        Self {
+            attributes: 0,
+            creation_time: FileTime { low: 0, high: 0 },
+            last_access_time: FileTime { low: 0, high: 0 },
+            last_write_time: FileTime { low: 0, high: 0 },
+            size_high: 0,
+            size_low: 0,
+            reserved: [0; 2],
+            file_name: [0; 260],
+            alternate_name: [0; 14],
+        }
+    }
+
+    /// The file name, up to its terminator.
+    pub fn name(&self) -> &[u8] {
+        let length = self
+            .file_name
+            .iter()
+            .position(|&byte| byte == 0)
+            .unwrap_or(self.file_name.len());
+        &self.file_name[..length]
+    }
+}
+
+impl Default for FindData {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// `PROCESS_INFORMATION`.
+#[repr(C)]
+pub struct ProcessInformation {
+    pub process: Handle,
+    pub thread: Handle,
+    pub process_id: u32,
+    pub thread_id: u32,
+}
 
 /// `FILETIME`: 100-nanosecond intervals since 1601-01-01 (UTC), in two
 /// halves.
@@ -178,6 +242,35 @@ unsafe extern "system" {
     pub safe fn TlsSetValue(index: u32, value: *mut c_void) -> Bool;
     pub safe fn Sleep(milliseconds: u32);
     pub safe fn GetTickCount64() -> u64;
+    pub fn SetFilePointerEx(
+        handle: Handle,
+        distance: i64,
+        new_position: *mut i64,
+        method: u32,
+    ) -> Bool;
+    pub fn SetFilePointer(
+        handle: Handle,
+        distance_low: i32,
+        distance_high: *mut i32,
+        method: u32,
+    ) -> u32;
+    pub fn FindFirstFileA(pattern: *const c_char, data: *mut FindData) -> Handle;
+    pub fn FindNextFileA(handle: Handle, data: *mut FindData) -> Bool;
+    pub safe fn FindClose(handle: Handle) -> Bool;
+    pub fn CreateProcessA(
+        application: *const c_char,
+        command_line: *mut c_char,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit_handles: Bool,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const c_char,
+        startup: *mut c_void,
+        information: *mut ProcessInformation,
+    ) -> Bool;
+    pub fn GetExitCodeProcess(process: Handle, code: *mut u32) -> Bool;
+    pub safe fn TerminateProcess(process: Handle, code: u32) -> Bool;
     pub fn GetSystemTimeAsFileTime(time: *mut FileTime);
     pub fn GetSystemTime(time: *mut SystemTime);
     pub fn GetLocalTime(time: *mut SystemTime);

@@ -10,7 +10,7 @@
 use core::arch::asm;
 use core::ffi::CStr;
 use core::hint::black_box;
-use core::ptr::null_mut;
+use core::ptr::{null, null_mut};
 
 use omit_win_samples::*;
 
@@ -230,10 +230,123 @@ fn files(checks: &mut Checks) {
             0,
             null_mut(),
         );
+        // Read and write through one handle, moving the position:
+        // overwrite the middle, read the whole back, extend the file.
+        checks.check(both != INVALID_HANDLE_VALUE, "open for reading and writing");
+        let mut position = -1i64;
+        let mut buffer = [0u8; 64];
+        let size_before = {
+            let mut size = 0i64;
+            GetFileSizeEx(both, &raw mut size);
+            size
+        };
         checks.check(
-            both == INVALID_HANDLE_VALUE && GetLastError() == 50,
-            "read+write refused",
+            SetFilePointerEx(both, 0, &raw mut position, FILE_END) != 0
+                && position == size_before
+                && size_before >= 4,
+            "SetFilePointerEx to the end",
         );
+        checks.check(
+            SetFilePointerEx(both, 1, null_mut(), FILE_BEGIN) != 0
+                && WriteFile(both, b"XY".as_ptr(), 2, &raw mut count, null_mut()) != 0
+                && count == 2,
+            "overwrite in the middle",
+        );
+        checks.check(
+            SetFilePointer(both, 0, null_mut(), FILE_CURRENT) == 3,
+            "SetFilePointer reports the position",
+        );
+        checks.check(
+            SetFilePointerEx(both, -3, &raw mut position, FILE_CURRENT) != 0 && position == 0,
+            "seek back relative to the position",
+        );
+        checks.check(
+            ReadFile(both, buffer.as_mut_ptr(), 64, &raw mut count, null_mut()) != 0
+                && i64::from(count) == size_before
+                && &buffer[1..3] == b"XY",
+            "read back through the same handle",
+        );
+        checks.check(
+            SetFilePointerEx(both, -1, null_mut(), FILE_BEGIN) == 0
+                && GetLastError() == ERROR_NEGATIVE_SEEK,
+            "ERROR_NEGATIVE_SEEK",
+        );
+        checks.check(
+            SetFilePointerEx(both, 0, null_mut(), 9) == 0,
+            "an unknown seek method is refused",
+        );
+        // Put the two bytes back as they were, so that the checks further
+        // down see the file they expect.
+        SetFilePointerEx(both, 1, null_mut(), FILE_BEGIN);
+        checks.check(
+            WriteFile(both, text[1..3].as_ptr(), 2, &raw mut count, null_mut()) != 0,
+            "restore the overwritten bytes",
+        );
+        CloseHandle(both);
+
+        // Listing the directory, with a second file in it.
+        let notes = c"C:\\wintest.dir\\notes.md";
+        let created = CreateFileA(
+            notes.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            null_mut(),
+            CREATE_NEW,
+            0,
+            null_mut(),
+        );
+        CloseHandle(created);
+        let mut found = FindData::new();
+        let listing = FindFirstFileA(c"C:\\wintest.dir\\*".as_ptr(), &raw mut found);
+        checks.check(
+            listing != INVALID_HANDLE_VALUE
+                && found.name() == b"first.txt"
+                && found.attributes == FILE_ATTRIBUTE_NORMAL
+                && found.size_low as usize == text.len()
+                && found.size_high == 0,
+            "FindFirstFileA reports the first file and its size",
+        );
+        checks.check(
+            FindNextFileA(listing, &raw mut found) != 0
+                && found.name() == b"notes.md"
+                && found.size_low == 0,
+            "FindNextFileA reports the next",
+        );
+        checks.check(
+            FindNextFileA(listing, &raw mut found) == 0 && GetLastError() == ERROR_NO_MORE_FILES,
+            "ERROR_NO_MORE_FILES",
+        );
+        checks.check(FindClose(listing) != 0, "FindClose");
+        checks.check(FindClose(listing) == 0, "a listing is closed once");
+        // Patterns: case does not matter; a directory is found by name.
+        let listing = FindFirstFileA(c"C:\\wintest.dir\\*.MD".as_ptr(), &raw mut found);
+        checks.check(
+            listing != INVALID_HANDLE_VALUE
+                && found.name() == b"notes.md"
+                && FindNextFileA(listing, &raw mut found) == 0,
+            "a pattern selects by extension",
+        );
+        FindClose(listing);
+        let listing = FindFirstFileA(c"C:\\wintest.d?r".as_ptr(), &raw mut found);
+        checks.check(
+            listing != INVALID_HANDLE_VALUE
+                && found.name() == b"wintest.dir"
+                && found.attributes == FILE_ATTRIBUTE_DIRECTORY,
+            "a directory is listed as one",
+        );
+        FindClose(listing);
+        checks.check(
+            FindFirstFileA(c"C:\\wintest.dir\\*.zip".as_ptr(), &raw mut found)
+                == INVALID_HANDLE_VALUE
+                && GetLastError() == ERROR_FILE_NOT_FOUND,
+            "no match is ERROR_FILE_NOT_FOUND",
+        );
+        checks.check(
+            FindFirstFileA(c"C:\\nosuch.dir\\*".as_ptr(), &raw mut found) == INVALID_HANDLE_VALUE
+                && GetLastError() == ERROR_PATH_NOT_FOUND,
+            "a missing directory is ERROR_PATH_NOT_FOUND",
+        );
+        checks.check(DeleteFileA(notes.as_ptr()) != 0, "remove the second file");
 
         checks.check(MoveFileA(first.as_ptr(), second.as_ptr()) != 0, "MoveFileA");
         checks.check(
@@ -391,6 +504,142 @@ fn console(checks: &mut Checks) {
     );
 }
 
+/// Starting other programs and waiting for them.
+fn processes(checks: &mut Checks) {
+    let mut information = core::mem::MaybeUninit::<ProcessInformation>::uninit();
+    let mut code = 0u32;
+    // SAFETY: the strings are NUL-terminated (command lines in writable
+    // buffers, as the function requires); `information` is filled on
+    // success before it is read.
+    unsafe {
+        // This program again, in a mode where it says a line and exits
+        // with code 7. Its output goes where this program's goes.
+        let mut command = *b"wintest.exe child\0";
+        checks.check(
+            CreateProcessA(
+                null(),
+                command.as_mut_ptr().cast(),
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                null_mut(),
+                null(),
+                null_mut(),
+                information.as_mut_ptr(),
+            ) != 0,
+            "CreateProcessA from a command line",
+        );
+        let child = information.assume_init_read();
+        checks.check(
+            WaitForSingleObject(child.process, 10_000) == WAIT_OBJECT_0,
+            "wait for the program to end",
+        );
+        checks.check(
+            GetExitCodeProcess(child.process, &raw mut code) != 0 && code == 7,
+            "its exit code",
+        );
+        checks.check(
+            WaitForSingleObject(child.thread, 0) == WAIT_OBJECT_0 && child.process_id != 0,
+            "an ended program stays signalled",
+        );
+        checks.check(
+            CloseHandle(child.process) != 0 && CloseHandle(child.thread) != 0,
+            "close the process handles",
+        );
+
+        // Named by its file, with the command line left out.
+        checks.check(
+            CreateProcessA(
+                c"C:\\bin\\winhello.exe".as_ptr(),
+                null_mut(),
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                null_mut(),
+                null(),
+                null_mut(),
+                information.as_mut_ptr(),
+            ) != 0,
+            "CreateProcessA from a file name",
+        );
+        let child = information.assume_init_read();
+        checks.check(
+            WaitForSingleObject(child.process, INFINITE) == WAIT_OBJECT_0
+                && GetExitCodeProcess(child.process, &raw mut code) != 0
+                && code == 0,
+            "wait without a time limit",
+        );
+        CloseHandle(child.process);
+        CloseHandle(child.thread);
+
+        // A native program that never ends by itself: still running
+        // after a wait, then terminated.
+        let mut command = *b"spin\0";
+        checks.check(
+            CreateProcessA(
+                null(),
+                command.as_mut_ptr().cast(),
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                null_mut(),
+                null(),
+                null_mut(),
+                information.as_mut_ptr(),
+            ) != 0,
+            "start a native program",
+        );
+        let child = information.assume_init_read();
+        checks.check(
+            WaitForSingleObject(child.process, 50) == WAIT_TIMEOUT,
+            "a running program is not signalled",
+        );
+        checks.check(
+            GetExitCodeProcess(child.process, &raw mut code) != 0 && code == STILL_ACTIVE,
+            "STILL_ACTIVE",
+        );
+        checks.check(TerminateProcess(child.process, 1) != 0, "TerminateProcess");
+        checks.check(
+            WaitForSingleObject(child.process, 10_000) == WAIT_OBJECT_0
+                && GetExitCodeProcess(child.process, &raw mut code) != 0
+                && code != STILL_ACTIVE,
+            "a terminated program has ended",
+        );
+        checks.check(
+            TerminateProcess(child.process, 1) == 0,
+            "an ended program cannot be terminated again",
+        );
+        CloseHandle(child.process);
+        CloseHandle(child.thread);
+
+        let mut command = *b"nosuch.exe\0";
+        checks.check(
+            CreateProcessA(
+                null(),
+                command.as_mut_ptr().cast(),
+                null_mut(),
+                null_mut(),
+                0,
+                0,
+                null_mut(),
+                null(),
+                null_mut(),
+                information.as_mut_ptr(),
+            ) == 0
+                && GetLastError() == ERROR_FILE_NOT_FOUND,
+            "a missing program is ERROR_FILE_NOT_FOUND",
+        );
+        checks.check(
+            GetExitCodeProcess(GetStdHandle(STD_OUTPUT_HANDLE), &raw mut code) == 0,
+            "not every handle is a process",
+        );
+    }
+    say!("wintest: processes ok");
+}
+
 fn time(checks: &mut Checks) {
     let before = GetTickCount64();
     Sleep(50);
@@ -449,6 +698,11 @@ fn time(checks: &mut Checks) {
 /// Entry point.
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> u32 {
+    if command_line().ends_with(" child") {
+        // Started by `processes` below.
+        say!("wintest: child process started");
+        ExitProcess(7);
+    }
     let mut checks = Checks::new("wintest");
     say!("wintest: command line: [{}]", command_line());
     relocations(&mut checks);
@@ -456,6 +710,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     heap(&mut checks);
     files(&mut checks);
     console(&mut checks);
+    processes(&mut checks);
     time(&mut checks);
     say!("wintest: all {} checks passed", checks.count());
     42

@@ -82,18 +82,31 @@ At the `omit:/#` prompt:
 help                 the built-in commands
 ls /bin              the programs on the image
 hello                a native program
+date                 the date and time (UTC)
 winhello.exe         a Windows console program, run natively
 wintest.exe          a Windows program that tests the Windows API layer
 winrun --list        the Windows functions that are implemented
 ls /bin | tee /list  a pipeline (programs only; see `help`)
 lspci                hardware, with driver status
+lsblk                disks and partitions
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
                      machines provide, or USB); Exit or F12 returns to the
                      console
 ```
 
-Windows support is a first step: only console programs that use a small
-set of `KERNEL32.dll` functions run. Existing Windows software does not.
+On the desktop, the task bar starts programs with windows of their own
+(Scribble, Clock, the game Pop), and the Run window starts anything by
+name — try `wingui.exe`, a graphical Windows program: click in its
+window, type, press `m` for a message box, `x` for a timer, `q` to quit.
+
+Windows support is a first step: programs run only if everything they
+import is among the implemented functions of `KERNEL32.dll`, `USER32.dll`
+and `GDI32.dll` (`winrun --list`). The programs on the image were written
+for it; existing Windows software does not run.
+
+On a real computer: the keyboard must be PS/2 (as built into many
+laptops) or USB plugged directly into the machine, not through a hub. A
+serial port is not needed.
 
 ## Status
 

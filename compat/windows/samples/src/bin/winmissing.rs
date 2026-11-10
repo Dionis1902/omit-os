@@ -2,8 +2,8 @@
 //! A program that needs things the compatibility layer does not have:
 //! a function of a system library that is missing altogether (the
 //! registry, `ADVAPI32.dll`), a function that is missing from a library
-//! that exists (`USER32.dll` has no clipboard), and starting another
-//! program (`CreateProcessA`). It must be refused before
+//! that exists (`USER32.dll` has no clipboard), and named pipes
+//! (`CreateNamedPipeA`). It must be refused before
 //! it starts, with all three named.
 
 #![no_std]
@@ -25,19 +25,17 @@ unsafe extern "system" {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    /// Starting another program is not implemented.
-    fn CreateProcessA(
-        application: *const u8,
-        command_line: *mut u8,
-        process_attributes: *mut c_void,
-        thread_attributes: *mut c_void,
-        inherit_handles: i32,
-        flags: u32,
-        environment: *mut c_void,
-        directory: *const u8,
-        startup: *mut c_void,
-        information: *mut c_void,
-    ) -> i32;
+    /// Named pipes are not implemented.
+    fn CreateNamedPipeA(
+        name: *const u8,
+        open_mode: u32,
+        pipe_mode: u32,
+        max_instances: u32,
+        out_buffer_size: u32,
+        in_buffer_size: u32,
+        default_timeout: u32,
+        security: *mut c_void,
+    ) -> *mut c_void;
 }
 
 /// Entry point.
@@ -48,18 +46,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     unsafe {
         RegCloseKey(core::ptr::null_mut());
         CloseClipboard();
-        CreateProcessA(
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            0,
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null(),
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-        );
+        CreateNamedPipeA(core::ptr::null(), 0, 0, 0, 0, 0, 0, core::ptr::null_mut());
     }
     ExitProcess(1)
 }

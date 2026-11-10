@@ -176,6 +176,14 @@ pub mod nr {
     /// since 1970-01-01 00:00:00 UTC (see [`super::datetime`]). Fails
     /// with `Io` if the machine's clock could not be read at start-up.
     pub const REALTIME: u64 = 38;
+    /// `seek(fd, offset: i64, whence) -> position` — moves the position
+    /// of an open file to `offset` bytes from the place `whence` names
+    /// (see [`super::seek`]) and returns the new position from the start
+    /// of the file. The position may lie beyond the end: reading there
+    /// returns nothing, writing there extends the file with zeros.
+    /// Fails with `InvalidArgument` for a position before the start and
+    /// `BadFileDescriptor` for anything but a file.
+    pub const SEEK: u64 = 39;
 }
 
 /// Largest shared memory segment, in bytes.
@@ -214,6 +222,9 @@ pub const fn spawn_stdio(stdin: Option<u64>, stdout: Option<u64>, stderr: Option
     }
     field(stdout) | (field(stdin) << 16) | (field(stderr) << 32)
 }
+
+// (A file is opened for reading, for writing, or — with
+// `open::READ_WRITE` — for both.)
 
 /// Flag for the `read` system call (fourth argument): if the descriptor
 /// is a pipe with nothing in it, fail with `WouldBlock` instead of
@@ -361,8 +372,21 @@ pub mod open {
     pub const TRUNCATE: u64 = 1 << 9;
     /// Every write goes to the end of the file (with [`WRITE`]).
     pub const APPEND: u64 = 1 << 10;
+    /// Open for reading and writing. [`CREATE`], [`TRUNCATE`] and
+    /// [`APPEND`] may be combined with it as with [`WRITE`].
+    pub const READ_WRITE: u64 = 1 << 1;
     /// All flags the kernel understands.
-    pub const ALL: u64 = WRITE | CREATE | TRUNCATE | APPEND;
+    pub const ALL: u64 = WRITE | READ_WRITE | CREATE | TRUNCATE | APPEND;
+}
+
+/// What the offset given to the `seek` system call is relative to.
+pub mod seek {
+    /// The start of the file.
+    pub const START: u64 = 0;
+    /// The current position.
+    pub const CURRENT: u64 = 1;
+    /// The end of the file.
+    pub const END: u64 = 2;
 }
 
 /// Standard input file descriptor.

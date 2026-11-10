@@ -1288,7 +1288,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "cat /wintest.log",
-                "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: date 2026-11-10, day 2 of the week\r\nwintest: time ok\r\nwintest: all 61 checks passed\r\n",
+                "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: child process started\r\nHello from a Windows executable!\r\nwintest: processes ok\r\nwintest: date 2026-11-10, day 2 of the week\r\nwintest: time ok\r\nwintest: all 94 checks passed\r\n",
             ),
             // The directory the test created and removed is gone.
             ("ls /", "ls /\nbin\nboot\nwintest.log\nomit:/# "),
@@ -1314,7 +1314,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateProcessA, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!CloseClipboard, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateNamedPipeA, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!CloseClipboard, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),

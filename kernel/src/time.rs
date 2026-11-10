@@ -71,7 +71,9 @@ pub struct TimeInfo {
     /// The clock the two were measured against.
     pub reference: Reference,
     /// If a second reference clock was available: by how many parts per
-    /// thousand its TSC measurement differed from the one used.
+    /// thousand its TSC measurement differed from the one used. Where
+    /// the two disagreed, the measurements were repeated; this is the
+    /// difference of the last pair.
     pub cross_check_per_mille: Option<u64>,
 }
 
@@ -89,14 +91,40 @@ pub fn init(pm_timer: Option<PmTimer>, prefer_pm_timer: bool) -> Result<TimeInfo
     if prefer_pm_timer {
         references.reverse();
     }
-    let mut results = references
-        .into_iter()
-        .flatten()
-        .filter_map(|reference| Some((reference, apic::calibrate(reference).ok()?)));
-    let (reference, calibration) = results.next().ok_or(ApicError::CalibrationTimeout)?;
-    let cross_check_per_mille = results
-        .next()
-        .map(|(_, other)| other.tsc_hz.abs_diff(calibration.tsc_hz) * 1000 / calibration.tsc_hz);
+    // A measurement lasts 20 ms and is spoilt by anything that holds
+    // the CPU up in the wrong moment (on hardware, firmware interrupts;
+    // under emulation, the host). With two clocks that can be noticed:
+    // if they disagree, both are measured again, a few times.
+    const ATTEMPTS: usize = 3;
+    /// Agreement that is good enough to stop measuring.
+    const AGREE_PER_MILLE: u64 = 20;
+    let mut attempt = 1;
+    let (reference, calibration, cross_check_per_mille) = loop {
+        let mut results = references
+            .iter()
+            .flatten()
+            .filter_map(|&reference| Some((reference, apic::calibrate(reference).ok()?)));
+        let (reference, calibration) = results.next().ok_or(ApicError::CalibrationTimeout)?;
+        let second = results.next();
+        drop(results);
+        let difference = second.map(|(_, other)| {
+            other.tsc_hz.abs_diff(calibration.tsc_hz) * 1000 / calibration.tsc_hz
+        });
+        if difference.is_none_or(|difference| difference <= AGREE_PER_MILLE) || attempt == ATTEMPTS
+        {
+            break (reference, calibration, difference);
+        }
+        attempt += 1;
+        // A clock that did not count is not asked again: finding that
+        // out takes seconds.
+        for slot in &mut references {
+            if slot.is_some_and(|candidate| {
+                candidate != reference && second.is_none_or(|(other, _)| other != candidate)
+            }) {
+                *slot = None;
+            }
+        }
+    };
     TSC_AT_INIT.store(cpu::read_tsc(), Ordering::Relaxed);
     TSC_HZ.store(calibration.tsc_hz, Ordering::Release);
 

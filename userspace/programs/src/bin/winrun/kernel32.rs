@@ -14,8 +14,7 @@
 //! * Text passed to `...A` functions is UTF-8 (the process reports code
 //!   page 65001).
 //! * File names are case-sensitive; the directory tree is drive `C:`.
-//! * A file is opened either for reading or for writing, not both, and
-//!   there is no seeking.
+//! * File times are not recorded; listings report them as zero.
 //! * Threads exist, but libraries are not told about them (no
 //!   `DLL_THREAD_ATTACH`), threads cannot be created suspended, and a
 //!   process that ends through its last thread reports exit code 0.
@@ -73,6 +72,7 @@ enum Object {
         fd: u64,
         /// For size queries.
         path: String,
+        readable: bool,
         writable: bool,
     },
     Thread {
@@ -80,6 +80,10 @@ enum Object {
         handle: JoinHandle<()>,
     },
     Event(Arc<Event>),
+    /// A directory listing in progress: the entries not yet handed out,
+    /// last first.
+    Find(Vec<FoundFile>),
+    Process(Arc<Process>),
 }
 
 /// What a thread and the holders of its handle share.
@@ -1172,9 +1176,7 @@ unsafe extern "win64" fn ReadFile(
     let source = with_state(|state| match state.handles.get(handle) {
         Some(Object::ConsoleInput) => Ok(Some(abi::STDIN)),
         Some(Object::File {
-            fd,
-            writable: false,
-            ..
+            fd, readable: true, ..
         }) => Ok(Some(*fd)),
         Some(Object::Null) => Ok(None),
         Some(_) => Err(ERROR_ACCESS_DENIED),
@@ -1229,10 +1231,6 @@ fn create_file(name: Result<&str, u32>, access: u32, disposition: u32) -> Result
         Target::Console if writing || appending => Object::ConsoleOutput(abi::STDOUT),
         Target::Console => Object::ConsoleInput,
         Target::File(path) => {
-            if reading && (writing || appending) {
-                // The kernel opens files for reading or for writing.
-                return Err(ERROR_NOT_SUPPORTED);
-            }
             let existed = omit_rt::stat(&path).is_ok();
             let change = match disposition {
                 CREATE_NEW if existed => return Err(ERROR_FILE_EXISTS),
@@ -1246,7 +1244,12 @@ fn create_file(name: Result<&str, u32>, access: u32, disposition: u32) -> Result
             let writable = writing || appending;
             let fd = if writable {
                 let mode = if writing { 0 } else { open::APPEND };
-                omit_rt::open(&path, open::WRITE | change | mode)
+                let access = if reading {
+                    open::READ_WRITE
+                } else {
+                    open::WRITE
+                };
+                omit_rt::open(&path, access | change | mode)
             } else {
                 if change != 0 {
                     // Creating or emptying a file that is then read: do
@@ -1267,7 +1270,12 @@ fn create_file(name: Result<&str, u32>, access: u32, disposition: u32) -> Result
                     ERROR_SUCCESS
                 },
             );
-            Object::File { fd, path, writable }
+            Object::File {
+                fd,
+                path,
+                readable: reading || !writable,
+                writable,
+            }
         }
     };
     with_state(|state| state.handles.insert(object)).map_err(|object| {
@@ -1288,8 +1296,7 @@ fn handle_or_invalid(result: Result<Handle, u32>) -> Handle {
 /// `CreateFileA`: opens or creates a file, the console (`CON`) or the
 /// null device (`NUL`). All five creation dispositions are implemented.
 /// Sharing modes, security attributes, flags and the template file are
-/// ignored. Opening a file for both reading and writing is not
-/// supported.
+/// ignored.
 ///
 /// # Safety
 ///
@@ -1370,7 +1377,7 @@ extern "win64" fn GetFileType(handle: Handle) -> u32 {
             FILE_TYPE_CHAR
         }
         // Not a file of any kind.
-        Some(Object::Thread { .. } | Object::Event(_)) => {
+        Some(Object::Thread { .. } | Object::Event(_) | Object::Find(_) | Object::Process(_)) => {
             set_last_error(ERROR_INVALID_HANDLE);
             0
         }
@@ -1518,6 +1525,446 @@ unsafe extern "win64" fn GetFileAttributesA(name: *const c_char) -> u32 {
             set_last_error(code);
             INVALID_FILE_ATTRIBUTES
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// File positions
+// ---------------------------------------------------------------------
+
+/// Moves a file's position; `method` is `FILE_BEGIN` (0), `FILE_CURRENT`
+/// (1) or `FILE_END` (2), which are the kernel's own values.
+fn set_file_pointer(handle: Handle, distance: i64, method: u32) -> Result<u64, u32> {
+    let fd = with_state(|state| match state.handles.get(handle) {
+        Some(Object::File { fd, .. }) => Ok(*fd),
+        Some(_) => Err(ERROR_INVALID_PARAMETER),
+        None => Err(ERROR_INVALID_HANDLE),
+    })?;
+    if method > 2 {
+        return Err(ERROR_INVALID_PARAMETER);
+    }
+    omit_rt::seek(fd, distance, u64::from(method)).map_err(|errno| match errno {
+        // A position before the start of the file.
+        Errno::InvalidArgument => ERROR_NEGATIVE_SEEK,
+        errno => error::from_errno(errno),
+    })
+}
+
+/// `ERROR_NEGATIVE_SEEK`.
+const ERROR_NEGATIVE_SEEK: u32 = 131;
+
+/// `SetFilePointerEx`.
+///
+/// # Safety
+///
+/// `new_position` must be null or valid for a write.
+unsafe extern "win64" fn SetFilePointerEx(
+    handle: Handle,
+    distance: i64,
+    new_position: *mut i64,
+    method: u32,
+) -> Bool {
+    match set_file_pointer(handle, distance, method) {
+        Ok(position) => {
+            if !new_position.is_null() {
+                // SAFETY: guaranteed by the caller.
+                unsafe { new_position.write_unaligned(position as i64) };
+            }
+            TRUE
+        }
+        Err(code) => fail(code),
+    }
+}
+
+/// `SetFilePointer`: the older form, with the distance in two halves.
+/// Returns the low half of the new position, or `INVALID_SET_FILE_POINTER`
+/// (all ones) with the last error set — which is cleared on success so
+/// that a genuine position of that value can be told apart.
+///
+/// # Safety
+///
+/// `distance_high` must be null or valid for a read and a write.
+unsafe extern "win64" fn SetFilePointer(
+    handle: Handle,
+    distance_low: i32,
+    distance_high: *mut i32,
+    method: u32,
+) -> u32 {
+    let distance = if distance_high.is_null() {
+        i64::from(distance_low)
+    } else {
+        // SAFETY: guaranteed by the caller.
+        (i64::from(unsafe { distance_high.read_unaligned() }) << 32)
+            | i64::from(distance_low as u32)
+    };
+    match set_file_pointer(handle, distance, method) {
+        Ok(position) => {
+            if distance_high.is_null() && position > u64::from(u32::MAX - 1) {
+                // Does not fit in the one half the caller can receive.
+                set_last_error(ERROR_INVALID_PARAMETER);
+                return u32::MAX;
+            }
+            if !distance_high.is_null() {
+                // SAFETY: guaranteed by the caller.
+                unsafe { distance_high.write_unaligned((position >> 32) as i32) };
+            }
+            set_last_error(ERROR_SUCCESS);
+            position as u32
+        }
+        Err(code) => {
+            set_last_error(code);
+            u32::MAX
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Directory listings
+// ---------------------------------------------------------------------
+
+/// `ERROR_NO_MORE_FILES`.
+const ERROR_NO_MORE_FILES: u32 = 18;
+/// Size of `WIN32_FIND_DATAA`.
+const FIND_DATA_SIZE: usize = 320;
+/// Offset and size of its `cFileName` field.
+const FIND_DATA_NAME: usize = 44;
+const FIND_DATA_NAME_SIZE: usize = 260;
+
+/// One entry of a directory listing in progress.
+struct FoundFile {
+    name: String,
+    directory: bool,
+    size: u64,
+}
+
+/// Fills a `WIN32_FIND_DATAA`. File times are zero: the file systems do
+/// not record them.
+///
+/// # Safety
+///
+/// `data` must be valid for writing [`FIND_DATA_SIZE`] bytes.
+unsafe fn write_find_data(data: *mut u8, file: &FoundFile) {
+    let mut bytes = [0u8; FIND_DATA_SIZE];
+    let attributes = if file.directory {
+        FILE_ATTRIBUTE_DIRECTORY
+    } else {
+        FILE_ATTRIBUTE_NORMAL
+    };
+    bytes[..4].copy_from_slice(&attributes.to_le_bytes());
+    // After three 8-byte times: the size, high half first.
+    bytes[28..32].copy_from_slice(&((file.size >> 32) as u32).to_le_bytes());
+    bytes[32..36].copy_from_slice(&(file.size as u32).to_le_bytes());
+    // The name, cut to what fits with its terminator.
+    let name = file.name.as_bytes();
+    let length = name.len().min(FIND_DATA_NAME_SIZE - 1);
+    bytes[FIND_DATA_NAME..FIND_DATA_NAME + length].copy_from_slice(&name[..length]);
+    // SAFETY: guaranteed by the caller.
+    unsafe { core::ptr::copy_nonoverlapping(bytes.as_ptr(), data, FIND_DATA_SIZE) };
+}
+
+/// `FindFirstFileA`: starts listing the files that match a name with
+/// wildcards (see `omit_win32::pattern`) in one directory. The entries
+/// `.` and `..` are not reported; file times are zero; there are no
+/// short names. Fails with `ERROR_FILE_NOT_FOUND` if nothing matches and
+/// `ERROR_PATH_NOT_FOUND` if the directory does not exist.
+///
+/// # Safety
+///
+/// `pattern` must be null or a NUL-terminated string; `data` must be
+/// null or valid for writing a `WIN32_FIND_DATAA`.
+unsafe extern "win64" fn FindFirstFileA(pattern: *const c_char, data: *mut u8) -> Handle {
+    // SAFETY: guaranteed by the caller.
+    let pattern = unsafe { text_a(pattern) };
+    let found = (|| {
+        let pattern = pattern?;
+        if data.is_null() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        // The directory is everything up to the last separator.
+        let (directory, name) = match pattern.rfind(['\\', '/']) {
+            Some(at) => (&pattern[..=at], &pattern[at + 1..]),
+            None => (".", pattern),
+        };
+        if name.is_empty() || omit_win32::pattern::has_wildcards(directory) {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        let directory = file_path(Ok(directory))?;
+        let entries = omit_rt::read_dir(&directory).map_err(|errno| match errno {
+            Errno::NotFound => ERROR_PATH_NOT_FOUND,
+            errno => error::from_errno(errno),
+        })?;
+        let mut files: Vec<FoundFile> = entries
+            .into_iter()
+            .filter(|entry| omit_win32::pattern::matches(name, &entry.name))
+            .map(|entry| {
+                let path = alloc::format!("{}/{}", directory.trim_end_matches('/'), entry.name);
+                let stat = omit_rt::stat(&path).ok();
+                FoundFile {
+                    directory: stat.is_some_and(|stat| stat.kind == KIND_DIRECTORY),
+                    size: stat.map_or(0, |stat| stat.size),
+                    name: entry.name,
+                }
+            })
+            .collect();
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        // The listing is handed out from the end, so keep it reversed.
+        files.reverse();
+        let first = files.pop().ok_or(ERROR_FILE_NOT_FOUND)?;
+        // SAFETY: `data` is not null; valid by the caller's guarantee.
+        unsafe { write_find_data(data, &first) };
+        with_state(|state| state.handles.insert(Object::Find(files)))
+            .map_err(|_| ERROR_TOO_MANY_OPEN_FILES)
+    })();
+    handle_or_invalid(found)
+}
+
+/// `FindNextFileA`: the next match, in name order. Fails with
+/// `ERROR_NO_MORE_FILES` after the last.
+///
+/// # Safety
+///
+/// `data` must be null or valid for writing a `WIN32_FIND_DATAA`.
+unsafe extern "win64" fn FindNextFileA(handle: Handle, data: *mut u8) -> Bool {
+    if data.is_null() {
+        return fail(ERROR_INVALID_PARAMETER);
+    }
+    let next = with_state(|state| match state.handles.get_mut(handle) {
+        Some(Object::Find(files)) => files.pop().ok_or(ERROR_NO_MORE_FILES),
+        _ => Err(ERROR_INVALID_HANDLE),
+    });
+    match next {
+        Ok(file) => {
+            // SAFETY: `data` is not null; valid by the caller's guarantee.
+            unsafe { write_find_data(data, &file) };
+            TRUE
+        }
+        Err(code) => fail(code),
+    }
+}
+
+/// `FindClose`.
+extern "win64" fn FindClose(handle: Handle) -> Bool {
+    with_state(|state| {
+        if matches!(state.handles.get(handle), Some(Object::Find(_))) {
+            state.handles.remove(handle);
+            TRUE
+        } else {
+            fail(ERROR_INVALID_HANDLE)
+        }
+    })
+}
+
+// ---------------------------------------------------------------------
+// Other processes
+// ---------------------------------------------------------------------
+
+/// A program started with `CreateProcessA`.
+struct Process {
+    pid: u64,
+    /// The exit code once it is known; [`STILL_ACTIVE`] until then. The
+    /// kernel hands out an exit status only once, so it is kept here.
+    exit_code: AtomicU32,
+    finished: AtomicU32,
+}
+
+impl Process {
+    /// Asks the kernel, without waiting, whether the program has ended.
+    fn poll(&self) -> bool {
+        if self.finished.load(Ordering::Acquire) != 0 {
+            return true;
+        }
+        match omit_rt::try_wait(self.pid) {
+            Ok(None) => false,
+            // Ended — or already collected by another thread of this
+            // program in the meantime, which stored the code.
+            Ok(Some(status)) => {
+                self.exit_code.store(status as u32, Ordering::Release);
+                self.finished.store(1, Ordering::Release);
+                true
+            }
+            Err(_) => {
+                self.finished.store(1, Ordering::Release);
+                true
+            }
+        }
+    }
+
+    /// Waits until the program has ended or the time has passed.
+    fn wait(&self, timeout_ms: Option<u64>) -> bool {
+        let deadline = timeout_ms.map(|timeout| omit_rt::uptime_ms().saturating_add(timeout));
+        loop {
+            if self.poll() {
+                return true;
+            }
+            if deadline.is_some_and(|deadline| omit_rt::uptime_ms() >= deadline) {
+                return false;
+            }
+            // There is no way to sleep until a process ends *or* a time
+            // passes, so look again every timer tick.
+            omit_rt::sleep_ms(10);
+        }
+    }
+}
+
+/// `PROCESS_INFORMATION`.
+#[repr(C)]
+pub struct ProcessInformation {
+    process: Handle,
+    thread: Handle,
+    process_id: u32,
+    thread_id: u32,
+}
+
+/// Finds the program file `name` (a Windows path): as given, then with
+/// `.exe` added, then both in `C:\bin`, which stands in for the Windows
+/// search path.
+fn find_program(name: &str) -> Result<String, u32> {
+    let direct = file_path(Ok(name))?;
+    let mut candidates = alloc::vec![direct.clone(), alloc::format!("{direct}.exe")];
+    if !name.contains(['\\', '/', ':']) {
+        candidates.push(alloc::format!("/bin/{name}"));
+        candidates.push(alloc::format!("/bin/{name}.exe"));
+    }
+    candidates
+        .into_iter()
+        .find(|path| matches!(is_directory(path), Ok(false)))
+        .ok_or(ERROR_FILE_NOT_FOUND)
+}
+
+/// `CreateProcessA`: starts a program — a Windows program, or a native
+/// one — as a new process with the given command line, and the standard
+/// input, output and error of this one. The program is named by
+/// `application`, or else by the first word of `command_line`. Not
+/// supported and ignored: security attributes, handle inheritance
+/// choices, creation flags (a process cannot be started suspended), an
+/// environment, a different working directory, and the start-up
+/// information. The "thread handle" returned is a second handle to the
+/// process.
+///
+/// # Safety
+///
+/// `application` and `command_line` must each be null or a
+/// NUL-terminated string; `information` must be null or valid for
+/// writing a `PROCESS_INFORMATION`.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the signature is that of the Windows function"
+)]
+unsafe extern "win64" fn CreateProcessA(
+    application: *const c_char,
+    command_line: *mut c_char,
+    _process_attributes: *mut c_void,
+    _thread_attributes: *mut c_void,
+    _inherit_handles: Bool,
+    _flags: u32,
+    _environment: *mut c_void,
+    _directory: *const c_char,
+    _startup: *mut c_void,
+    information: *mut ProcessInformation,
+) -> Bool {
+    let started = (|| {
+        if information.is_null() {
+            return Err(ERROR_INVALID_PARAMETER);
+        }
+        let command_line = if command_line.is_null() {
+            None
+        } else {
+            // SAFETY: guaranteed by the caller.
+            Some(unsafe { text_a(command_line) }?)
+        };
+        let mut arguments = command_line.map(cmdline::split).unwrap_or_default();
+        let program = if application.is_null() {
+            arguments.first().cloned().ok_or(ERROR_INVALID_PARAMETER)?
+        } else {
+            // SAFETY: guaranteed by the caller.
+            String::from(unsafe { text_a(application) }?)
+        };
+        if arguments.is_empty() {
+            arguments.push(program.clone());
+        }
+        let path = find_program(&program)?;
+        let arguments: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let pid = omit_rt::spawn(&path, &arguments).map_err(error::from_errno)?;
+        let process = Arc::new(Process {
+            pid,
+            exit_code: AtomicU32::new(STILL_ACTIVE),
+            finished: AtomicU32::new(0),
+        });
+        let handles = with_state(|state| {
+            let first = state
+                .handles
+                .insert(Object::Process(process.clone()))
+                .ok()?;
+            match state.handles.insert(Object::Process(process.clone())) {
+                Ok(second) => Some((first, second)),
+                Err(_) => {
+                    state.handles.remove(first);
+                    None
+                }
+            }
+        });
+        // (Without handles the program runs on, unobserved.)
+        let (process_handle, thread_handle) = handles.ok_or(ERROR_TOO_MANY_OPEN_FILES)?;
+        // SAFETY: `information` is not null; valid by the caller's
+        // guarantee.
+        unsafe {
+            information.write_unaligned(ProcessInformation {
+                process: process_handle,
+                thread: thread_handle,
+                process_id: pid as u32,
+                thread_id: pid as u32,
+            });
+        }
+        Ok(())
+    })();
+    match started {
+        Ok(()) => TRUE,
+        Err(code) => fail(code),
+    }
+}
+
+/// `GetExitCodeProcess`: the exit code of a program started with
+/// `CreateProcessA`, or `STILL_ACTIVE` while it runs.
+///
+/// # Safety
+///
+/// `code` must be null or valid for a write.
+unsafe extern "win64" fn GetExitCodeProcess(handle: Handle, code: *mut u32) -> Bool {
+    let process = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Process(process)) => Some(process.clone()),
+        _ => None,
+    });
+    let Some(process) = process else {
+        return fail(ERROR_INVALID_HANDLE);
+    };
+    if code.is_null() {
+        return fail(ERROR_NOACCESS);
+    }
+    process.poll();
+    // SAFETY: guaranteed by the caller.
+    unsafe { code.write_unaligned(process.exit_code.load(Ordering::Acquire)) };
+    TRUE
+}
+
+/// `TerminateProcess`: ends a program started with `CreateProcessA`, or
+/// — given the current-process pseudo-handle — this one. A terminated
+/// child reports the kernel's exit status for a killed process, not
+/// `exit_code`: the kernel has no way to choose it.
+extern "win64" fn TerminateProcess(handle: Handle, exit_code: u32) -> Bool {
+    if handle == INVALID_HANDLE {
+        omit_rt::exit(exit_code as i32);
+    }
+    let process = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Process(process)) => Some(process.clone()),
+        _ => None,
+    });
+    match process {
+        Some(process) if process.poll() => fail(ERROR_ACCESS_DENIED),
+        Some(process) => match omit_rt::kill(process.pid) {
+            Ok(()) => TRUE,
+            Err(errno) => fail_errno(errno),
+        },
+        None => fail(ERROR_INVALID_HANDLE),
     }
 }
 
@@ -1705,17 +2152,20 @@ extern "win64" fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32 
     enum Target {
         Thread(omit_rt::thread::Waiter),
         Event(Arc<Event>),
+        Process(Arc<Process>),
     }
     // The lock is released before waiting.
     let target = with_state(|state| match state.handles.get(handle) {
         Some(Object::Thread { handle, .. }) => Some(Target::Thread(handle.waiter())),
         Some(Object::Event(event)) => Some(Target::Event(event.clone())),
+        Some(Object::Process(process)) => Some(Target::Process(process.clone())),
         _ => None,
     });
     let timeout = (milliseconds != INFINITE).then_some(u64::from(milliseconds));
     let signalled = match target {
         Some(Target::Thread(waiter)) => waiter.wait(timeout),
         Some(Target::Event(event)) => event.wait(timeout),
+        Some(Target::Process(process)) => process.wait(timeout),
         None => {
             set_last_error(ERROR_INVALID_HANDLE);
             return WAIT_FAILED;
@@ -2032,12 +2482,16 @@ exports! {
     CreateEventA,
     CreateFileA,
     CreateFileW,
+    CreateProcessA,
     CreateThread,
     DeleteCriticalSection,
     DeleteFileA,
     EnterCriticalSection,
     ExitProcess,
     ExitThread,
+    FindClose,
+    FindFirstFileA,
+    FindNextFileA,
     FreeLibrary,
     GetACP,
     GetCommandLineA,
@@ -2050,6 +2504,7 @@ exports! {
     GetCurrentThread,
     GetCurrentThreadId,
     GetEnvironmentVariableA,
+    GetExitCodeProcess,
     GetExitCodeThread,
     GetFileAttributesA,
     GetFileSizeEx,
@@ -2082,9 +2537,12 @@ exports! {
     RemoveDirectoryA,
     ResetEvent,
     SetEvent,
+    SetFilePointer,
+    SetFilePointerEx,
     SetLastError,
     Sleep,
     SwitchToThread,
+    TerminateProcess,
     TlsAlloc,
     TlsFree,
     TlsGetValue,

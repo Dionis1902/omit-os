@@ -45,7 +45,7 @@ are started like any other.
   Win32 error codes, path translation (`C:\a\b` is `/a/b`), command-line
   quoting, UTF-16 conversion, the handle table. Host-tested.
 - `userspace/programs/src/bin/winrun` — the loader and the implementation
-  of 69 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
+  of 77 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
   Omit OS system calls.
 - `compat/windows/samples` — test programs. They are real Windows console
   executables (target `x86_64-pc-windows-msvc`), built by `cargo xtask`
@@ -101,10 +101,15 @@ needed to build; no code is taken from Wine or ReactOS.
 Verified in QEMU by the `windows-programs` test:
 
 - a minimal executable prints through `GetStdHandle`/`WriteFile`;
-- a test executable performs 61 self-checked API operations — heap,
+- a test executable performs 94 self-checked API operations — heap,
   virtual memory, file and directory operations with the documented error
-  codes, console output in UTF-16, timing, the TEB/PEB fields, data that
-  requires relocation — and its exit code reaches the shell;
+  codes (including reading and writing through one handle with the
+  position moved about, and directory listings with wildcards), console
+  output in UTF-16, timing and the date, the TEB/PEB fields, data that
+  requires relocation, and other programs started with `CreateProcessA`
+  (a Windows program whose exit code is collected, one named by file, a
+  native program that is terminated, a missing one) — and its exit code
+  reaches the shell;
 - output redirection to a file works for Windows programs;
 - two Windows programs running at once keep their SSE registers apart
   (the test fails when the kernel's save/restore is disabled — this was
@@ -142,7 +147,7 @@ Verified in QEMU by the `windows-programs` test:
 This is a proof that the approach works, not Windows compatibility.
 
 - **Only programs whose imports are all satisfied by the implemented
-  functions — 69 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
+  functions — 77 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
   `GDI32.dll` — or by DLL files that are present and themselves
   loadable, run.** That excludes practically all existing software:
   anything linked against the C runtime or the Rust standard library, or
@@ -158,7 +163,7 @@ This is a proof that the approach works, not Windows compatibility.
   timer's 10 ms resolution and are only looked at when the program
   asks for a message. Windows need the
   desktop to be running.
-- No registry, networking, processes started by Windows programs,
+- No registry, networking,
   structured exception handling, or environment.
 - Threads: libraries are not notified of them (`DLL_THREAD_ATTACH`),
   static thread-local storage (`__declspec(thread)`, the PE TLS
@@ -168,7 +173,12 @@ This is a proof that the approach works, not Windows compatibility.
   to confirm they behave identically there.
 - Images without relocation information are refused: the kernel cannot
   map at a requested address. 32-bit programs are refused.
-- A file is opened for reading or for writing, not both; no seeking.
+- File times are not recorded (listings report zero); a directory
+  listing has no `.` and `..` entries and no short names.
+- `CreateProcessA` ignores everything but the program and its command
+  line (no environment, start-up information, working directory or
+  suspended start), and a terminated program's exit code is the
+  kernel's, not the one asked for.
   File names are case-sensitive. `...A` functions take UTF-8.
 - No memory may be writable and executable, so programs that generate
   code at run time (JIT compilers) cannot work without changes here.

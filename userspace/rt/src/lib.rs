@@ -341,6 +341,14 @@ pub fn poll(fds: &[u64], timeout_ms: u64, input: bool) -> Result<u64, Errno> {
     })
 }
 
+/// Moves the position of the open file `fd` to `offset` bytes from the
+/// place `whence` names (one of [`abi::seek`]); returns the new position
+/// from the start of the file.
+pub fn seek(fd: u64, offset: i64, whence: u64) -> Result<u64, Errno> {
+    // SAFETY: plain integer arguments.
+    result(unsafe { syscall(nr::SEEK, fd, offset as u64, whence) })
+}
+
 /// Closes file descriptor `fd`.
 pub fn close(fd: u64) -> Result<(), Errno> {
     // SAFETY: plain integer argument.

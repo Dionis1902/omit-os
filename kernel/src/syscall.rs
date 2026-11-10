@@ -14,7 +14,7 @@ use omit_abi::{
     ARGS_MAX, Blit, CHANNEL_NAME_MAX, Errno, FUTEX_NO_TIMEOUT, INPUT_READ_MAX, INPUT_TIMEOUT_MAX,
     InputEvent, KIND_DIRECTORY, KIND_FILE, PATH_MAX, POLL_INPUT, POLL_INPUT_READY, POLL_MAX,
     POLL_TIMEOUT_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG, WRITE_MAX,
-    WRITE_NO_WAIT, nr, open, protect,
+    WRITE_NO_WAIT, nr, open, protect, seek,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
@@ -123,6 +123,7 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
             .ok_or(Errno::NoSuchProcess),
         nr::CLOCK => Ok(time::monotonic_ns() / 1000),
         nr::REALTIME => time::realtime_us().ok_or(Errno::Io),
+        nr::SEEK => seek_file(a0, a1 as i64, a2),
         nr::PIPE => create_pipe(a0),
         nr::SHARED_CREATE => shared_create(a0, a1),
         nr::SHARED_MAP => shared_map(a0, a1),
@@ -240,9 +241,11 @@ fn open_file(path_address: u64, path_length: u64, flags: u64) -> SysResult {
     if flags & !open::ALL != 0 {
         return Err(Errno::InvalidArgument);
     }
-    let writable = flags & open::WRITE != 0;
-    if !writable && flags != open::READ {
-        // CREATE, TRUNCATE and APPEND only make sense when writing.
+    let both = flags & open::READ_WRITE != 0;
+    let writable = both || flags & open::WRITE != 0;
+    if (!writable && flags != open::READ) || (both && flags & open::WRITE != 0) {
+        // CREATE, TRUNCATE and APPEND only make sense when writing, and
+        // "write only" contradicts "read and write".
         return Err(Errno::InvalidArgument);
     }
     let path = path_argument(path_address, path_length)?;
@@ -270,10 +273,35 @@ fn open_file(path_address: u64, path_length: u64, flags: u64) -> SysResult {
     process::install(Descriptor::File(OpenFile {
         path,
         offset: 0,
+        readable: both || !writable,
         writable,
         append: flags & open::APPEND != 0,
     }))
     .map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn seek_file(fd: u64, offset: i64, whence: u64) -> SysResult {
+    let Some(Descriptor::File(file)) = process::descriptor(fd) else {
+        return Err(Errno::BadFileDescriptor);
+    };
+    let base = match whence {
+        seek::START => 0,
+        seek::CURRENT => file.offset,
+        seek::END => {
+            fs::root()
+                .ok_or(Errno::NotFound)?
+                .metadata(&file.path)
+                .map_err(errno)?
+                .size
+        }
+        _ => return Err(Errno::InvalidArgument),
+    };
+    let position = base
+        .checked_add_signed(offset)
+        .filter(|position| *position <= i64::MAX as u64)
+        .ok_or(Errno::InvalidArgument)?;
+    process::set_offset(fd, position);
+    Ok(position)
 }
 
 fn stat(path_address: u64, path_length: u64, out: u64) -> SysResult {
@@ -415,7 +443,7 @@ fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> Sy
                 | Descriptor::Listener(_)),
             ) => watched.push(descriptor),
             // Files can always be read; anything else cannot be polled.
-            Some(Descriptor::File(file)) if !file.writable => watched.push(Descriptor::File(file)),
+            Some(Descriptor::File(file)) if file.readable => watched.push(Descriptor::File(file)),
             _ => return Err(Errno::BadFileDescriptor),
         }
     }
@@ -579,10 +607,13 @@ fn spawn(
         };
         let input = index == 0;
         stdio[index] = Some(match process::descriptor(fd) {
-            Some(Descriptor::File(file)) if file.writable != input => {
+            Some(Descriptor::File(file))
+                if (input && file.readable) || (!input && file.writable) =>
+            {
                 Descriptor::File(OpenFile {
                     path: file.path,
                     offset: 0,
+                    readable: input,
                     writable: !input,
                     // Output is added to what the file holds: several
                     // programs can share a log this way.
@@ -612,7 +643,7 @@ fn read(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
         // The console's line editing has no way to report "nothing yet".
         None if fd == STDIN && no_wait => return Err(Errno::InvalidArgument),
         None if fd == STDIN => return read_console(address, length),
-        Some(Descriptor::File(file)) if !file.writable => {
+        Some(Descriptor::File(file)) if file.readable => {
             buffer
                 .try_reserve_exact(length)
                 .map_err(|_| Errno::NoSpace)?;

@@ -71,7 +71,9 @@ pub struct OpenFile {
     pub path: String,
     /// Position of the next read or write.
     pub offset: u64,
-    /// Opened for writing rather than reading.
+    /// May be read.
+    pub readable: bool,
+    /// May be written.
     pub writable: bool,
     /// Every write goes to the end of the file.
     pub append: bool,

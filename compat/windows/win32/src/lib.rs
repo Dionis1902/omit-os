@@ -19,4 +19,5 @@ pub mod cmdline;
 pub mod error;
 pub mod handle;
 pub mod path;
+pub mod pattern;
 pub mod text;

@@ -20,6 +20,21 @@ use crate::{arch, fs, info, kprintln, mm, pipe, process, sched, time, warn};
 /// Connects the shell's process commands to the kernel.
 struct KernelHost;
 
+/// The descriptor for a program's redirected output. Every write goes to
+/// the end of the file, whether the redirection was `>` or `>>` (the
+/// shell has already emptied the file for `>`): the program may start
+/// others, which inherit the descriptor, and positions kept separately
+/// by each of them would make them overwrite one another's output.
+fn output_file((path, _append): (&str, bool)) -> Descriptor {
+    Descriptor::File(OpenFile {
+        path: path.into(),
+        offset: 0,
+        readable: false,
+        writable: true,
+        append: true,
+    })
+}
+
 impl Host for KernelHost {
     fn spawn(
         &mut self,
@@ -29,14 +44,7 @@ impl Host for KernelHost {
         cwd: &str,
         stdout: Option<(&str, bool)>,
     ) -> Result<u64, String> {
-        let stdout = stdout.map(|(path, append)| {
-            Descriptor::File(OpenFile {
-                path: path.into(),
-                offset: 0,
-                writable: true,
-                append,
-            })
-        });
+        let stdout = stdout.map(output_file);
         process::spawn(name, image, args, cwd, [None, stdout, None])
             .map_err(|error| format!("{error}"))
     }
@@ -55,6 +63,7 @@ impl Host for KernelHost {
             Descriptor::File(OpenFile {
                 path: path.into(),
                 offset: 0,
+                readable: true,
                 writable: false,
                 append: false,
             })
@@ -62,14 +71,7 @@ impl Host for KernelHost {
         for (index, stage) in stages.iter().enumerate() {
             let last = index + 1 == stages.len();
             let (output, next_input) = if last {
-                let file = stdout.map(|(path, append)| {
-                    Descriptor::File(OpenFile {
-                        path: path.into(),
-                        offset: 0,
-                        writable: true,
-                        append,
-                    })
-                });
+                let file = stdout.map(output_file);
                 (file, None)
             } else {
                 let (reader, writer) = pipe::new();
