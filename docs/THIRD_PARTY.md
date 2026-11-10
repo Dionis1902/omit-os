@@ -28,7 +28,9 @@ Build-time only (procedural macros, not linked into any shipped binary):
 
 ## Linked into the kernel (`omit-kernel`)
 
-None.
+| Crate | Licence | Notes |
+| --- | --- | --- |
+| `noto-sans-mono-bitmap` | MIT (crate); SIL Open Font License 1.1 (the embedded Noto Sans Mono glyph data) | Font for the framebuffer console. The OFL permits bundling and embedding the font in software under any licence; the font data itself stays under the OFL. |
 
 ## Host tooling only (`xtask`; never part of the OS image)
 

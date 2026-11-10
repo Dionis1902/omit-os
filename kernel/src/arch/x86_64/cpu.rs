@@ -11,6 +11,8 @@ const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
 const CR4_LA57: u64 = 1 << 12;
 const MSR_EFER: u32 = 0xC000_0080;
+const MSR_PAT: u32 = 0x277;
+const PAT_WRITE_COMBINING: u64 = 0x01;
 const EFER_NXE: u64 = 1 << 11;
 
 /// Reasons the CPU cannot run the kernel.
@@ -199,6 +201,19 @@ pub fn init() -> Result<CpuInfo, CpuError> {
     unsafe { asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) };
     if read_cr0() & CR0_WP == 0 {
         return Err(CpuError::ControlBitNotSticky("CR0.WP"));
+    }
+
+    // Page Attribute Table: turn entry 1 (selected by the PWT page flag)
+    // from its power-on "write-through" into "write-combining", for the
+    // framebuffer mapping. Nothing else in the kernel uses PWT.
+    if cpuid(1, 0).3 & (1 << 16) != 0 {
+        // SAFETY: CPUID reports PAT support, so IA32_PAT exists. Only entry
+        // 1 changes, to a valid memory type (0x01); no existing mapping
+        // uses that entry, so no translation changes meaning.
+        unsafe {
+            let pat = read_msr(MSR_PAT);
+            write_msr(MSR_PAT, (pat & !(0xFF << 8)) | (PAT_WRITE_COMBINING << 8));
+        }
     }
 
     let smep = leaf7_ebx & (1 << 7) != 0;

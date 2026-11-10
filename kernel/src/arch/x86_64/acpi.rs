@@ -84,8 +84,12 @@ pub struct InterruptConfig {
     pub cpu_count: usize,
     /// Routing of the COM1 serial port interrupt (ISA IRQ 4).
     pub serial_irq: IsaRoute,
+    /// Routing of the PS/2 keyboard interrupt (ISA IRQ 1).
+    pub keyboard_irq: IsaRoute,
 }
 
+/// ISA IRQ line of the PS/2 keyboard.
+const KEYBOARD_IRQ: u8 = 1;
 /// ISA IRQ line of the first serial port.
 const COM1_IRQ: u8 = 4;
 
@@ -142,6 +146,7 @@ pub unsafe fn interrupt_config(rsdp_phys: u64) -> Result<InterruptConfig, AcpiLo
                 .filter(|e| matches!(e, MadtEntry::LocalApic { enabled: true, .. }))
                 .count(),
             serial_irq: madt.isa_route(COM1_IRQ),
+            keyboard_irq: madt.isa_route(KEYBOARD_IRQ),
         });
     }
     Err(AcpiLookupError::NoMadt)

@@ -45,7 +45,7 @@ pub const BOOT_INFO_MAGIC: u64 = u64::from_be_bytes(*b"OMITBOOT");
 
 /// Version of the protocol described by this crate. Bumped on any
 /// incompatible change to [`BootInfo`] or the hand-off contract.
-pub const BOOT_PROTOCOL_VERSION: u32 = 1;
+pub const BOOT_PROTOCOL_VERSION: u32 = 2;
 
 /// Start of the higher half (first canonical kernel address); all physical
 /// memory is mapped here ("direct map").
@@ -121,7 +121,27 @@ pub struct BootInfo {
     /// Length of the kernel command line in bytes
     /// (at most [`CMDLINE_MAX_LEN`]).
     pub cmdline_len: u64,
+    /// Physical address of the linear framebuffer; meaningful only if
+    /// `framebuffer_format` is not [`FRAMEBUFFER_NONE`]. The framebuffer is
+    /// device memory and is not necessarily covered by the direct map.
+    pub framebuffer_phys: u64,
+    /// Visible width in pixels.
+    pub framebuffer_width: u32,
+    /// Visible height in pixels.
+    pub framebuffer_height: u32,
+    /// Pixels per scanline (at least the width). Every pixel is 4 bytes.
+    pub framebuffer_stride: u32,
+    /// Pixel layout: [`FRAMEBUFFER_NONE`], [`FRAMEBUFFER_RGB`] or
+    /// [`FRAMEBUFFER_BGR`].
+    pub framebuffer_format: u32,
 }
+
+/// No usable framebuffer was found.
+pub const FRAMEBUFFER_NONE: u32 = 0;
+/// 32 bits per pixel; byte 0 is red, byte 1 green, byte 2 blue.
+pub const FRAMEBUFFER_RGB: u32 = 1;
+/// 32 bits per pixel; byte 0 is blue, byte 1 green, byte 2 red.
+pub const FRAMEBUFFER_BGR: u32 = 2;
 
 /// Reasons a [`BootInfo`] is rejected by [`BootInfo::validate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +223,23 @@ impl BootInfo {
         if self.rsdp_phys >= self.phys_map_size {
             return Err(BootInfoError::BadField("rsdp_phys"));
         }
+        match self.framebuffer_format {
+            FRAMEBUFFER_NONE => {}
+            FRAMEBUFFER_RGB | FRAMEBUFFER_BGR => {
+                let bytes =
+                    u64::from(self.framebuffer_stride) * u64::from(self.framebuffer_height) * 4;
+                if self.framebuffer_width == 0
+                    || self.framebuffer_height == 0
+                    || self.framebuffer_stride < self.framebuffer_width
+                    || !self.framebuffer_phys.is_multiple_of(4)
+                    || self.framebuffer_phys == 0
+                    || self.framebuffer_phys.checked_add(bytes).is_none()
+                {
+                    return Err(BootInfoError::BadField("framebuffer_*"));
+                }
+            }
+            _ => return Err(BootInfoError::BadField("framebuffer_format")),
+        }
         Ok(())
     }
 
@@ -278,7 +315,37 @@ mod tests {
             rsdp_phys: 0xE_0000,
             cmdline_addr: PHYS_MAP_BASE + 0x11_0000,
             cmdline_len: 10,
+            framebuffer_phys: 0x8000_0000,
+            framebuffer_width: 1280,
+            framebuffer_height: 800,
+            framebuffer_stride: 1280,
+            framebuffer_format: FRAMEBUFFER_BGR,
         }
+    }
+
+    #[test]
+    fn validates_framebuffer_description() {
+        let mut bi = valid();
+        bi.framebuffer_format = FRAMEBUFFER_NONE;
+        bi.framebuffer_phys = 0;
+        bi.framebuffer_width = 0;
+        assert_eq!(bi.validate(), Ok(()), "absent framebuffer needs no fields");
+
+        let mut bi = valid();
+        bi.framebuffer_stride = 1279;
+        assert_eq!(bi.validate(), Err(BootInfoError::BadField("framebuffer_*")));
+        let mut bi = valid();
+        bi.framebuffer_height = 0;
+        assert_eq!(bi.validate(), Err(BootInfoError::BadField("framebuffer_*")));
+        let mut bi = valid();
+        bi.framebuffer_phys = u64::MAX - 7;
+        assert_eq!(bi.validate(), Err(BootInfoError::BadField("framebuffer_*")));
+        let mut bi = valid();
+        bi.framebuffer_format = 9;
+        assert_eq!(
+            bi.validate(),
+            Err(BootInfoError::BadField("framebuffer_format"))
+        );
     }
 
     #[test]

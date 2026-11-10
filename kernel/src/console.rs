@@ -49,15 +49,16 @@ static INPUT: SpinLock<InputQueue> = SpinLock::new(InputQueue {
     dropped: 0,
 });
 
-/// Receive callback, run from the serial interrupt handler.
-fn on_receive(byte: u8) {
+/// Queues a byte of terminal input. Called from the serial and keyboard
+/// interrupt handlers.
+pub fn push_input(byte: u8) {
     INPUT.lock().push(byte);
 }
 
 /// Starts queueing serial input. The serial interrupt must be routed to
 /// [`serial::handle_interrupt`] separately.
 pub fn enable_input() {
-    serial::enable_receive_interrupt(on_receive);
+    serial::enable_receive_interrupt(push_input);
 }
 
 /// Blocks until a byte of console input is available and returns it.
@@ -75,6 +76,9 @@ pub fn read_byte() -> u8 {
             return byte;
         }
         interrupts::wait();
+        // The CPU wakes at least once per timer tick; use that to keep the
+        // on-screen status bar current while the system is otherwise idle.
+        crate::ui::refresh_status();
     }
 }
 

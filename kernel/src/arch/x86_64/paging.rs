@@ -220,6 +220,10 @@ use crate::sync::SpinLock;
 /// "uncacheable" memory type, which is what device registers need.
 const CACHE_DISABLE: u64 = 1 << 4;
 
+/// Page-level write-through bit. Selects PAT entry 1, which the kernel
+/// reprograms from "write-through" to "write-combining".
+const WRITE_THROUGH_BIT: u64 = 1 << 3;
+
 /// Start of the virtual range used for device memory (PML4 slot 384).
 const MMIO_BASE: u64 = 0xFFFF_C000_0000_0000;
 /// Exclusive end of the device memory range (64 GiB).
@@ -327,6 +331,19 @@ unsafe fn map_page_locked(virt: u64, phys: u64, flags: u64) -> Result<(), MapErr
 /// Establishing the mapping is safe; accessing the device through the
 /// returned address is subject to the usual raw-pointer rules.
 pub fn map_mmio(phys: u64, len: u64) -> Result<u64, MapError> {
+    map_device(phys, len, CACHE_DISABLE)
+}
+
+/// Like [`map_mmio`], but with the write-combining memory type, which is
+/// what a linear framebuffer wants: writes are batched instead of each one
+/// going to the device individually. Relies on PAT entry 1 having been
+/// programmed for write-combining by [`cpu::init`]; on CPUs without PAT the
+/// mapping silently behaves as write-through, which is merely slower.
+pub fn map_framebuffer(phys: u64, len: u64) -> Result<u64, MapError> {
+    map_device(phys, len, WRITE_THROUGH_BIT)
+}
+
+fn map_device(phys: u64, len: u64, cache_flags: u64) -> Result<u64, MapError> {
     let offset = phys % PAGE_SIZE;
     let first = phys - offset;
     let pages = offset
@@ -357,7 +374,7 @@ pub fn map_mmio(phys: u64, len: u64) -> Result<u64, MapError> {
             map_page_locked(
                 virt + page * PAGE_SIZE,
                 first + page * PAGE_SIZE,
-                WRITABLE | NO_EXECUTE | CACHE_DISABLE,
+                WRITABLE | NO_EXECUTE | cache_flags,
             )?;
         }
     }

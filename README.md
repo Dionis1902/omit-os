@@ -8,9 +8,13 @@ Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
 the CPU and the address space, manages memory, handles timer and device
-interrupts, and gives you an interactive shell with a RAM filesystem on the
-serial console. There are no processes, no user mode, no persistent storage
+interrupts, and gives you an interactive shell with a RAM filesystem, on
+screen (with a PS/2 keyboard) and on the serial console. There are no processes, no user mode, no persistent storage
 and no driver model yet. See [Status](#status) for exactly what exists and what has been tested.
+
+![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
+
+The same session on the serial console:
 
 ```text
 omit-boot: Omit OS boot loader 0.1.0 (protocol v1)
@@ -71,7 +75,9 @@ cargo xtask run
 
 Builds the loader and kernel, assembles a bootable disk image and boots it in
 QEMU with the serial console on your terminal. You land in the Omit OS shell;
-type `help` for the commands. Press `Ctrl-C` to stop QEMU.
+type `help` for the commands. Press `Ctrl-C` to stop QEMU. (`xtask` runs QEMU
+without a window; to see the screen, boot the image yourself as shown under
+[Releases](#releases).)
 
 ```bash
 cargo xtask test
@@ -91,11 +97,13 @@ All `xtask` commands:
 | --- | --- |
 | `cargo xtask build` | Build `omit-boot.efi` and the `omit-kernel` ELF |
 | `cargo xtask image` | Also write `target/omit/<profile>/omit-os.img` (GPT + FAT32 ESP) |
+| `cargo xtask dist` | Build the release artifacts: versioned disk image and ISO in `target/omit/dist/` |
 | `cargo xtask run` | Also boot the image in QEMU |
 | `cargo xtask test` | Build and run the QEMU integration tests (TAP output) |
 
 Options: `--release`, `--cmdline "<text>"` (image/run), `--cpu <model>`,
-`--memory <size>`, `--accel <name>` (e.g. `kvm`), `--gdb` (run). Environment: `QEMU`, `OVMF_CODE` +
+`--memory <size>`, `--accel <name>` (e.g. `kvm`), `--iso` (use an ISO instead of
+a disk image), `--gdb` (run). Environment: `QEMU`, `OVMF_CODE` +
 `OVMF_VARS` (if the firmware is not in a standard location),
 `OMIT_TEST_TIMEOUT`.
 
@@ -131,20 +139,45 @@ Resolve them with:
 addr2line -f -C -e target/x86_64-unknown-none/debug/omit-kernel 0xffffffff80000fef
 ```
 
-### Booting real hardware
+## Releases
 
-`omit-os.img` is a standard GPT disk with an EFI System Partition and the
-loader at the removable-media path `\EFI\BOOT\BOOTX64.EFI`, so it can be
-written to a USB stick. **This has not been tested on real hardware**; expect
-it to need work (the only console is the legacy COM1 serial port, and Secure
-Boot must be disabled).
+Tagged versions are published on the repository's Releases page with two
+images and their checksums:
+
+| File | Use |
+| --- | --- |
+| `omit-os-<version>-x86_64.iso` | virtual machines (attach as optical drive, enable EFI), optical media |
+| `omit-os-<version>-x86_64.img` | USB sticks (`dd`), virtual hard disks |
+
+Both are live systems: they run from memory and install nothing. **There is
+no installer yet.**
+
+```bash
+qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-0.1.0-x86_64.iso -serial stdio
+```
+
+To cut a release, set the version in `Cargo.toml`, merge, then push a
+matching tag:
+
+```bash
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+The release workflow tests the exact binaries from both media before
+publishing. See [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
+
+### Real hardware
+
+**Not tested on real hardware.** Requirements: x86-64, UEFI, Secure Boot off.
+The screen should work wherever the firmware provides a 32-bit framebuffer.
+Keyboard input needs a PS/2 keyboard (or firmware that emulates one for a USB
+keyboard); otherwise the only way to type is a serial port (COM1, 115200 8N1).
 
 ## Status
 
 Milestones 0 (development environment), 1 (bootable kernel), 2 (memory and
 interrupts) and 3 (terminal and filesystem) are implemented, with one
-exception in Milestone 3: there is no keyboard driver, because there is no
-display to pair it with yet. The terminal is the serial console.
+addition from Milestone 8: a framebuffer text console.
 
 | Component | State |
 | --- | --- |
@@ -168,7 +201,10 @@ display to pair it with yet. The terminal is the serial console.
 | Virtual filesystem layer and RAM filesystem | Working; host-tested, exercised end to end through the shell |
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | `ps`, `kill` | Not implemented: the commands only say that there is no process management |
-| Keyboard driver, framebuffer console | Not started |
+| Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
+| PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
+| USB (and therefore USB keyboards) | Not started |
+| Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
 | Processes, user mode, scheduler, system calls, SMP | Not started (Milestone 4) |
 | Persistent storage, drivers, Windows/Linux compatibility | Not started |
 
@@ -177,14 +213,16 @@ display to pair it with yet. The terminal is the serial console.
 On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 (TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 80 host unit tests (`cargo test`): boot protocol validation, memory map
+- 101 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
   input, the buddy allocator and the heap (each including a randomised test
   against an independent model), ACPI table parsing, the VFS and RAM
-  filesystem, the shell's parser, line editor and every command, GPT writer.
-- 6 QEMU integration tests (`cargo xtask test`), in debug and release builds,
+  filesystem, the shell's parser, line editor and every command, the terminal
+  emulator and keyboard decoder, GPT and ISO writers.
+- 7 QEMU integration tests (`cargo xtask test`), in debug and release builds,
   with `-cpu max` and with `-cpu qemu64` (no 1 GiB pages, SMEP, SMAP or UMIP),
-  and with 96 MiB, 256 MiB and 6 GiB of guest RAM.
+  with 96 MiB to 6 GiB of guest RAM, and booted from both the disk image and
+  the ISO.
 - At every boot the kernel itself checks: a breakpoint exception round-trip;
   frame allocation, alignment, memory read-back and rejection of invalid
   frees; heap use through `Box`, `Vec` and `String` with nothing leaked;
@@ -200,8 +238,13 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 
 - **Never run on real hardware** or with firmware other than OVMF. KVM has
   only been exercised in CI.
-- The serial port is the only console. If COM1 is absent the kernel stops
-  without any visible output.
+- The kernel requires a working COM1 serial port even when a screen is
+  present, and stops silently without one.
+- The screen is a text console only: fixed font, ASCII, no graphics or
+  windows. Debug builds draw noticeably slowly under emulation.
+- Only PS/2 keyboards with a US layout. No USB, no mouse.
+- There is no installer and no persistent storage: every boot starts from an
+  empty RAM filesystem.
 - Clock calibration needs the legacy PIT. On hardware without one the kernel
   reports a calibration timeout and stops; CPUID- or HPET-based calibration
   is future work. The TSC is used as the clock even when the CPU does not
@@ -242,6 +285,7 @@ libs/bootproto/  loader <-> kernel contract: BootInfo, memory map, command line
 libs/acpi/       ACPI static table parser (RSDP, RSDT/XSDT, MADT), host-tested
 libs/elf/        safe ELF64 program-header parser
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
+libs/term/       terminal emulator and keyboard scancode decoder, host-tested
 libs/vfs/        virtual filesystem layer and RAM filesystem, host-tested
 shell/           the built-in shell (line editor, parser, commands), host-tested
 tools/xtask/     build / image / run / test driver
@@ -282,6 +326,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0004 — Physical memory management](docs/adr/0004-physical-memory-management.md)
 - [ADR 0005 — Interrupts and timekeeping](docs/adr/0005-interrupts-and-timekeeping.md)
 - [ADR 0006 — Terminal, virtual filesystem and built-in shell](docs/adr/0006-terminal-filesystem-and-shell.md)
+- [ADR 0007 — Framebuffer console, keyboard input and releases](docs/adr/0007-display-keyboard-and-releases.md)
 
 ## Testing
 
@@ -292,6 +337,7 @@ checks both QEMU's exit status and the serial log:
 | --- | --- |
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `shell-session` | Boots into the shell and types 26 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing |
+| `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
 | `page-fault-diagnostics` | Reading address `0x1000` raises a page fault with the right address and cause — which also proves the identity map is gone |

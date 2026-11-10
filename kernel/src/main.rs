@@ -11,12 +11,14 @@ extern crate alloc;
 
 mod arch;
 mod console;
+mod fbcon;
 mod log;
 mod mm;
 mod panic;
 mod shell;
 mod sync;
 mod time;
+mod ui;
 
 use core::fmt;
 
@@ -36,6 +38,9 @@ use time::TickTestError;
 
 /// Interrupt vector of the serial port's receive interrupt.
 const SERIAL_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 2;
+
+/// Interrupt vector of the PS/2 keyboard.
+const KEYBOARD_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 3;
 
 /// The line that announces a fully initialised kernel. Printed only after
 /// every step of [`init`] has succeeded; the boot tests look for it.
@@ -60,7 +65,7 @@ enum InitError {
     TickSelfTest(TickTestError),
     Acpi(AcpiLookupError),
     IoApic(IoApicError),
-    SerialInterrupt(RegisterError),
+    InputInterrupt(RegisterError),
 }
 
 impl fmt::Display for InitError {
@@ -84,7 +89,7 @@ impl fmt::Display for InitError {
             Self::TickSelfTest(e) => write!(f, "timer self-test: {e}"),
             Self::Acpi(e) => write!(f, "acpi: {e}"),
             Self::IoApic(e) => write!(f, "I/O APIC: {e}"),
-            Self::SerialInterrupt(e) => write!(f, "serial interrupt: {e:?}"),
+            Self::InputInterrupt(e) => write!(f, "input interrupt: {e:?}"),
         }
     }
 }
@@ -272,6 +277,19 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
     arch::paging::self_test(false).map_err(InitError::MappingSelfTest)?;
     info!("paging: map/unmap self-test passed");
 
+    // The screen is optional: a machine without a framebuffer still has the
+    // serial console, so its absence is reported but is not a failure.
+    match fbcon::init(boot_info) {
+        Ok(screen) => info!(
+            "display: framebuffer console {}x{} pixels, {}x{} characters",
+            screen.width, screen.height, screen.cols, screen.rows
+        ),
+        Err(fbcon::FbconError::NoFramebuffer) => {
+            info!("display: no framebuffer; serial console only");
+        }
+        Err(error) => warn!("display: framebuffer console unavailable: {error}"),
+    }
+
     // 7. Interrupt controllers.
     arch::pic::disable();
     let apic = arch::apic::init().map_err(InitError::Apic)?;
@@ -316,7 +334,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         acpi.cpu_count, acpi.ioapic_address, lines
     );
     arch::interrupts::register(SERIAL_VECTOR, arch::serial::handle_interrupt)
-        .map_err(InitError::SerialInterrupt)?;
+        .map_err(InitError::InputInterrupt)?;
     // The I/O APIC's physical destination field is 8 bits wide; the boot
     // CPU's ID always fits on machines this kernel can currently boot.
     arch::ioapic::enable(acpi.serial_irq, SERIAL_VECTOR, apic.id as u8)
@@ -326,6 +344,16 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         "console: serial input enabled (GSI {} -> vector {})",
         acpi.serial_irq.gsi, SERIAL_VECTOR
     );
+    arch::ps2::init(console::push_input);
+    arch::interrupts::register(KEYBOARD_VECTOR, arch::ps2::handle_interrupt)
+        .map_err(InitError::InputInterrupt)?;
+    arch::ioapic::enable(acpi.keyboard_irq, KEYBOARD_VECTOR, apic.id as u8)
+        .map_err(InitError::IoApic)?;
+    info!(
+        "console: PS/2 keyboard input enabled (GSI {} -> vector {})",
+        acpi.keyboard_irq.gsi, KEYBOARD_VECTOR
+    );
+    ui::refresh_status();
 
     // 10. Audit the final address space, including the mappings made above.
     // SAFETY: `boot_info` is validated and describes the active address

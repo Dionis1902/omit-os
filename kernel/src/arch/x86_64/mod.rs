@@ -16,6 +16,7 @@ pub mod paging;
 pub mod pic;
 mod pit;
 mod port;
+pub mod ps2;
 pub mod qemu;
 pub mod serial;
 

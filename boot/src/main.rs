@@ -35,8 +35,10 @@ use omit_bootproto::{
 };
 use omit_elf::{EM_X86_64, ET_EXEC, Elf64};
 use uefi::boot::{self, AllocateType, MemoryType};
+use uefi::boot::{OpenProtocolAttributes, OpenProtocolParams};
 use uefi::mem::memory_map::MemoryMap;
 use uefi::prelude::*;
+use uefi::proto::console::gop::{GraphicsOutput, PixelFormat};
 use uefi::proto::media::file::{Directory, File, FileAttribute, FileMode, RegularFile};
 use uefi::table::cfg::ConfigTableEntry;
 use uefi::{CStr16, system};
@@ -305,6 +307,54 @@ fn memory_kind(ty: MemoryType) -> MemoryKind {
     }
 }
 
+/// The firmware's linear framebuffer, in boot-protocol terms.
+#[derive(Clone, Copy, Default)]
+struct Framebuffer {
+    phys: u64,
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: u32,
+}
+
+/// Describes the framebuffer of the current graphics mode, if the firmware
+/// has a Graphics Output Protocol with a 32-bit direct-colour mode. The
+/// mode is not changed.
+fn find_framebuffer() -> Option<Framebuffer> {
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>().ok()?;
+    // SAFETY: the protocol is opened non-exclusively ("get protocol") so the
+    // firmware's own console keeps working on the same device; it is only
+    // queried, and the handle is closed when `gop` is dropped at the end of
+    // this function, before boot services are exited.
+    let mut gop = unsafe {
+        boot::open_protocol::<GraphicsOutput>(
+            OpenProtocolParams {
+                handle,
+                agent: boot::image_handle(),
+                controller: None,
+            },
+            OpenProtocolAttributes::GetProtocol,
+        )
+    }
+    .ok()?;
+
+    let info = gop.current_mode_info();
+    let format = match info.pixel_format() {
+        PixelFormat::Rgb => omit_bootproto::FRAMEBUFFER_RGB,
+        PixelFormat::Bgr => omit_bootproto::FRAMEBUFFER_BGR,
+        // Bitmask layouts and BLT-only devices are not supported.
+        _ => return None,
+    };
+    let (width, height) = info.resolution();
+    Some(Framebuffer {
+        phys: gop.frame_buffer().as_mut_ptr() as u64,
+        width: u32::try_from(width).ok()?,
+        height: u32::try_from(height).ok()?,
+        stride: u32::try_from(info.stride()).ok()?,
+        format,
+    })
+}
+
 /// CPU capabilities the loader depends on.
 struct CpuFeatures {
     pages_1g: bool,
@@ -469,6 +519,15 @@ fn run() -> Result<core::convert::Infallible, Error> {
         phys_map_size >> 30,
         if cpu.pages_1g { "1 GiB" } else { "2 MiB" },
     );
+    let framebuffer = find_framebuffer().unwrap_or_default();
+    if framebuffer.format != omit_bootproto::FRAMEBUFFER_NONE {
+        println!(
+            "framebuffer: {}x{} at phys {:#x}",
+            framebuffer.width, framebuffer.height, framebuffer.phys
+        );
+    } else {
+        println!("framebuffer: none (serial console only)");
+    }
     println!("exiting boot services");
 
     // --- Point of no return -----------------------------------------------
@@ -521,6 +580,11 @@ fn run() -> Result<core::convert::Infallible, Error> {
         },
         cmdline_addr: PHYS_MAP_BASE + cmdline_phys,
         cmdline_len: cmdline.len() as u64,
+        framebuffer_phys: framebuffer.phys,
+        framebuffer_width: framebuffer.width,
+        framebuffer_height: framebuffer.height,
+        framebuffer_stride: framebuffer.stride,
+        framebuffer_format: framebuffer.format,
     };
     // SAFETY: `info_phys` is the page-aligned start of the boot-info
     // allocation, large enough for a `BootInfo` and not aliased.

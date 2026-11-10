@@ -26,6 +26,8 @@ QEMU (needs the OVMF firmware package):
 qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-*-x86_64.iso -serial stdio
 ```
 
+A window shows the Omit OS console; you can type in it or in the terminal.
+
 VirtualBox / VMware: create a 64-bit "Other" VM, **enable EFI**, attach the
 ISO as an optical drive.
 

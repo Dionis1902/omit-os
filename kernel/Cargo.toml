@@ -18,6 +18,10 @@ omit-acpi.workspace = true
 omit-bootproto.workspace = true
 omit-mm.workspace = true
 omit-shell.workspace = true
+omit-term.workspace = true
+# Pre-rasterised Noto Sans Mono glyphs for the framebuffer console (crate:
+# MIT; font: SIL OFL 1.1). Default features: regular weight, 16 px, ASCII.
+noto-sans-mono-bitmap = "0.4"
 omit-vfs.workspace = true
 
 [lints]

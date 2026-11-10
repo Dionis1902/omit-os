@@ -7,6 +7,7 @@ members = [
     "libs/bootproto",
     "libs/elf",
     "libs/mm",
+    "libs/term",
     "libs/vfs",
     "shell",
     "tools/xtask",
@@ -18,6 +19,7 @@ default-members = [
     "libs/bootproto",
     "libs/elf",
     "libs/mm",
+    "libs/term",
     "libs/vfs",
     "shell",
     "tools/xtask",
@@ -36,6 +38,7 @@ omit-bootproto = { path = "libs/bootproto" }
 omit-elf = { path = "libs/elf" }
 omit-mm = { path = "libs/mm" }
 omit-shell = { path = "shell" }
+omit-term = { path = "libs/term" }
 omit-vfs = { path = "libs/vfs" }
 
 [workspace.lints.rust]

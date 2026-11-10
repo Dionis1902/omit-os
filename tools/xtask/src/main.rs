@@ -287,7 +287,14 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
 /// Builds the QEMU command line for booting `image`.
 ///
 /// `vars` is a private, writable copy of the firmware variable store.
-fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command> {
+/// `monitor`, if given, is the path of a Unix socket on which QEMU offers
+/// its human monitor (used by tests to press keys and take screenshots).
+fn qemu_command(
+    image: &Path,
+    vars: &Path,
+    monitor: Option<&Path>,
+    options: &Options,
+) -> Result<Command> {
     let media = if options.iso {
         format!(
             "format=raw,media=cdrom,readonly=on,file={}",
@@ -321,9 +328,19 @@ fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command>
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
-        .args(["-monitor", "none"])
         .args(["-nic", "none"])
         .arg("-no-reboot");
+    match monitor {
+        Some(socket) => {
+            let _ = fs::remove_file(socket);
+            command
+                .arg("-monitor")
+                .arg(format!("unix:{},server,nowait", socket.display()));
+        }
+        None => {
+            command.args(["-monitor", "none"]);
+        }
+    }
     Ok(command)
 }
 
@@ -373,7 +390,7 @@ fn cmd_dist(options: &Options) -> Result<()> {
 fn cmd_run(options: &Options) -> Result<ExitCode> {
     let image = cmd_image(options)?;
     let vars = out_dir(options)?.join("ovmf-vars.fd");
-    let mut command = qemu_command(&image, &vars, options)?;
+    let mut command = qemu_command(&image, &vars, None, options)?;
     if options.gdb {
         command.args(["-s", "-S"]);
         eprintln!("xtask: QEMU is paused; attach with `gdb -ex 'target remote :1234'`");
@@ -405,6 +422,10 @@ struct BootTest {
     /// appears, and `exit` is sent at the end. Output is matched with line
     /// endings normalised to `\n`.
     script: &'static [(&'static str, &'static str)],
+    /// Also test the screen and keyboard: after the script, type a command
+    /// on the emulated PS/2 keyboard, check that it runs, then take a
+    /// screenshot and check what the framebuffer console drew.
+    display: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -427,6 +448,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[],
+        display: false,
     },
     BootTest {
         name: "shell-session",
@@ -476,6 +498,20 @@ const BOOT_TESTS: &[BootTest] = &[
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],
+        display: false,
+    },
+    BootTest {
+        name: "display-and-keyboard",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            SUCCESS_MESSAGE,
+            "[INFO ] display: framebuffer console",
+            "[INFO ] console: PS/2 keyboard input enabled",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[("echo typed-on-serial", "\ntyped-on-serial\n")],
+        display: true,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -490,6 +526,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL EXCEPTION"],
         script: &[],
+        display: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -502,6 +539,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
+        display: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -514,6 +552,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC", "[ERROR]"],
         script: &[],
+        display: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -525,6 +564,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
+        display: false,
     },
 ];
 
@@ -534,6 +574,165 @@ struct QemuRun {
     exit: Option<i32>,
     serial: String,
     elapsed: Duration,
+}
+
+/// Where to reach QEMU's monitor and where to put the screenshot.
+struct DisplayCheck {
+    monitor: PathBuf,
+    screenshot: PathBuf,
+}
+
+/// QEMU key names that type `echo kbd-ok` followed by Enter.
+const KEYBOARD_TEST_KEYS: &[&str] = &[
+    "e", "c", "h", "o", "spc", "k", "b", "d", "minus", "o", "k", "ret",
+];
+const KEYBOARD_TEST_OUTPUT: &str = "\nkbd-ok\n";
+
+/// Colours the kernel's framebuffer console uses; must match
+/// `kernel/src/fbcon.rs`.
+const SCREEN_BACKGROUND: [u8; 3] = [0x10, 0x14, 0x1C];
+const SCREEN_FOREGROUND: [u8; 3] = [0xD0, 0xD4, 0xDC];
+const SCREEN_STATUS_BACKGROUND: [u8; 3] = [0x2F, 0x6F, 0xDE];
+const SCREEN_STATUS_FOREGROUND: [u8; 3] = [0xFF, 0xFF, 0xFF];
+/// Height of one text row in pixels.
+const SCREEN_ROW_HEIGHT: usize = 16;
+
+/// Sends one command to QEMU's human monitor.
+#[cfg(unix)]
+fn monitor_command(socket: &Path, command: &str) -> Result<()> {
+    use std::os::unix::net::UnixStream;
+    let mut stream = UnixStream::connect(socket)?;
+    stream.write_all(format!("{command}\n").as_bytes())?;
+    // Give QEMU time to read and act before the connection closes.
+    thread::sleep(Duration::from_millis(60));
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn monitor_command(_socket: &Path, _command: &str) -> Result<()> {
+    Err("the QEMU monitor is only supported on Unix hosts".into())
+}
+
+/// Presses `keys` one after another on the emulated keyboard.
+fn type_on_keyboard(monitor: &Path, keys: &[&str]) -> Result<()> {
+    for key in keys {
+        // Hold each key for 20 ms.
+        monitor_command(monitor, &format!("sendkey {key} 20"))?;
+    }
+    Ok(())
+}
+
+/// A decoded binary PPM image.
+struct Screenshot {
+    width: usize,
+    height: usize,
+    /// RGB triples, row by row.
+    pixels: Vec<u8>,
+}
+
+impl Screenshot {
+    fn pixel(&self, x: usize, y: usize) -> [u8; 3] {
+        let at = (y * self.width + x) * 3;
+        [self.pixels[at], self.pixels[at + 1], self.pixels[at + 2]]
+    }
+
+    /// Counts pixels of exactly `colour` in rows `rows`.
+    fn count(&self, rows: std::ops::Range<usize>, colour: [u8; 3]) -> usize {
+        rows.flat_map(|y| (0..self.width).map(move |x| (x, y)))
+            .filter(|&(x, y)| self.pixel(x, y) == colour)
+            .count()
+    }
+}
+
+/// Parses a binary PPM (`P6`, 8 bits per channel) as written by QEMU.
+fn parse_ppm(data: &[u8]) -> Result<Screenshot> {
+    let mut fields = Vec::new();
+    let mut at = 0;
+    while fields.len() < 4 {
+        while data.get(at).is_some_and(u8::is_ascii_whitespace) {
+            at += 1;
+        }
+        let start = at;
+        while data.get(at).is_some_and(|b| !b.is_ascii_whitespace()) {
+            at += 1;
+        }
+        if start == at {
+            return Err("truncated PPM header".into());
+        }
+        fields.push(std::str::from_utf8(&data[start..at])?.to_owned());
+    }
+    if fields[0] != "P6" || fields[3] != "255" {
+        return Err("not an 8-bit binary PPM".into());
+    }
+    let (width, height): (usize, usize) = (fields[1].parse()?, fields[2].parse()?);
+    // Exactly one whitespace byte separates the header from the pixels.
+    let pixels = data
+        .get(at + 1..at + 1 + width * height * 3)
+        .ok_or("truncated PPM data")?
+        .to_vec();
+    Ok(Screenshot {
+        width,
+        height,
+        pixels,
+    })
+}
+
+/// Asks QEMU for a screenshot and waits for the file to be complete.
+fn take_screenshot(monitor: &Path, path: &Path) -> Result<Screenshot> {
+    let _ = fs::remove_file(path);
+    monitor_command(monitor, &format!("screendump {}", path.display()))?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(data) = fs::read(path)
+            && let Ok(image) = parse_ppm(&data)
+        {
+            return Ok(image);
+        }
+        if Instant::now() >= deadline {
+            return Err("QEMU did not produce a screenshot".into());
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Checks that a screenshot shows the kernel's console: a status bar with
+/// text on the first row and light text on the dark background below.
+fn check_screenshot(image: &Screenshot) -> Vec<String> {
+    let mut failures = Vec::new();
+    if image.width < 640 || image.height < 400 {
+        failures.push(format!(
+            "screenshot is only {}x{}",
+            image.width, image.height
+        ));
+        return failures;
+    }
+    let bar = 0..SCREEN_ROW_HEIGHT;
+    let text = SCREEN_ROW_HEIGHT..image.height;
+    let text_pixels = (image.height - SCREEN_ROW_HEIGHT) * image.width;
+
+    if image.pixel(2, 2) != SCREEN_STATUS_BACKGROUND {
+        failures.push(format!(
+            "top-left pixel is {:02x?}, not the status bar colour",
+            image.pixel(2, 2)
+        ));
+    }
+    // Glyphs are anti-aliased, so only their cores are pure white.
+    if image.count(bar.clone(), SCREEN_STATUS_FOREGROUND) < 30 {
+        failures.push("status bar shows no text".into());
+    }
+    if image.count(bar, SCREEN_BACKGROUND) != 0 {
+        failures.push("status bar does not span the screen width".into());
+    }
+    if image.count(text.clone(), SCREEN_BACKGROUND) < text_pixels / 2 {
+        failures.push("text area does not have the console background".into());
+    }
+    if image.count(text.clone(), SCREEN_FOREGROUND) < 500 {
+        failures.push("text area shows no text".into());
+    }
+    if image.count(text, SCREEN_STATUS_BACKGROUND) != 0 {
+        failures.push("status bar colour leaked into the text area".into());
+    }
+    failures
 }
 
 /// Finds the first shell prompt (`omit:<cwd># `) at or after `from` and
@@ -559,6 +758,7 @@ fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
 fn run_qemu_captured(
     mut command: Command,
     script: &[(&str, &str)],
+    display: Option<&DisplayCheck>,
     timeout: Duration,
     failures: &mut Vec<String>,
 ) -> Result<QemuRun> {
@@ -634,6 +834,30 @@ fn run_qemu_captured(
                 ));
             }
         }
+        if let (Some(check), Some(from)) = (display, position) {
+            // Type on the emulated PS/2 keyboard; the command's output on
+            // the serial console proves the key presses arrived.
+            match type_on_keyboard(&check.monitor, KEYBOARD_TEST_KEYS) {
+                Ok(()) => match wait_for_prompt(from) {
+                    Some(to) => {
+                        let produced =
+                            String::from_utf8_lossy(&output.lock().expect("output lock")[from..to])
+                                .replace("\r\n", "\n");
+                        if !produced.contains(KEYBOARD_TEST_OUTPUT) {
+                            failures.push(format!(
+                                "keyboard input: expected {KEYBOARD_TEST_OUTPUT:?} in {produced:?}"
+                            ));
+                        }
+                    }
+                    None => failures.push("no prompt after keyboard input".into()),
+                },
+                Err(error) => failures.push(format!("cannot type on the keyboard: {error}")),
+            }
+            match take_screenshot(&check.monitor, &check.screenshot) {
+                Ok(image) => failures.extend(check_screenshot(&image)),
+                Err(error) => failures.push(format!("cannot take a screenshot: {error}")),
+            }
+        }
         let _ = stdin.write_all(b"exit\r");
     }
     drop(stdin);
@@ -682,12 +906,25 @@ fn run_boot_test(
     let cmdline = format!("qemu-exit {shell}{}", test.cmdline);
     build_media(artifacts, cmdline.trim(), &image, options)?;
     let mut failures = Vec::new();
+    let display = test.display.then(|| DisplayCheck {
+        monitor: dir.join(format!("test-{}.monitor", test.name)),
+        screenshot: dir.join(format!("test-{}.screen.ppm", test.name)),
+    });
     let run = run_qemu_captured(
-        qemu_command(&image, &vars, options)?,
+        qemu_command(
+            &image,
+            &vars,
+            display.as_ref().map(|d| d.monitor.as_path()),
+            options,
+        )?,
         test.script,
+        display.as_ref(),
         timeout,
         &mut failures,
     )?;
+    if let Some(display) = &display {
+        let _ = fs::remove_file(&display.monitor);
+    }
     fs::write(&log, &run.serial)?;
 
     match run.exit {

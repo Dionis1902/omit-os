@@ -50,6 +50,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "noto-sans-mono-bitmap"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "09b7b72dee69e4110d1b91fb8d497c1b74a54082da5738dff84136142c4f767b"
+
+[[package]]
 name = "omit-acpi"
 version = "0.1.0"
 
@@ -74,10 +80,12 @@ version = "0.1.0"
 name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
+ "noto-sans-mono-bitmap",
  "omit-acpi",
  "omit-bootproto",
  "omit-mm",
  "omit-shell",
+ "omit-term",
  "omit-vfs",
 ]
 
@@ -91,6 +99,10 @@ version = "0.1.0"
 dependencies = [
  "omit-vfs",
 ]
+
+[[package]]
+name = "omit-term"
+version = "0.1.0"
 
 [[package]]
 name = "omit-vfs"
