@@ -288,7 +288,8 @@ protocol for other programs' windows.
 | Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
 | Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
 | A terminal emulator, resizable windows, graphics modes | Not started |
-| GPU drivers and acceleration, Vulkan, Direct3D, games | Not started; requirements and a proposed order of work are in ADR 0013 |
+| A small game (`/bin/pop`: click the shrinking discs) redrawing 50 times a second, with frame pacing against the clock | Working; the QEMU test plays one move and the game reports its frame intervals (average 20.0 ms at the intended 20 ms, longest 25–30 ms under emulation; ADR 0013). Not synchronised to the display, and only multiples of the 10 ms timer tick can be paced |
+| GPU drivers and acceleration, Vulkan, Direct3D, existing games | Not started; requirements and a proposed order of work are in ADR 0013 |
 | Windows threads: `CreateThread`, exit codes, `WaitForSingleObject`, events, critical sections, `Tls*` storage, per-thread TEB | Working, tested by a multi-threaded Windows program (44 checks) |
 | Windows: C runtime, exceptions, static TLS, graphics, registry, networking, 32-bit programs | Not started |
 

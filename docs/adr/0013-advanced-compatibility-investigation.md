@@ -53,10 +53,25 @@ not been analysed (candidates: large repaints, and the host scheduling the
 emulator). These are emulation numbers on a shared machine: they show the
 direction of the change, not what a user would see on hardware.
 
-**Frame pacing does not exist yet**, and cannot with the current display
-path: the firmware framebuffer has no vertical-blank signal, so there is
-nothing to pace against, and updates are copied as soon as they are
-drawn. Tearing is possible. Timers still have 10 ms resolution.
+**Frame pacing against the display does not exist**, and cannot with the
+current display path: the firmware framebuffer has no vertical-blank
+signal, so there is nothing to synchronise with, and updates are copied
+as soon as they are drawn. Tearing is possible. Timers still have 10 ms
+resolution.
+
+*Update — pacing against the clock, measured.* The first program that
+redraws continuously, the game `/bin/pop`, schedules each frame a fixed
+20 ms after the previous one was due and reports on exit how evenly its
+frames were actually shown. In the `desktop` test (QEMU software
+emulation, the game's window composited by the desktop, about five
+seconds of play): release build, 269 frames, average interval 20.0 ms,
+longest 25.2 ms, none more than half a frame late; debug build, 282
+frames, average 20.0 ms, longest 29.7 ms, none late. So a steady 50
+frames per second is achievable through the whole path — program,
+shared memory, desktop, kernel blit. Two limits are structural: frame
+times can only be multiples of the 10 ms timer tick (60 Hz cannot be
+paced evenly), and nothing ties a frame to the screen's refresh. As
+with the latency figures, these are emulation numbers.
 
 ## Investigated only: Direct3D, Vulkan, games, GPU performance
 

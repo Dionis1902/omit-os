@@ -181,6 +181,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ls",
     "memtest",
     "pipetest",
+    "pop",
     "run",
     "scribble",
     "sleeper",
@@ -733,7 +734,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -1809,7 +1810,7 @@ impl<'a> Mouse<'a> {
 
 /// Labels of the desktop's task bar buttons; must match
 /// `userspace/programs/src/bin/desktop/main.rs`.
-const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Exit"];
+const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Pop", "Exit"];
 
 /// Operates the graphical desktop, which the caller has just started from
 /// the serial console, and checks what it shows:
@@ -2055,6 +2056,54 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         ) && screen_shows(image, "wingui: 32 startup checks passed")
             && screen_shows(image, "> _")
     })?;
+
+    // A game, redrawing fifty times a second. In test mode its discs
+    // appear at known places and stay. (The message box was the fifth
+    // window; the game's is the sixth.)
+    layout.open(Box::new(Blank), 200, 100);
+    let pop = layout.open(Box::new(Blank), 400, 300);
+    let frame = layout
+        .window_frame(pop)
+        .ok_or("no frame for the sixth window")?;
+    let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+    let at =
+        |image: &Screenshot, x: i32, y: i32| image.pixel((left + x) as usize, (top + y) as usize);
+    let status =
+        |image: &Screenshot, text: &str| screen_shows_in(image, text, 0xF0_F4_FF, 0x1E_2A_44);
+    type_on_keyboard(
+        &check.monitor,
+        &[
+            "p", "o", "p", "spc", "minus", "minus", "t", "e", "s", "t", "ret",
+        ],
+    )?;
+    wait_for_screen(check, "the game's first disc", patience, |image| {
+        title(image, "Pop")
+            && status(image, "score: 0   lives: 3")
+            && at(image, 100, 120) == rgb(0xE8_5D_4A)
+    })?;
+    // A click on the disc pops it; the next one appears elsewhere.
+    mouse.click(left + 100, top + 120)?;
+    mouse.move_to(left + 20, top + 280)?;
+    wait_for_screen(check, "the score after popping a disc", patience, |image| {
+        status(image, "score: 1   lives: 3")
+            && at(image, 100, 120) == rgb(0x12_1A_2B)
+            && at(image, 280, 200) == rgb(0x4A_B8_E8)
+    })?;
+    // A click beside the disc changes nothing. Then let the game run for
+    // a few seconds, so that the frame pacing figures it reports on exit
+    // cover more than a moment.
+    mouse.click(left + 200, top + 250)?;
+    mouse.move_to(left + 20, top + 280)?;
+    thread::sleep(Duration::from_secs(4));
+    type_on_keyboard(&check.monitor, &["q"])?;
+    wait_for_screen(check, "the game's report", patience, |image| {
+        screen_shows(image, "pop: score 1;") && screen_shows(image, "> _")
+    })?;
+    // Kept for the frame pacing figures the game reports.
+    let _ = fs::copy(
+        &check.screenshot,
+        check.screenshot.with_extension("pop-report.ppm"),
+    );
 
     // The Run window is the second one opened; drag it by its title bar
     // (the About window does not reach this far right).

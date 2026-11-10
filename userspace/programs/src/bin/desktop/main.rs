@@ -71,7 +71,11 @@ fn main() -> i32 {
     // Programs with windows of their own, started from the task bar.
     // They are only started here; their windows arrive through `server`.
     let children: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
-    for (label, program) in [("Scribble", "/bin/scribble"), ("Clock", "/bin/clock")] {
+    for (label, program) in [
+        ("Scribble", "/bin/scribble"),
+        ("Clock", "/bin/clock"),
+        ("Pop", "/bin/pop"),
+    ] {
         let children = children.clone();
         desktop.add_launcher(label, move |_| {
             if let Ok(pid) = omit_rt::spawn(program, &[program]) {
