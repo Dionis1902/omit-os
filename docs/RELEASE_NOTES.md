@@ -101,6 +101,8 @@ ping 10.0.2.2        echo requests to an IPv4 address
 host example.org     look a name up (needs a network that reaches a name
                      server)
 tftp 10.0.2.2 FILE   fetch a file from a TFTP server
+fetch http://HOST/FILE [DEST]
+                     download over HTTP (no https)
 desktop              a graphical desktop (needs a mouse: PS/2, as virtual
                      machines provide, or USB); Exit or F12 returns to the
                      console
@@ -121,9 +123,9 @@ Networking is a first step too: with a VirtIO network card (QEMU:
 type "Paravirtualized Network (virtio-net)") the system gets an address by
 DHCP; `ifconfig` and `ping` work, and programs can use UDP: `host` looks
 names up and `tftp` fetches files (QEMU has a TFTP server built in:
-`-netdev user,id=n,tftp=DIRECTORY`). There is no TCP yet — no web, no
-remote login — and no other network card has a driver. Only QEMU has
-been tried.
+`-netdev user,id=n,tftp=DIRECTORY`), and TCP: `fetch` downloads from
+`http://` addresses. There is no TLS, so no `https`, and no other
+network card has a driver. Only QEMU has been tried.
 
 On a real computer: the keyboard must be PS/2 (as built into many
 laptops) or USB. A serial port is not needed.

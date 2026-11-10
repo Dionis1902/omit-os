@@ -1,4 +1,4 @@
-# ADR 0022: Networking — a first network card, the base of IPv4, UDP sockets
+# ADR 0022: Networking — a first network card, IPv4, UDP and TCP sockets
 
 - Status: accepted
 - Date: 2026-11-10
@@ -55,17 +55,45 @@ covers the first step and says where it stops.
   of DNS questions and answers (RFC 1035) and of TFTP (RFC 1350),
   written from the RFCs and host-tested. The kernel-side library is
   GPL-2.0-only and programs do not link it; the two share no code.
+- **TCP** (RFC 9293), in two parts. The protocol — segment format and
+  one connection's state machine — is in `libs/net` like the rest:
+  no I/O, no clock, tested on the build machine. The kernel keeps the
+  connections and listeners, gives them the segments that arrive and
+  sends what they ask to have sent, from one place, each time the
+  interface has looked for received frames. System calls `tcp_connect`,
+  `tcp_listen`, `tcp_accept` and `tcp_shutdown`; a connection is then
+  read, written, polled and closed like any descriptor. A connection
+  outlives its descriptor until what was written has been delivered
+  (for at most 30 seconds).
+- It is a small TCP: data is taken only in order (an early segment is
+  dropped and asked for again); unacknowledged data is resent from the
+  first missing byte after a fixed one second that doubles up to eight;
+  every data segment is acknowledged at once; there is **no congestion
+  control** — at most one 8 KiB send buffer is ever in flight — and no
+  options but the maximum segment size, so no window scaling, selective
+  acknowledgement or timestamps. Segments for nothing are answered
+  with resets.
+- `libs/inet` gains the little of HTTP that fetching a file takes.
+  Programs `fetch http://HOST[:PORT]/PATH [FILE]` and `echod PORT`;
+  the runtime has `TcpStream`, `TcpListener` and `lookup`, so `fetch`
+  and `tftp` take names as well as addresses.
 - Programs `host NAME [SERVER[:PORT]]` (looks a name up, by default at
   the name server DHCP announced) and `tftp SERVER FILE [DESTINATION]`
   (fetches a file).
 
 ## What works
 
-- 52 host tests in `libs/net`: every format against hand-checked bytes
+- 81 host tests in `libs/net`: every format against hand-checked bytes
   and against damage and truncation; the state machine through address
   resolution, routing through the router, answering ARP and echo
   requests, the full DHCP exchange, its retries, refusal and giving up,
-  and UDP to and from local ports. 15 host tests in `libs/inet`.
+  and UDP to and from local ports. For TCP: the handshake both ways,
+  refusal, retransmission and giving up, windows and window probes,
+  every order of closing, resets — and two connections exchanging data
+  through a simulated network that loses, duplicates and reorders
+  segments, 61 conversations that must each deliver every byte intact
+  (four deliberately planted bugs were each caught by these tests).
+  22 host tests in `libs/inet`.
 - QEMU test `network`: a VirtIO card on QEMU's user-mode network gets
   `10.0.2.15/24` with router and name server from QEMU's DHCP server;
   `ping 10.0.2.2` resolves the gateway by ARP and gets three replies;
@@ -78,13 +106,31 @@ covers the first step and says where it stops.
   runs on the host: a known name, an unknown one, a port where nobody
   answers. `nettest` checks the system calls themselves: port
   conflicts, timeouts, `poll`, queueing in order, datagrams cut to the
-  buffer, and bad descriptors, sizes and pointers.
+  buffer, and bad descriptors, sizes and pointers. Over TCP: `fetch`
+  downloads from a web server the test runs on the host — a small
+  file, the same 300 KB program compared byte for byte, a body without
+  a stated length — and reports a missing page, a redirect, a body cut
+  short, a closed port and an absent host. In the other direction the
+  host connects through a forwarded port to `echod` in the guest,
+  sends 20 000 bytes and checks that they come back unchanged.
+  `nettest` checks refusals, listening, accepting with timeouts, the
+  end of a connection, writing after shutdown and two connections at
+  once.
 
 ## Limitations
 
-- **No TCP**, so nothing that needs a connection: no web, no remote
-  shell. This is the largest gap.
-- Sockets are IPv4 UDP only, without options: no broadcast permission
+- **TCP is slow and simple** (see above): fine for fetching a file on
+  a local network, unsuited to a lossy or fast link. Initial sequence
+  numbers come from the clock and a counter, which an attacker on the
+  network path could predict. The 30-second linger after closing first
+  holds the port pair for that long.
+- **No TLS**, so no `https`: most of today's web is out of reach.
+  `fetch` speaks HTTP/1.0 without redirects, compression or chunked
+  transfer.
+- No socket options: no keep-alive, no way to set buffer sizes or
+  timeouts on an open connection; a listener queues at most eight
+  connections; any program may listen on any port.
+- UDP sockets are IPv4 only, without options: no broadcast permission
   to ask for, no multicast, no connected sockets, no way to learn which
   port the kernel chose. Any program may bind any free port. Nothing is
   sent back when a datagram arrives for a port nobody listens on.
@@ -106,6 +152,8 @@ covers the first step and says where it stops.
 - **Tested only against QEMU's emulated card and its built-in network.**
   Answering echo requests and replies arriving through a router are
   covered by host tests only, since QEMU's user-mode network sends the
-  guest no requests. `host` has not been run against a real name
-  server from here: the build environment has no outside network. Real network cards (Intel, Realtek, wireless) have
+  guest no requests. Neither `host` nor `fetch` has been run against a
+  real server on the internet from here: the build environment has no
+  outside network. TCP has only ever talked to QEMU's built-in network
+  and, in host tests, to itself. Real network cards (Intel, Realtek, wireless) have
   no driver.

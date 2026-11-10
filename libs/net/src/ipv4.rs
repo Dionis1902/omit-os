@@ -9,6 +9,8 @@ pub const HEADER_LEN: usize = 20;
 
 /// Protocol number of ICMP.
 pub const PROTOCOL_ICMP: u8 = 1;
+/// Protocol number of TCP.
+pub const PROTOCOL_TCP: u8 = 6;
 /// Protocol number of UDP.
 pub const PROTOCOL_UDP: u8 = 17;
 

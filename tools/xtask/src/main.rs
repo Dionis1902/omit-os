@@ -176,6 +176,8 @@ const USER_PROGRAMS: &[&str] = &[
     "crash",
     "desktop",
     "echo",
+    "echod",
+    "fetch",
     "fileops",
     "hello",
     "host",
@@ -762,7 +764,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nhost\nipctest\nls\nmemtest\nnettest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\ntftp\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nechod\nfetch\nfileops\nhello\nhost\nipctest\nls\nmemtest\nnettest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\ntftp\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -1706,7 +1708,60 @@ const BOOT_TESTS: &[BootTest] = &[
             ("host 10.0.2.2", "\n10.0.2.2 is an address already\n"),
             // The socket system calls themselves, including what they
             // must refuse.
-            ("nettest 10.0.2.2 15353", "\nnettest: all checks passed\n"),
+            (
+                "nettest 10.0.2.2 15353 18080",
+                "\nnettest: all checks passed\n",
+            ),
+            // TCP, from a program: files fetched over HTTP from a web
+            // server the test runs on the host.
+            (
+                "fetch http://10.0.2.2:18080/hello.txt",
+                "\nHello from the test server\nomit:/# ",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/desktop /desktop.http",
+                " bytes, stored as /desktop.http\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.http",
+                "cmp /bin/desktop /desktop.http\nomit:/# ",
+            ),
+            // A body whose end is the end of the connection.
+            (
+                "fetch http://10.0.2.2:18080/nolength",
+                "\nno length given\nomit:/# ",
+            ),
+            // What a server can say instead, and what can go wrong.
+            (
+                "fetch http://10.0.2.2:18080/missing /missing",
+                "\nfetch: the server says: 404 Not Found\n",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/moved",
+                "(301 Moved Permanently); redirects are not followed\n",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/short /short.http",
+                "\nfetch: the connection ended after 9 of 100 bytes\n",
+            ),
+            ("cat /short.http", "/short.http: No such file or directory"),
+            (
+                "fetch http://10.0.2.2:18081/",
+                "\nfetch: 10.0.2.2: nothing listens on that port\n",
+            ),
+            (
+                "fetch http://10.0.2.99/",
+                "\nfetch: 10.0.2.99: the host cannot be reached\n",
+            ),
+            (
+                "fetch https://example.org/",
+                "only http:// addresses can be fetched (there is no TLS)\n",
+            ),
+            // The other direction: a server in the guest, reached from
+            // the host through a forwarded port. The host sends 20 000
+            // bytes and checks that they come back unchanged (see
+            // `start_test_echo_client`).
+            ("echod 7 1", "\nechod: echoed 20000 bytes for 10.0.2.2\n"),
         ],
         reboot_script: &[],
         ends_with_reset: false,
@@ -2906,6 +2961,129 @@ fn start_test_name_server() -> Result<()> {
     Ok(())
 }
 
+/// TCP port, on the host's loopback address, of the web server the
+/// `network` test fetches from.
+const TEST_WEB_SERVER_PORT: u16 = 18080;
+/// TCP port on the host that QEMU forwards to port 7 of the guest, where
+/// the `network` test runs an echo server.
+const TEST_ECHO_HOST_PORT: u16 = 17007;
+/// Bytes the test sends through the guest's echo server.
+const TEST_ECHO_LEN: usize = 20_000;
+
+/// The directory the test web server serves `/desktop` from.
+static WEB_FILES: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// Whether the echo client has had its data back from the guest intact
+/// since it was last started.
+static ECHO_SUCCEEDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Starts, once, a small web server for the `network` test. It answers
+/// one request per connection and closes, as the guest's HTTP/1.0
+/// requests ask.
+fn start_test_web_server(files: &Path) -> Result<()> {
+    use std::net::TcpListener;
+    use std::sync::OnceLock;
+    *WEB_FILES.lock().map_err(|_| "web server state")? = Some(files.to_path_buf());
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.get().is_some() {
+        return Ok(());
+    }
+    let listener = TcpListener::bind(("127.0.0.1", TEST_WEB_SERVER_PORT)).map_err(|error| {
+        format!("cannot listen on TCP port {TEST_WEB_SERVER_PORT} for the network test: {error}")
+    })?;
+    let _ = STARTED.set(());
+    thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            thread::spawn(move || {
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
+                // The request head.
+                let mut request = Vec::new();
+                let mut byte = [0u8; 1];
+                while !request.ends_with(b"\r\n\r\n") && request.len() < 4096 {
+                    match stream.read(&mut byte) {
+                        Ok(1) => request.push(byte[0]),
+                        _ => return,
+                    }
+                }
+                let request = String::from_utf8_lossy(&request);
+                let path = request.split(' ').nth(1).unwrap_or("");
+                let with_length = |status: &str, body: &[u8]| {
+                    let mut response = format!(
+                        "HTTP/1.1 {status}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .into_bytes();
+                    response.extend_from_slice(body);
+                    response
+                };
+                let response = match path {
+                    "/hello.txt" => with_length("200 OK", b"Hello from the test server\n"),
+                    "/desktop" => {
+                        let file = WEB_FILES
+                            .lock()
+                            .ok()
+                            .and_then(|files| files.clone())
+                            .and_then(|files| fs::read(files.join("desktop")).ok());
+                        match file {
+                            Some(bytes) => with_length("200 OK", &bytes),
+                            None => with_length("500 Internal Server Error", b""),
+                        }
+                    }
+                    // No length: the body ends where the connection does.
+                    "/nolength" => {
+                        b"HTTP/1.0 200 OK\r\n\r\nno length given\n".to_vec()
+                    }
+                    // Claims more than it sends.
+                    "/short" => {
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this".to_vec()
+                    }
+                    "/moved" => b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://10.0.2.2:18080/hello.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                    _ => with_length("404 Not Found", b"not here\n"),
+                };
+                let _ = stream.write_all(&response);
+            });
+        }
+    });
+    Ok(())
+}
+
+/// Starts a thread that keeps trying, for two minutes, to send
+/// [`TEST_ECHO_LEN`] bytes through the echo server the `network` test
+/// starts in the guest, and to get them back unchanged. Until the guest
+/// listens, QEMU accepts the connection and then drops it.
+fn start_test_echo_client() {
+    use std::net::{Shutdown, TcpStream};
+    use std::sync::atomic::Ordering;
+    ECHO_SUCCEEDED.store(false, Ordering::SeqCst);
+    thread::spawn(|| {
+        let data: Vec<u8> = (0..TEST_ECHO_LEN).map(|i| (i % 253) as u8).collect();
+        let deadline = Instant::now() + Duration::from_secs(120);
+        while Instant::now() < deadline && !ECHO_SUCCEEDED.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(300));
+            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", TEST_ECHO_HOST_PORT)) else {
+                continue;
+            };
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+            // Writing and reading at the same time, as the echo comes
+            // back while more is still being sent.
+            let Ok(mut reader) = stream.try_clone() else {
+                continue;
+            };
+            let echoed = thread::spawn(move || {
+                let mut echoed = Vec::new();
+                let _ = reader.read_to_end(&mut echoed);
+                echoed
+            });
+            let sent = stream.write_all(&data).is_ok();
+            let _ = stream.shutdown(Shutdown::Write);
+            let echoed = echoed.join().unwrap_or_default();
+            if sent && echoed == data {
+                ECHO_SUCCEEDED.store(true, Ordering::SeqCst);
+            }
+        }
+    });
+}
+
 /// Runs one boot test; returns the list of failed expectations.
 fn run_boot_test(
     test: &BootTest,
@@ -2943,9 +3121,14 @@ fn run_boot_test(
     if test.network {
         let files = prepare_tftp_files(&dir, options)?;
         start_test_name_server()?;
+        start_test_web_server(&files)?;
+        start_test_echo_client();
         qemu_args.extend([
             "-netdev".into(),
-            format!("user,id=net0,tftp={}", files.display()),
+            format!(
+                "user,id=net0,tftp={},hostfwd=tcp:127.0.0.1:{TEST_ECHO_HOST_PORT}-:7",
+                files.display()
+            ),
             "-device".into(),
             "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56".into(),
         ]);
@@ -2999,6 +3182,11 @@ fn run_boot_test(
         let _ = fs::remove_file(&display.monitor);
     }
     let mut run = run;
+    if test.network && !ECHO_SUCCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+        failures.push(
+            "the host did not get its data back unchanged from the guest's echo server".into(),
+        );
+    }
     if !test.reboot_script.is_empty() {
         // Same machine, same data disk, fresh boot — from the boot medium
         // again, or from the data disk if the system was installed on it.

@@ -95,6 +95,10 @@ pub enum Descriptor {
     Listener(Arc<channel::Handle>),
     /// A UDP socket.
     Udp(Arc<crate::net::UdpSocket>),
+    /// A TCP connection.
+    Tcp(Arc<crate::net::tcp::TcpHandle>),
+    /// A TCP port being listened on.
+    TcpListener(Arc<crate::net::tcp::TcpListener>),
 }
 
 /// The standard streams of a new process: input, output, error. `None`

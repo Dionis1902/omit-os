@@ -1,21 +1,27 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
-//! Network protocol formats, written from the protocol specifications:
+//! Network protocols, written from the protocol specifications:
 //! Ethernet II framing, ARP (RFC 826), IPv4 (RFC 791), ICMP echo
-//! (RFC 792), UDP (RFC 768), the Internet checksum (RFC 1071) and the
-//! client side of DHCP (RFC 2131, options from RFC 2132).
+//! (RFC 792), UDP (RFC 768), TCP (RFC 9293), the Internet checksum
+//! (RFC 1071) and the client side of DHCP (RFC 2131, options from
+//! RFC 2132).
 //!
-//! Everything here is a pure function over byte slices: parsing borrows
+//! The formats are pure functions over byte slices: parsing borrows
 //! from the packet, building writes into a caller-supplied buffer and
-//! returns the length written. No allocation, no I/O, no state — the
-//! kernel's network module supplies those, and the code is tested on the
-//! build machine.
+//! returns the length written. What has state — an interface
+//! ([`stack`]), a TCP connection ([`tcp`]) — is a state machine that
+//! does no I/O and reads no clock: the kernel's network module supplies
+//! those, and the code is tested on the build machine. Only a TCP
+//! connection's two buffers are allocated.
 //!
 //! Deliberately absent: IPv4 options and fragments (packets carrying
-//! either are rejected), IPv6, TCP.
+//! either are rejected), and IPv6.
 
 #![no_std]
 #![forbid(unsafe_code)]
+
+// For the buffers of TCP connections; nothing else here allocates.
+extern crate alloc;
 
 pub mod arp;
 pub mod dhcp;
@@ -23,6 +29,7 @@ pub mod ethernet;
 pub mod icmp;
 pub mod ipv4;
 pub mod stack;
+pub mod tcp;
 pub mod udp;
 
 use core::fmt;

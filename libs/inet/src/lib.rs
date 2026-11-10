@@ -12,6 +12,7 @@
 #![forbid(unsafe_code)]
 
 pub mod dns;
+pub mod http;
 pub mod tftp;
 
 /// Parses an IPv4 address in dotted-decimal notation (`10.0.2.2`):

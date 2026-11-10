@@ -10,17 +10,12 @@
 #![no_std]
 #![no_main]
 
-use omit_inet::dns::{self, ResponseError};
-use omit_rt::abi::Errno;
+use omit_inet::dns;
 use omit_rt::abi::net::INFO_NAME_SERVER;
-use omit_rt::net::UdpSocket;
+use omit_rt::net::LookupError;
 use omit_rt::{eprintln, println};
 
 omit_rt::entry!(main);
-
-/// How long to wait for an answer before asking again.
-const TIMEOUT_MS: u64 = 2000;
-const ATTEMPTS: u32 = 3;
 
 fn show(address: [u8; 4]) -> impl core::fmt::Display {
     struct Dotted([u8; 4]);
@@ -31,56 +26,6 @@ fn show(address: [u8; 4]) -> impl core::fmt::Display {
         }
     }
     Dotted(address)
-}
-
-/// Asks `server` for the address of `name`. `Ok(None)`: no answer.
-fn lookup(name: &str, server: [u8; 4], port: u16) -> Result<Option<[u8; 4]>, &'static str> {
-    let mut query = [0u8; 300];
-    // Answers are matched to questions by this number; the clock makes
-    // it differ from one run to the next.
-    let id = omit_rt::clock_us() as u16;
-    let length = dns::write_query(&mut query, id, name).map_err(|error| match error {
-        dns::NameError::Empty => "the name is empty or has an empty part",
-        dns::NameError::TooLong => "the name is too long",
-        dns::NameError::BadCharacter => "the name contains a character names cannot have",
-    })?;
-    let socket = UdpSocket::bind(0).map_err(|_| "cannot open a socket")?;
-    for _ in 0..ATTEMPTS {
-        match socket.send_to(&query[..length], server, port) {
-            Ok(()) => {}
-            Err(Errno::Unreachable) => return Err("the name server cannot be reached"),
-            Err(_) => return Err("cannot send the question"),
-        }
-        let deadline = omit_rt::uptime_ms() + TIMEOUT_MS;
-        loop {
-            let remaining = deadline.saturating_sub(omit_rt::uptime_ms());
-            if remaining == 0 {
-                break;
-            }
-            let mut answer = [0u8; dns::MAX_MESSAGE_LEN];
-            let Ok((count, from, from_port)) = socket.receive_from(&mut answer, Some(remaining))
-            else {
-                break;
-            };
-            if from != server || from_port != port {
-                continue;
-            }
-            match dns::parse_response(&answer[..count], id) {
-                Ok(address) => return Ok(Some(address)),
-                // Not an answer to this question: keep waiting.
-                Err(ResponseError::Malformed) => {}
-                Err(ResponseError::NoSuchName) => return Err("no such name"),
-                Err(ResponseError::NoAddress) => return Err("the name has no IPv4 address"),
-                Err(ResponseError::Truncated) => {
-                    return Err("the answer is too long for this program");
-                }
-                Err(ResponseError::ServerFailure(_)) => {
-                    return Err("the name server reports a failure");
-                }
-            }
-        }
-    }
-    Ok(None)
 }
 
 fn main() -> i32 {
@@ -114,17 +59,17 @@ fn main() -> i32 {
             (info.name_server, dns::PORT)
         }
     };
-    match lookup(name, server, port) {
-        Ok(Some(address)) => {
+    match omit_rt::net::lookup_at(name, server, port) {
+        Ok(address) => {
             println!("{name} has address {}", show(address));
             0
         }
-        Ok(None) => {
+        Err(LookupError::NoAnswer) => {
             eprintln!("host: {name}: no answer from {}", show(server));
             1
         }
-        Err(reason) => {
-            eprintln!("host: {name}: {reason}");
+        Err(error) => {
+            eprintln!("host: {name}: {error}");
             1
         }
     }

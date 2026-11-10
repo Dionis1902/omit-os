@@ -2,14 +2,17 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! The state of one network interface and what it does with each frame:
 //! an ARP cache, a DHCP client, answers to echo requests, the sending
-//! side of `ping`, and UDP datagrams to and from local ports.
+//! side of `ping`, UDP datagrams to and from local ports, and the
+//! passing of TCP segments to and from whoever keeps the connections.
 //!
 //! The stack does no I/O and reads no clock: frames come in through
 //! [`Stack::receive`], go out through a [`Link`], and time is whatever
 //! the caller passes to [`Stack::tick`]. That is what lets the tests
 //! below play the part of the rest of the network.
 //!
-//! Simplifications: one interface, one address; ARP entries never expire
+//! Simplifications: one interface, one address; an unanswered ARP
+//! request is repeated at most every [`ARP_RETRY_MS`], however often
+//! the address is asked for; ARP entries never expire
 //! (they are overwritten when the owner announces a change, and the
 //! oldest is replaced when the table is full); a DHCP lease is recorded
 //! but never renewed.
@@ -18,7 +21,7 @@ use crate::arp::{self, Operation};
 use crate::dhcp::{self, Reply, ReplyKind};
 use crate::ethernet::{self, Frame, MAX_FRAME_LEN};
 use crate::icmp::{Echo, Kind};
-use crate::ipv4::{self, PROTOCOL_ICMP, PROTOCOL_UDP};
+use crate::ipv4::{self, PROTOCOL_ICMP, PROTOCOL_TCP, PROTOCOL_UDP};
 use crate::udp::{self, Datagram};
 use crate::{Ipv4Addr, MacAddr};
 
@@ -30,18 +33,27 @@ pub trait Link {
     fn send(&mut self, frame: &[u8]);
 }
 
-/// Where received UDP datagrams go.
-pub trait UdpSink {
-    /// A datagram has arrived for local port `port`. Returns whether
+/// Where what arrives for the transport protocols goes.
+pub trait Sockets {
+    /// A UDP datagram has arrived for local port `port`. Returns whether
     /// anybody is listening there; if not, the datagram is dropped.
-    fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool;
+    fn udp(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool;
+
+    /// A TCP segment (still unparsed: see [`crate::tcp::Segment`]) has
+    /// arrived from `from` for this interface's address `to`. Returns
+    /// whether it belonged to a connection or opened one.
+    fn tcp(&mut self, from: Ipv4Addr, to: Ipv4Addr, segment: &[u8]) -> bool;
 }
 
-/// A sink for interfaces on which nobody listens to anything.
+/// For interfaces on which nobody listens to anything.
 pub struct NoSockets;
 
-impl UdpSink for NoSockets {
-    fn deliver(&mut self, _: Ipv4Addr, _: u16, _: u16, _: &[u8]) -> bool {
+impl Sockets for NoSockets {
+    fn udp(&mut self, _: Ipv4Addr, _: u16, _: u16, _: &[u8]) -> bool {
+        false
+    }
+
+    fn tcp(&mut self, _: Ipv4Addr, _: Ipv4Addr, _: &[u8]) -> bool {
         false
     }
 }
@@ -124,6 +136,8 @@ const ECHO_REPLIES: usize = 8;
 /// Longest ICMP or UDP payload that fits a frame.
 const MAX_IP_PAYLOAD: usize = MAX_FRAME_LEN - ethernet::HEADER_LEN - ipv4::HEADER_LEN;
 
+/// Shortest time between two ARP requests for the same address.
+pub const ARP_RETRY_MS: u64 = 200;
 /// Milliseconds between DHCP retransmissions.
 pub const DHCP_RETRY_MS: u64 = 1000;
 /// Messages sent in one state before giving up on it.
@@ -142,6 +156,10 @@ pub struct Stack {
     arp: [Option<(Ipv4Addr, MacAddr)>; ARP_ENTRIES],
     /// Entry to replace next when the table is full.
     arp_next: usize,
+    /// The address last asked for by ARP, and when.
+    arp_asked: Option<(Ipv4Addr, u64)>,
+    /// The time last passed in by the caller.
+    now_ms: u64,
     dhcp: DhcpState,
     transaction: u32,
     /// The offer being requested.
@@ -167,6 +185,8 @@ impl Stack {
             config: None,
             arp: [None; ARP_ENTRIES],
             arp_next: 0,
+            arp_asked: None,
+            now_ms: 0,
             dhcp: DhcpState::Off,
             transaction: seed,
             lease: None,
@@ -232,6 +252,7 @@ impl Stack {
     /// Does what is due at time `now_ms` (any clock that only moves
     /// forward): sends and repeats DHCP messages.
     pub fn tick(&mut self, now_ms: u64, link: &mut dyn Link) {
+        self.now_ms = now_ms;
         if !matches!(self.dhcp, DhcpState::Discovering | DhcpState::Requesting)
             || now_ms < self.next_at_ms
         {
@@ -388,6 +409,13 @@ impl Stack {
         if let Some(mac) = self.lookup(next_hop) {
             return Ok(mac);
         }
+        // Asked a moment ago: the answer may still be on its way.
+        if self.arp_asked.is_some_and(|(address, at)| {
+            address == next_hop && self.now_ms.saturating_sub(at) < ARP_RETRY_MS
+        }) {
+            return Err(SendError::Unresolved);
+        }
+        self.arp_asked = Some((next_hop, self.now_ms));
         let request = arp::Packet {
             operation: Operation::Request,
             sender_mac: self.mac,
@@ -455,6 +483,32 @@ impl Stack {
         Ok(())
     }
 
+    /// Sends `segment`, a complete TCP segment whose checksum was
+    /// computed for this interface's address and `destination`.
+    pub fn send_tcp(
+        &mut self,
+        destination: Ipv4Addr,
+        segment: &[u8],
+        link: &mut dyn Link,
+    ) -> Result<(), SendError> {
+        let config = self.config.ok_or(SendError::NotConfigured)?;
+        if segment.len() > MAX_IP_PAYLOAD {
+            return Err(SendError::TooLong);
+        }
+        let to = self.resolve(destination, link)?;
+        let at = ethernet::HEADER_LEN + ipv4::HEADER_LEN;
+        self.frame[at..at + segment.len()].copy_from_slice(segment);
+        self.send_ip(
+            to,
+            PROTOCOL_TCP,
+            config.address,
+            destination,
+            segment.len(),
+            link,
+        );
+        Ok(())
+    }
+
     /// Whether `address` is one this interface receives for: its own,
     /// or a broadcast address of its network.
     fn is_ours(&self, address: Ipv4Addr) -> bool {
@@ -493,8 +547,9 @@ impl Stack {
         data: &[u8],
         now_ms: u64,
         link: &mut dyn Link,
-        sockets: &mut dyn UdpSink,
+        sockets: &mut dyn Sockets,
     ) {
+        self.now_ms = now_ms;
         self.stats.received += 1;
         if !self.handle(data, now_ms, link, sockets) {
             self.stats.ignored += 1;
@@ -507,7 +562,7 @@ impl Stack {
         data: &[u8],
         now_ms: u64,
         link: &mut dyn Link,
-        sockets: &mut dyn UdpSink,
+        sockets: &mut dyn Sockets,
     ) -> bool {
         let Some(frame) = Frame::parse(data) else {
             return false;
@@ -543,7 +598,7 @@ impl Stack {
         frame: &Frame<'_>,
         now_ms: u64,
         link: &mut dyn Link,
-        sockets: &mut dyn UdpSink,
+        sockets: &mut dyn Sockets,
     ) -> bool {
         let Some(packet) = ipv4::Packet::parse(frame.payload) else {
             return false;
@@ -563,13 +618,19 @@ impl Stack {
                         && self.handle_dhcp(datagram.payload, now_ms, link);
                 }
                 self.is_ours(packet.destination)
-                    && sockets.deliver(
+                    && sockets.udp(
                         packet.source,
                         datagram.source_port,
                         datagram.destination_port,
                         datagram.payload,
                     )
             }
+            // Connections are between two hosts: a segment sent to a
+            // broadcast address is not for anybody.
+            PROTOCOL_TCP => self.config.is_some_and(|config| {
+                packet.destination == config.address
+                    && sockets.tcp(packet.source, packet.destination, packet.payload)
+            }),
             PROTOCOL_ICMP => {
                 let Some(config) = self.config else {
                     return false;
@@ -1066,8 +1127,8 @@ mod tests {
             ip_frame(other_mac, PEER_MAC, PROTOCOL_ICMP, PEER, US, &request),
             // Our hardware address, another IP address.
             ip_frame(MAC, PEER_MAC, PROTOCOL_ICMP, PEER, ROUTER, &request),
-            // A protocol nobody here speaks (TCP), and an unknown EtherType.
-            ip_frame(MAC, PEER_MAC, 6, PEER, US, &request),
+            // A protocol nobody here speaks (GRE), and an unknown EtherType.
+            ip_frame(MAC, PEER_MAC, 47, PEER, US, &request),
             ethernet_frame(MAC, PEER_MAC, 0x86DD, &[0; 40]),
             // UDP to a port nobody listens on.
             {
@@ -1311,12 +1372,19 @@ mod tests {
     #[derive(Default)]
     struct Listener(Vec<(Ipv4Addr, u16, u16, Vec<u8>)>);
 
-    impl UdpSink for Listener {
-        fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
+    impl Sockets for Listener {
+        fn udp(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
             if port != 4000 {
                 return false;
             }
             self.0.push((from, from_port, port, data.to_vec()));
+            true
+        }
+
+        fn tcp(&mut self, from: Ipv4Addr, to: Ipv4Addr, segment: &[u8]) -> bool {
+            // Recorded with port numbers of zero, to tell them apart.
+            assert_eq!(to, US);
+            self.0.push((from, 0, 0, segment.to_vec()));
             true
         }
     }
@@ -1425,5 +1493,86 @@ mod tests {
         let frame = udp_frame(MAC, PEER, US, 68);
         stack.receive(&frame, 0, &mut wire, &mut listener);
         assert!(listener.0.is_empty());
+    }
+
+    // --- TCP segments pass through ---
+
+    #[test]
+    fn tcp_segments_are_passed_up_and_sent_down_unchanged() {
+        use crate::tcp::{SYN, Segment};
+        let mut stack = configured();
+        let mut wire = Wire::default();
+        let mut listener = Listener::default();
+        let segment = Segment {
+            source_port: 40000,
+            destination_port: 7,
+            sequence: 1,
+            acknowledgement: 0,
+            flags: SYN,
+            window: 100,
+            mss: None,
+            payload: b"",
+        };
+        let mut bytes = [0u8; 20];
+        segment.write(&mut bytes, PEER, US).unwrap();
+        let frame = ip_frame(MAC, PEER_MAC, PROTOCOL_TCP, PEER, US, &bytes);
+        stack.receive(&frame, 0, &mut wire, &mut listener);
+        assert_eq!(listener.0, [(PEER, 0, 0, bytes.to_vec())]);
+        // Not to a broadcast address, and not without anybody to take it.
+        let broadcast = Ipv4Addr([10, 0, 2, 255]);
+        let frame = ip_frame(
+            MacAddr::BROADCAST,
+            PEER_MAC,
+            PROTOCOL_TCP,
+            PEER,
+            broadcast,
+            &bytes,
+        );
+        stack.receive(&frame, 0, &mut wire, &mut listener);
+        let frame = ip_frame(MAC, PEER_MAC, PROTOCOL_TCP, PEER, US, &bytes);
+        stack.receive(&frame, 0, &mut wire, &mut NoSockets);
+        assert_eq!(listener.0.len(), 1);
+        assert_eq!(stack.stats().ignored, 2);
+
+        // Sending: resolved like everything else, carried as protocol 6.
+        assert_eq!(
+            stack.send_tcp(PEER, &bytes, &mut wire),
+            Err(SendError::Unresolved)
+        );
+        answer_arp(&mut stack, &mut wire, PEER, PEER_MAC);
+        assert_eq!(stack.send_tcp(PEER, &bytes, &mut wire), Ok(()));
+        let sent = wire.one();
+        let packet = ipv4::Packet::parse(Frame::parse(&sent).unwrap().payload).unwrap();
+        assert_eq!(
+            (packet.protocol, packet.source, packet.destination),
+            (6, US, PEER)
+        );
+        assert_eq!(packet.payload, bytes);
+        assert_eq!(
+            stack.send_tcp(PEER, &[0u8; 1481], &mut wire),
+            Err(SendError::TooLong)
+        );
+    }
+
+    #[test]
+    fn arp_requests_for_one_address_are_not_repeated_at_once() {
+        let mut stack = configured();
+        let mut wire = Wire::default();
+        let mut asked = Vec::new();
+        // Something wants to reach the peer every 10 ms for a second.
+        for now in (0..1000).step_by(10) {
+            stack.tick(now, &mut wire);
+            assert_eq!(stack.resolve(PEER, &mut wire), Err(SendError::Unresolved));
+            if !wire.take().is_empty() {
+                asked.push(now);
+            }
+        }
+        assert_eq!(asked, [0, 200, 400, 600, 800]);
+        // Another address is asked for regardless.
+        assert_eq!(
+            stack.resolve(Ipv4Addr([10, 0, 2, 78]), &mut wire),
+            Err(SendError::Unresolved)
+        );
+        assert_eq!(wire.take().len(), 1);
     }
 }

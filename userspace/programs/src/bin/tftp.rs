@@ -4,7 +4,7 @@
 //!
 //!     tftp SERVER FILE [DESTINATION]
 //!
-//! SERVER is an IPv4 address. Without DESTINATION the file is stored
+//! SERVER is a name or an IPv4 address. Without DESTINATION the file is stored
 //! under its own name (without directories) in the current directory.
 
 #![no_std]
@@ -113,9 +113,12 @@ fn main() -> i32 {
         eprintln!("usage: tftp SERVER FILE [DESTINATION]");
         return 2;
     };
-    let Some(server) = omit_inet::parse_ipv4(server_text) else {
-        eprintln!("tftp: {server_text}: not an IPv4 address");
-        return 2;
+    let server = match omit_rt::net::lookup(server_text) {
+        Ok(server) => server,
+        Err(error) => {
+            eprintln!("tftp: {server_text}: {error}");
+            return 1;
+        }
     };
     let destination = destination.unwrap_or_else(|| file.rsplit('/').next().unwrap_or(file));
     if destination.is_empty() {

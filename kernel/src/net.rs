@@ -10,8 +10,8 @@
 //! (see [`ping`]) looks continuously while it waits.
 //!
 //! What exists so far is the foundation — an address by DHCP, ARP,
-//! answering and sending echo requests — and UDP sockets for programs
-//! ([`UdpSocket`]). There is no TCP.
+//! answering and sending echo requests — and sockets for programs: UDP
+//! ([`UdpSocket`]) and TCP ([`tcp`]).
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -24,12 +24,14 @@ use core::sync::atomic::{AtomicU16, Ordering};
 
 use omit_abi::net::{INFO_CONFIGURED, INFO_NAME_SERVER, INFO_PRESENT, INFO_ROUTER, NetInfo};
 use omit_net::ethernet::MAX_FRAME_LEN;
-use omit_net::stack::{DhcpState, Link, SendError, Stack, UdpSink};
+use omit_net::stack::{DhcpState, Link, SendError, Sockets, Stack};
 use omit_net::{Ipv4Addr, MacAddr, dhcp};
 
 use crate::sched::WaitQueue;
 use crate::sync::{Mutex, SpinLock};
 use crate::{info, poll, sched, time, warn};
+
+pub mod tcp;
 
 /// Why a frame could not be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +92,7 @@ const PING_TIMEOUT_NS: u64 = 1_000_000_000;
 /// Pause between attempts to send while the next hop is being resolved.
 const RESOLVE_RETRY_NS: u64 = 200_000_000;
 
-fn now_ms() -> u64 {
+pub(crate) fn now_ms() -> u64 {
     time::monotonic_ns() / 1_000_000
 }
 
@@ -102,11 +104,13 @@ impl Interface {
             device: &mut *self.device,
             errors: &mut self.transmit_errors,
         };
+        let mut sockets = KernelSockets::default();
         while let Some(length) = link.device.receive(&mut self.buffer[..]) {
             self.stack
-                .receive(&self.buffer[..length], now, &mut link, &mut Sockets);
+                .receive(&self.buffer[..length], now, &mut link, &mut sockets);
         }
         self.stack.tick(now, &mut link);
+        tcp::pump(&mut self.stack, &mut link, sockets.resets);
 
         let state = self.stack.dhcp_state();
         if state != self.reported {
@@ -355,6 +359,97 @@ const EPHEMERAL_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
 /// timer tick.
 const EAGER_RECEIVE_NS: u64 = 20_000_000;
 
+/// How a wait ended.
+pub(crate) enum Waited {
+    /// What was waited for is there.
+    Ready,
+    /// The time allowed has passed.
+    TimedOut,
+    /// The waiting thread's process is being terminated.
+    Killed,
+}
+
+/// Waits until `ready` holds, for at most `timeout_ticks` timer ticks
+/// (`None`: for ever). `queue` must be woken when `ready` may have
+/// changed; `ready` must not block.
+///
+/// For the first [`EAGER_RECEIVE_NS`] the waiting thread looks for
+/// received frames itself; after that it sleeps and leaves that to the
+/// receive thread.
+pub(crate) fn wait_until(
+    queue: &WaitQueue,
+    timeout_ticks: Option<u64>,
+    mut ready: impl FnMut() -> bool,
+) -> Waited {
+    let started = time::monotonic_ns();
+    let deadline = timeout_ticks.map(|ticks| time::ticks() + ticks);
+    let expired = || deadline.is_some_and(|deadline| time::ticks() >= deadline);
+    loop {
+        if ready() {
+            return Waited::Ready;
+        }
+        if sched::current_killed() {
+            return Waited::Killed;
+        }
+        if expired() {
+            return Waited::TimedOut;
+        }
+        if time::monotonic_ns() - started < EAGER_RECEIVE_NS {
+            kick();
+            sched::yield_now();
+        } else {
+            let remaining = deadline.map_or(u64::MAX / 2, |deadline| {
+                deadline.saturating_sub(time::ticks())
+            });
+            queue.wait_until_or_timeout(|| ready() || sched::current_killed(), remaining);
+        }
+    }
+}
+
+/// Has the interface take in what has arrived and send what is due,
+/// now rather than at the receive thread's next turn.
+pub(crate) fn kick() {
+    if let Some(interface) = INTERFACE.lock().as_mut() {
+        interface.poll();
+    }
+}
+
+/// Waits up to a second for the hardware address of the next hop
+/// towards `destination` to be known. `Err(true)`: the thread was
+/// killed; `Err(false)`: there is no way there.
+pub(crate) fn wait_resolved(destination: Ipv4Addr) -> Result<(), bool> {
+    let started = time::monotonic_ns();
+    loop {
+        {
+            let mut guard = INTERFACE.lock();
+            let interface = guard.as_mut().ok_or(false)?;
+            interface.poll();
+            let Interface {
+                device,
+                stack,
+                transmit_errors,
+                ..
+            } = interface;
+            let mut link = DeviceLink {
+                device: &mut **device,
+                errors: transmit_errors,
+            };
+            match stack.resolve(destination, &mut link) {
+                Ok(_) => return Ok(()),
+                Err(SendError::Unresolved) => {}
+                Err(_) => return Err(false),
+            }
+        }
+        if time::monotonic_ns() - started > PING_TIMEOUT_NS {
+            return Err(false);
+        }
+        if sched::current_killed() {
+            return Err(true);
+        }
+        sched::yield_now();
+    }
+}
+
 /// A received datagram.
 pub struct Received {
     /// The sender's address.
@@ -372,9 +467,10 @@ pub struct UdpSocket {
     readers: WaitQueue,
 }
 
-/// Every open socket. Entries whose socket is gone are removed when the
-/// socket is dropped.
-static SOCKETS: SpinLock<Vec<Weak<UdpSocket>>> = SpinLock::new(Vec::new());
+/// Every open socket, with its port, so that a socket is only ever
+/// referenced when it is the one wanted. Entries whose socket is gone are
+/// removed when the socket is dropped.
+static SOCKETS: SpinLock<Vec<(u16, Weak<UdpSocket>)>> = SpinLock::new(Vec::new());
 static NEXT_EPHEMERAL: AtomicU16 = AtomicU16::new(*EPHEMERAL_PORTS.start());
 
 /// Why a socket operation failed.
@@ -393,11 +489,11 @@ pub enum UdpError {
     Killed,
 }
 
-fn socket_on(sockets: &[Weak<UdpSocket>], port: u16) -> Option<Arc<UdpSocket>> {
+fn socket_on(sockets: &[(u16, Weak<UdpSocket>)], port: u16) -> Option<Arc<UdpSocket>> {
     sockets
         .iter()
-        .filter_map(Weak::upgrade)
-        .find(|socket| socket.port == port)
+        .find(|(taken, _)| *taken == port)
+        .and_then(|(_, socket)| socket.upgrade())
 }
 
 impl UdpSocket {
@@ -432,12 +528,12 @@ impl UdpSocket {
         // Two threads may have chosen the same port at the same moment.
         let taken = sockets
             .iter()
-            .any(|entry| entry.upgrade().is_some_and(|other| other.port == port));
+            .any(|(taken, entry)| *taken == port && entry.strong_count() > 0);
         if taken {
             drop(sockets);
             return Err(UdpError::PortInUse);
         }
-        sockets.push(Arc::downgrade(&socket));
+        sockets.push((port, Arc::downgrade(&socket)));
         Ok(socket)
     }
 
@@ -505,38 +601,17 @@ impl UdpSocket {
             }
             return take().ok_or(UdpError::TimedOut);
         }
-        let started = time::monotonic_ns();
-        let deadline = timeout_ticks.map(|ticks| time::ticks() + ticks);
-        let expired = || deadline.is_some_and(|deadline| time::ticks() >= deadline);
-        while time::monotonic_ns() - started < EAGER_RECEIVE_NS {
-            if let Some(interface) = INTERFACE.lock().as_mut() {
-                interface.poll();
-            }
-            if let Some(received) = take() {
-                return Ok(received);
-            }
-            if sched::current_killed() {
-                return Err(UdpError::Killed);
-            }
-            if expired() {
-                return Err(UdpError::TimedOut);
-            }
-            sched::yield_now();
-        }
         loop {
-            // From here on the receive thread brings the datagrams.
-            let remaining = deadline.map_or(u64::MAX / 2, |deadline| {
-                deadline.saturating_sub(time::ticks())
-            });
-            self.readers
-                .wait_until_or_timeout(|| self.ready() || sched::current_killed(), remaining);
+            match wait_until(&self.readers, timeout_ticks, || self.ready()) {
+                Waited::Ready => {}
+                Waited::TimedOut => return Err(UdpError::TimedOut),
+                Waited::Killed => return Err(UdpError::Killed),
+            }
+            // Another thread reading the same socket may have been quicker.
             if let Some(received) = take() {
                 return Ok(received);
             }
-            if sched::current_killed() {
-                return Err(UdpError::Killed);
-            }
-            if expired() {
+            if timeout_ticks.is_some() {
                 return Err(UdpError::TimedOut);
             }
         }
@@ -546,15 +621,23 @@ impl UdpSocket {
 impl Drop for UdpSocket {
     fn drop(&mut self) {
         // This socket's own entry can no longer be upgraded.
-        SOCKETS.lock().retain(|entry| entry.strong_count() > 0);
+        SOCKETS.lock().retain(|(_, entry)| entry.strong_count() > 0);
     }
 }
 
-/// Hands received datagrams to the sockets.
-struct Sockets;
+/// Hands what arrives to the sockets, and collects the resets to send
+/// for TCP segments that belong to nothing.
+#[derive(Default)]
+struct KernelSockets {
+    resets: tcp::Resets,
+}
 
-impl UdpSink for Sockets {
-    fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
+impl Sockets for KernelSockets {
+    fn tcp(&mut self, from: Ipv4Addr, to: Ipv4Addr, segment: &[u8]) -> bool {
+        tcp::receive(from, to, segment, &mut self.resets)
+    }
+
+    fn udp(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
         let Some(socket) = socket_on(&SOCKETS.lock(), port) else {
             return false;
         };

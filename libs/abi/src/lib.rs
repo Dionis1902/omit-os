@@ -206,6 +206,29 @@ pub mod nr {
     /// `net_info(out) -> 0`: writes a [`crate::net::NetInfo`] describing
     /// the network interface.
     pub const NET_INFO: u64 = 43;
+    /// `tcp_connect(to, timeout_ms) -> fd`: opens a TCP connection to
+    /// the address and port in the [`crate::net::SocketAddr`] at `to`,
+    /// waiting up to `timeout_ms` milliseconds for the other side to
+    /// answer ([`crate::net::NO_TIMEOUT`]: until the system itself gives
+    /// up, about a minute). Fails with `Refused` if nothing listens
+    /// there, `Unreachable` if there is no way to the address, and
+    /// `TimedOut`. The descriptor is read with `read` (0: the other
+    /// side has finished sending), written with `write`, usable with
+    /// `poll`, and closed with `close`, after which what was written is
+    /// still delivered.
+    pub const TCP_CONNECT: u64 = 44;
+    /// `tcp_listen(port) -> fd`: starts accepting TCP connections on
+    /// `port`. Fails with `Busy` if somebody already does. `poll`
+    /// reports the descriptor readable when a connection is waiting.
+    pub const TCP_LISTEN: u64 = 45;
+    /// `tcp_accept(fd, from, timeout_ms) -> fd`: takes the next
+    /// connection made to the listener `fd`, waiting as `udp_receive`
+    /// does. If `from` is not 0 the other side's address and port are
+    /// written there.
+    pub const TCP_ACCEPT: u64 = 46;
+    /// `tcp_shutdown(fd) -> 0`: tells the other side that nothing more
+    /// will be sent on the connection `fd`. Reading goes on.
+    pub const TCP_SHUTDOWN: u64 = 47;
 }
 
 /// Largest shared memory segment, in bytes.
@@ -476,6 +499,10 @@ pub enum Errno {
     /// The destination cannot be reached: no network, no route, or
     /// nobody answers for the address.
     Unreachable = 101,
+    /// Nothing listens on the port a connection was attempted to.
+    Refused = 111,
+    /// The other side of a connection abandoned it.
+    ConnectionReset = 104,
 }
 
 impl core::fmt::Display for Errno {
@@ -501,6 +528,8 @@ impl core::fmt::Display for Errno {
             Self::WouldBlock => "Resource temporarily unavailable",
             Self::TimedOut => "Timed out",
             Self::Unreachable => "Network is unreachable",
+            Self::Refused => "Connection refused",
+            Self::ConnectionReset => "Connection reset by peer",
         })
     }
 }
@@ -536,6 +565,8 @@ impl Errno {
             11 => Some(Self::WouldBlock),
             110 => Some(Self::TimedOut),
             101 => Some(Self::Unreachable),
+            111 => Some(Self::Refused),
+            104 => Some(Self::ConnectionReset),
             _ => None,
         }
     }

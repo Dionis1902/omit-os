@@ -68,6 +68,11 @@ pub const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 /// The network location cannot be reached.
 pub const ERROR_NETWORK_UNREACHABLE: u32 = 1231;
 
+/// The remote computer refused the network connection.
+pub const ERROR_CONNECTION_REFUSED: u32 = 1225;
+/// The network connection was aborted by the remote system.
+pub const ERROR_CONNECTION_ABORTED: u32 = 1236;
+
 /// The Win32 error code for a failed Omit OS system call.
 pub fn from_errno(errno: Errno) -> u32 {
     match errno {
@@ -91,6 +96,8 @@ pub fn from_errno(errno: Errno) -> u32 {
         Errno::WouldBlock => ERROR_BUSY,
         Errno::TimedOut => WAIT_TIMEOUT,
         Errno::Unreachable => ERROR_NETWORK_UNREACHABLE,
+        Errno::Refused => ERROR_CONNECTION_REFUSED,
+        Errno::ConnectionReset => ERROR_CONNECTION_ABORTED,
     }
 }
 

@@ -150,6 +150,7 @@ name = "omit-rt"
 version = "0.1.2"
 dependencies = [
  "omit-abi",
+ "omit-inet",
  "omit-mm",
  "omit-window",
 ]

@@ -23,6 +23,7 @@ use omit_vfs::{FileType, FsError, WriteMode, path};
 
 use crate::console::{self, Writer};
 use crate::futex::WaitResult;
+use crate::net::tcp::{TcpError, TcpHandle, TcpListener, TcpSocket};
 use crate::net::{UdpError, UdpSocket};
 use crate::pipe::{self, PipeError};
 use crate::process::{self, Descriptor, OpenFile};
@@ -138,6 +139,17 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         nr::UDP_SEND => udp_send(a0, a1, a2, a3),
         nr::UDP_RECEIVE => udp_receive(a0, a1, a2, a3, a4),
         nr::NET_INFO => net_info(a0),
+        nr::TCP_CONNECT => tcp_connect(a0, a1),
+        nr::TCP_LISTEN => tcp_listen(a0),
+        nr::TCP_ACCEPT => tcp_accept(a0, a1, a2),
+        nr::TCP_SHUTDOWN => match process::descriptor(a0) {
+            Some(Descriptor::Tcp(handle)) => {
+                handle.0.shutdown();
+                crate::net::kick();
+                Ok(0)
+            }
+            _ => Err(Errno::BadFileDescriptor),
+        },
         nr::THREAD_CREATE => {
             // The addresses are the program's own business — a wrong one
             // faults in user mode — but they must at least be user
@@ -476,12 +488,7 @@ fn udp_send(fd: u64, to: u64, address: u64, length: u64) -> SysResult {
 
 fn udp_receive(fd: u64, buffer: u64, length: u64, from: u64, timeout_ms: u64) -> SysResult {
     let socket = udp_socket(fd)?;
-    let tick_ms = 1000 / u64::from(time::TICK_HZ);
-    let timeout = match timeout_ms {
-        NO_TIMEOUT => None,
-        0..=RECEIVE_TIMEOUT_MAX => Some(timeout_ms.div_ceil(tick_ms)),
-        _ => return Err(Errno::InvalidArgument),
-    };
+    let timeout = timeout_ticks(timeout_ms)?;
     let received = match socket.receive(timeout) {
         Ok(received) => received,
         Err(UdpError::Killed) => {
@@ -501,6 +508,85 @@ fn udp_receive(fd: u64, buffer: u64, length: u64, from: u64, timeout_ms: u64) ->
         copy_out(from, &bytes)?;
     }
     Ok(count as u64)
+}
+
+fn tcp_error(error: TcpError) -> Errno {
+    match error {
+        TcpError::PortInUse => Errno::Busy,
+        TcpError::Unreachable => Errno::Unreachable,
+        TcpError::Refused => Errno::Refused,
+        TcpError::Reset => Errno::ConnectionReset,
+        TcpError::WouldBlock => Errno::WouldBlock,
+        TcpError::Closed => Errno::BrokenPipe,
+        // `Killed` does not get as far as the program.
+        TcpError::TimedOut | TcpError::Killed => Errno::TimedOut,
+    }
+}
+
+/// Converts a timeout argument in milliseconds to timer ticks; `None`
+/// is "for ever".
+fn timeout_ticks(timeout_ms: u64) -> Result<Option<u64>, Errno> {
+    let tick_ms = 1000 / u64::from(time::TICK_HZ);
+    match timeout_ms {
+        NO_TIMEOUT => Ok(None),
+        0..=RECEIVE_TIMEOUT_MAX => Ok(Some(timeout_ms.div_ceil(tick_ms))),
+        _ => Err(Errno::InvalidArgument),
+    }
+}
+
+fn tcp_connect(to: u64, timeout_ms: u64) -> SysResult {
+    let timeout = timeout_ticks(timeout_ms)?;
+    let to = copy_in(to, size_of::<SocketAddr>())?;
+    let destination = omit_net::Ipv4Addr([to[0], to[1], to[2], to[3]]);
+    let port = u16::from_le_bytes([to[4], to[5]]);
+    if port == 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    match TcpSocket::connect(destination, port, timeout) {
+        Ok(socket) => process::install(Descriptor::Tcp(alloc::sync::Arc::new(TcpHandle(socket))))
+            .map_err(|_| Errno::TooManyOpenFiles),
+        Err(TcpError::Killed) => {
+            process::exit_if_killed();
+            Err(Errno::TimedOut)
+        }
+        Err(error) => Err(tcp_error(error)),
+    }
+}
+
+fn tcp_listen(port: u64) -> SysResult {
+    let port = u16::try_from(port).map_err(|_| Errno::InvalidArgument)?;
+    if port == 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    let listener = TcpListener::bind(port).map_err(tcp_error)?;
+    process::install(Descriptor::TcpListener(listener)).map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn tcp_accept(fd: u64, from: u64, timeout_ms: u64) -> SysResult {
+    let Some(Descriptor::TcpListener(listener)) = process::descriptor(fd) else {
+        return Err(Errno::BadFileDescriptor);
+    };
+    let timeout = timeout_ticks(timeout_ms)?;
+    let socket = match listener.accept(timeout) {
+        Ok(socket) => socket,
+        Err(TcpError::Killed) => {
+            // `exit` does not return, so let go of the listener first.
+            drop(listener);
+            process::exit_if_killed();
+            return Err(Errno::TimedOut);
+        }
+        Err(error) => return Err(tcp_error(error)),
+    };
+    let (address, port) = socket.remote();
+    // From here on the connection is closed if anything fails.
+    let handle = alloc::sync::Arc::new(TcpHandle(socket));
+    if from != 0 {
+        let mut bytes = [0u8; size_of::<SocketAddr>()];
+        bytes[..4].copy_from_slice(&address.0);
+        bytes[4..6].copy_from_slice(&port.to_le_bytes());
+        copy_out(from, &bytes)?;
+    }
+    process::install(Descriptor::Tcp(handle)).map_err(|_| Errno::TooManyOpenFiles)
 }
 
 fn net_info(out: u64) -> SysResult {
@@ -537,7 +623,9 @@ fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> Sy
                 descriptor @ (Descriptor::PipeRead(_)
                 | Descriptor::Channel(..)
                 | Descriptor::Listener(_)
-                | Descriptor::Udp(_)),
+                | Descriptor::Udp(_)
+                | Descriptor::Tcp(_)
+                | Descriptor::TcpListener(_)),
             ) => watched.push(descriptor),
             // Files can always be read; anything else cannot be polled.
             Some(Descriptor::File(file)) if file.readable => watched.push(Descriptor::File(file)),
@@ -551,6 +639,8 @@ fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> Sy
                 Descriptor::PipeRead(reader) | Descriptor::Channel(reader, _) => reader.ready(),
                 Descriptor::Listener(listener) => listener.ready(),
                 Descriptor::Udp(socket) => socket.ready(),
+                Descriptor::Tcp(handle) => handle.0.ready(),
+                Descriptor::TcpListener(listener) => listener.ready(),
                 _ => true,
             };
             if is_ready {
@@ -777,6 +867,21 @@ fn read(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
                 }
             }
         }
+        Some(Descriptor::Tcp(handle)) => {
+            buffer
+                .try_reserve_exact(length)
+                .map_err(|_| Errno::NoSpace)?;
+            buffer.resize(length, 0);
+            match handle.0.read(&mut buffer, !no_wait) {
+                Ok(count) => count,
+                Err(TcpError::Killed) => {
+                    drop(handle);
+                    process::exit_if_killed();
+                    0
+                }
+                Err(error) => return Err(tcp_error(error)),
+            }
+        }
         _ => return Err(Errno::BadFileDescriptor),
     };
     copy_out(address, &buffer[..count])?;
@@ -835,6 +940,18 @@ fn write(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
                 Ok(true) => Ok(length),
                 Ok(false) => Err(Errno::WouldBlock),
                 Err(_) => Err(Errno::BrokenPipe),
+            }
+        }
+        Some(Descriptor::Tcp(handle)) => {
+            let data = copy_in(address, length as usize)?;
+            match handle.0.write(&data, flags & WRITE_NO_WAIT == 0) {
+                Ok(count) => Ok(count as u64),
+                Err(TcpError::Killed) => {
+                    drop(handle);
+                    process::exit_if_killed();
+                    Err(Errno::BrokenPipe)
+                }
+                Err(error) => Err(tcp_error(error)),
             }
         }
         // Standard output and error go to the console unless the process
