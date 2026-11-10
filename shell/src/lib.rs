@@ -155,6 +155,11 @@ const BUILTINS: &[&str] = &[
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
+/// How a Windows (or DOS) executable starts.
+pub const WINDOWS_MAGIC: &[u8] = b"MZ";
+/// The program that runs Windows executables.
+pub const WINDOWS_LOADER: &str = "/bin/winrun";
+
 const NOT_BUILTIN: &str = "\0not-builtin";
 
 /// Formats a filesystem error the conventional way: `path: reason`.
@@ -494,8 +499,21 @@ impl Shell {
         let display_name = path::file_name(&path).unwrap_or(name);
         // By convention the first argument is the name the program was
         // invoked by.
-        let mut argv = Vec::with_capacity(args.len() + 1);
+        let mut argv = Vec::with_capacity(args.len() + 2);
         argv.push(String::from(name));
+        // Windows executables are run by the Windows program loader, which
+        // gets the file's path as its first argument.
+        let image = if image.starts_with(WINDOWS_MAGIC) {
+            argv[0] = WINDOWS_LOADER.into();
+            argv.push(path.clone());
+            vfs.read_file(WINDOWS_LOADER).map_err(|error| {
+                Failure(format!(
+                    "this is a Windows program, but {WINDOWS_LOADER} cannot be read: {error}"
+                ))
+            })?
+        } else {
+            image
+        };
         argv.extend_from_slice(args);
         let stdout = target
             .as_ref()
@@ -1158,6 +1176,34 @@ mod tests {
 
         s.ok("echo -n bad-image > /bin/broken");
         assert_eq!(s.err("broken"), "broken: not an executable\n");
+    }
+
+    #[test]
+    fn windows_programs_are_run_by_the_windows_loader() {
+        let mut s = Session::new();
+        s.ok("mkdir /bin /apps");
+        s.ok("echo -n MZ-windows-program > /apps/tool.exe");
+
+        // Without the loader the reason is stated.
+        assert_eq!(
+            s.err("/apps/tool.exe"),
+            "/apps/tool.exe: this is a Windows program, but /bin/winrun cannot be read: \
+             No such file or directory\n"
+        );
+
+        s.ok("echo -n loader-image > /bin/winrun");
+        s.ok("cd /apps");
+        s.ok("./tool.exe 'two words' -x");
+        // The loader's image runs, under the program's name, with the
+        // program's full path inserted before its arguments.
+        assert_eq!(
+            s.host.spawned[0],
+            ("tool.exe".into(), b"loader-image".to_vec())
+        );
+        assert_eq!(
+            s.host.last_args,
+            ["/bin/winrun", "/apps/tool.exe", "two words", "-x"]
+        );
     }
 
     #[test]

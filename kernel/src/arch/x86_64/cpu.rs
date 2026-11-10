@@ -6,6 +6,12 @@ use core::arch::x86_64::__cpuid_count;
 use core::fmt;
 
 const CR0_WP: u64 = 1 << 16;
+const CR0_MP: u64 = 1 << 1;
+const CR0_EM: u64 = 1 << 2;
+const CR0_TS: u64 = 1 << 3;
+const CR0_NE: u64 = 1 << 5;
+const CR4_OSFXSR: u64 = 1 << 9;
+const CR4_OSXMMEXCPT: u64 = 1 << 10;
 const CR4_UMIP: u64 = 1 << 11;
 const CR4_SMEP: u64 = 1 << 20;
 const CR4_SMAP: u64 = 1 << 21;
@@ -219,7 +225,16 @@ pub fn init() -> Result<CpuInfo, CpuError> {
     let smep = leaf7_ebx & (1 << 7) != 0;
     let smap = leaf7_ebx & (1 << 20) != 0;
     let umip = leaf7_ecx & (1 << 2) != 0;
-    let mut cr4 = read_cr4();
+    // Floating point and SSE, for user programs (the kernel itself is
+    // built without them). Every x86-64 CPU has FXSAVE and SSE2. Native
+    // error reporting, no emulation, no lazy switching: the scheduler
+    // saves and restores the state eagerly (see `FpuState`).
+    let cr0 = (read_cr0() | CR0_MP | CR0_NE) & !(CR0_EM | CR0_TS);
+    // SAFETY: these bits only control how x87/SSE instructions and their
+    // errors are handled; the kernel executes no such instructions.
+    unsafe { asm!("mov cr0, {}", in(reg) cr0, options(nostack, preserves_flags)) };
+
+    let mut cr4 = read_cr4() | CR4_OSFXSR | CR4_OSXMMEXCPT;
     if smep {
         cr4 |= CR4_SMEP;
     }
@@ -245,4 +260,57 @@ pub fn init() -> Result<CpuInfo, CpuError> {
         pages_1g: ext_edx & (1 << 26) != 0,
         invariant_tsc: max_ext >= 0x8000_0007 && cpuid(0x8000_0007, 0).3 & (1 << 8) != 0,
     })
+}
+
+/// The x87 and SSE register state of a user thread, in `FXSAVE` format.
+///
+/// The kernel is built without floating point or SSE, so this state only
+/// changes while user code runs; the scheduler saves it when switching
+/// away from a process thread and restores it when switching back. AVX is
+/// not enabled (`CR4.OSXSAVE` is clear), so `FXSAVE` covers everything a
+/// program can use.
+#[repr(C, align(16))]
+pub struct FpuState([u8; 512]);
+
+impl FpuState {
+    /// The state a new program starts with: all registers zero, all
+    /// exceptions masked, round to nearest — the same as after `FNINIT`
+    /// with the default `MXCSR`.
+    pub fn new() -> Self {
+        let mut area = [0u8; 512];
+        // x87 control word: exceptions masked, 64-bit precision.
+        area[0..2].copy_from_slice(&0x037Fu16.to_le_bytes());
+        // MXCSR: exceptions masked.
+        area[24..28].copy_from_slice(&0x1F80u32.to_le_bytes());
+        Self(area)
+    }
+
+    /// Saves the CPU's current x87/SSE state into `state`.
+    ///
+    /// # Safety
+    ///
+    /// `state` must be valid for writes.
+    pub unsafe fn save(state: *mut Self) {
+        // SAFETY: the area is 512 bytes and 16-byte aligned (by the type),
+        // as FXSAVE requires; `init` enabled CR4.OSFXSR.
+        unsafe { asm!("fxsave64 [{}]", in(reg) state, options(nostack, preserves_flags)) };
+    }
+
+    /// Loads the CPU's x87/SSE state from `state`.
+    ///
+    /// # Safety
+    ///
+    /// `state` must point to a state built by [`FpuState::new`] or written
+    /// by [`FpuState::save`]; anything else can raise #GP (reserved MXCSR
+    /// bits).
+    pub unsafe fn restore(state: *const Self) {
+        // SAFETY: see above; the contents are valid per the contract.
+        unsafe { asm!("fxrstor64 [{}]", in(reg) state, options(nostack, preserves_flags)) };
+    }
+}
+
+impl Default for FpuState {
+    fn default() -> Self {
+        Self::new()
+    }
 }

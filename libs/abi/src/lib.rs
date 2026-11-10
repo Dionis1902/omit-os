@@ -73,6 +73,25 @@ pub mod nr {
     pub const SPAWN: u64 = 16;
     /// `wait(pid) -> exit status` — blocks until the process ends.
     pub const WAIT: u64 = 17;
+    /// `protect(address, len, protection)` — changes the access rights of
+    /// memory obtained from `map`; see [`super::protect`]. Memory can never
+    /// be writable and executable at once.
+    pub const PROTECT: u64 = 18;
+    /// `set_thread_pointer(address)` — sets the base of the `GS` segment
+    /// for the calling thread, for runtimes that keep per-thread data
+    /// there (such as the Windows TEB).
+    pub const SET_THREAD_POINTER: u64 = 19;
+}
+
+/// Protection flags for the `protect` system call. Memory is always
+/// readable.
+pub mod protect {
+    /// Read-only.
+    pub const READ: u64 = 0;
+    /// Readable and writable.
+    pub const WRITE: u64 = 1 << 0;
+    /// Readable and executable.
+    pub const EXECUTE: u64 = 1 << 1;
 }
 
 /// [`Stat::kind`] of a regular file.

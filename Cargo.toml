@@ -3,7 +3,9 @@ resolver = "3"
 members = [
     "boot",
     "kernel",
-    "libs/abi",
+    "compat/windows/pe",
+    "compat/windows/samples",
+    "compat/windows/win32",
     "libs/abi",
     "libs/acpi",
     "libs/bootproto",
@@ -21,6 +23,8 @@ members = [
 # Plain `cargo build` / `cargo test` operate on the host-buildable crates only.
 # The loader and kernel need bare-metal targets; `cargo xtask` drives those.
 default-members = [
+    "compat/windows/pe",
+    "compat/windows/win32",
     "libs/acpi",
     "libs/bootproto",
     "libs/elf",
@@ -42,6 +46,8 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 omit-abi = { path = "libs/abi" }
+omit-pe = { path = "compat/windows/pe" }
+omit-win32 = { path = "compat/windows/win32" }
 omit-acpi = { path = "libs/acpi" }
 omit-bootproto = { path = "libs/bootproto" }
 omit-elf = { path = "libs/elf" }

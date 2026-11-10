@@ -75,6 +75,11 @@ struct Thread {
     /// Set by [`kill`]; the thread exits the next time it is about to
     /// return to user mode.
     killed: bool,
+    /// User-mode `GS` base (the thread pointer), 0 if unused.
+    thread_pointer: u64,
+    /// Saved x87/SSE state, for threads that run a process. Kernel code
+    /// does not use those registers.
+    fpu: Option<Box<cpu::FpuState>>,
 }
 
 /// A snapshot of one thread, for `ps`.
@@ -129,6 +134,8 @@ pub fn init() -> Result<(), SpawnError> {
             address_space: None,
             pid: None,
             killed: false,
+            thread_pointer: 0,
+            fpu: None,
         }),
     );
     *SCHEDULER.lock() = Some(Scheduler {
@@ -199,8 +206,10 @@ fn spawn_with(
             wake_tick: None,
             cpu_ticks: 0,
             address_space,
+            fpu: pid.map(|_| Box::new(cpu::FpuState::new())),
             pid,
             killed: false,
+            thread_pointer: 0,
         }),
     );
     scheduler.ready.push_back(id);
@@ -263,18 +272,36 @@ fn reschedule() {
                 .stack
                 .as_ref()
                 .map_or(omit_bootproto::KERNEL_STACK_TOP, KernelStack::top);
+            let thread_pointer = next_thread.thread_pointer;
+            let load_fpu = next_thread
+                .fpu
+                .as_deref()
+                .map_or(core::ptr::null(), core::ptr::from_ref);
             // The thread lives in a `Box`, so this pointer stays valid
             // after the lock is released, until the thread is removed —
             // which cannot happen before it has been switched away from.
-            let save = &raw mut scheduler.threads.get_mut(&current)?.rsp;
-            Some((save, load, root, kernel_stack))
+            let current_thread = scheduler.threads.get_mut(&current)?;
+            let save_fpu = current_thread
+                .fpu
+                .as_deref_mut()
+                .map_or(core::ptr::null_mut(), core::ptr::from_mut);
+            let save = &raw mut current_thread.rsp;
+            Some((
+                save,
+                load,
+                root,
+                kernel_stack,
+                thread_pointer,
+                save_fpu,
+                load_fpu,
+            ))
         })
     };
     // Safe to release now: a dead thread was switched away from when it
     // died, so neither its stack nor its page table is in use.
     drop(finished);
 
-    if let Some((save, load, root, kernel_stack)) = switch {
+    if let Some((save, load, root, kernel_stack, thread_pointer, save_fpu, load_fpu)) = switch {
         // SAFETY: interrupts are disabled. `kernel_stack` is the top of the
         // next thread's own kernel stack. `root` is either the kernel's
         // page table or the next thread's address space, which lives as
@@ -285,6 +312,23 @@ fn reschedule() {
             syscall::set_kernel_stack(kernel_stack);
             if cpu::read_cr3() & !0xFFF != root {
                 cpu::write_cr3(root);
+            }
+            // The kernel does not use GS itself, so the register simply
+            // carries the running thread's value. Writing the MSR is
+            // skipped when the value does not change (the common case:
+            // both threads leave it at zero).
+            if ACTIVE_THREAD_POINTER.swap(thread_pointer, Ordering::Relaxed) != thread_pointer {
+                cpu::write_msr(MSR_GS_BASE, thread_pointer);
+            }
+            // The x87/SSE registers belong to user code only, so they are
+            // saved for a process thread being left and loaded for one
+            // being entered; kernel threads in between leave them alone.
+            // Both areas live in their thread's `Box` (see `save`).
+            if !save_fpu.is_null() {
+                cpu::FpuState::save(save_fpu);
+            }
+            if !load_fpu.is_null() {
+                cpu::FpuState::restore(load_fpu);
             }
         }
         // SAFETY: `save` points into the current thread's control block
@@ -399,6 +443,29 @@ pub fn threads() -> Vec<ThreadInfo> {
                 })
                 .collect()
         })
+}
+
+/// Base address of the `GS` segment.
+const MSR_GS_BASE: u32 = 0xC000_0101;
+/// The value currently loaded in the `GS` base register.
+static ACTIVE_THREAD_POINTER: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Sets the user-mode `GS` base of the calling thread. `address` must be
+/// zero or a user-space address.
+pub fn set_thread_pointer(address: u64) {
+    let interrupts_were_enabled = interrupts::save_and_disable();
+    if let Some(scheduler) = SCHEDULER.lock().as_mut() {
+        let current = scheduler.current;
+        if let Some(thread) = scheduler.threads.get_mut(&current) {
+            thread.thread_pointer = address;
+        }
+    }
+    ACTIVE_THREAD_POINTER.store(address, Ordering::Relaxed);
+    // SAFETY: GS base exists on every x86-64 CPU; the caller guarantees
+    // the address is canonical (zero or in the user half), so the write
+    // cannot fault. The kernel never addresses memory through GS.
+    unsafe { cpu::write_msr(MSR_GS_BASE, address) };
+    interrupts::restore(interrupts_were_enabled);
 }
 
 /// The process ID of the calling thread, if it runs a user process.

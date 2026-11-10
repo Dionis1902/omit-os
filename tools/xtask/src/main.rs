@@ -39,6 +39,7 @@ OPTIONS:
     --cpu <MODEL>       QEMU CPU model (run, test) [default: max]
     --memory <SIZE>     QEMU guest memory (run, test) [default: 256M]
     --accel <NAME>      QEMU accelerator, e.g. kvm (run, test) [default: tcg]
+    --only <TEST>       Run only the named boot test (test)
     --iso               Use a bootable ISO instead of a disk image (image, run, test)
     --gdb               Start QEMU paused with a GDB server on :1234 (run)
 
@@ -69,6 +70,8 @@ struct Options {
     accel: Option<String>,
     /// Boot from the ISO image instead of the disk image.
     iso: bool,
+    /// Run only the boot test with this name.
+    only: Option<String>,
 }
 
 impl Options {
@@ -89,6 +92,7 @@ impl Options {
                 "--cpu" => options.cpu = Some(value("--cpu")?),
                 "--memory" => options.memory = Some(value("--memory")?),
                 "--accel" => options.accel = Some(value("--accel")?),
+                "--only" => options.only = Some(value("--only")?),
                 other => return Err(format!("unknown option `{other}`").into()),
             }
         }
@@ -127,7 +131,58 @@ struct Artifacts {
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
     "cat", "crash", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper", "spin", "tee",
+    "winrun",
 ];
+
+/// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
+const WINDOWS_PROGRAMS: &[&str] = &[
+    "winfloat.exe",
+    "winhello.exe",
+    "winmissing.exe",
+    "wintest.exe",
+];
+
+/// The target the Windows test programs are built for.
+const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+
+/// Builds the Windows test programs: real PE32+ console executables,
+/// linked with the LLVM linker that ships with Rust (no Windows SDK),
+/// without the C runtime. Always optimised: they are test inputs, not
+/// something to debug, and one of them relies on values staying in
+/// registers.
+fn build_windows_programs() -> Result<()> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".into());
+    let flags = [
+        "-Clinker-flavor=lld-link",
+        "-Cpanic=abort",
+        "-Clink-arg=/NODEFAULTLIB",
+        "-Clink-arg=/ENTRY:mainCRTStartup",
+        "-Clink-arg=/SUBSYSTEM:CONSOLE",
+        // Reproducible output; see the loader's flags in .cargo/config.toml.
+        "-Clink-arg=/Brepro",
+        "-Clink-arg=/DEBUG:NONE",
+    ];
+    let status = Command::new(cargo)
+        .current_dir(workspace_root())
+        .env("CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER", "rust-lld")
+        .env(
+            "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
+            flags.join(" "),
+        )
+        .args([
+            "build",
+            "--package",
+            "omit-win-samples",
+            "--release",
+            "--target",
+            WINDOWS_TARGET,
+        ])
+        .status()?;
+    if !status.success() {
+        return Err("building the Windows test programs failed".into());
+    }
+    Ok(())
+}
 
 /// Packs `files` (archive path, contents) into a `ustar` archive with no
 /// timestamps, so identical inputs give identical output.
@@ -172,6 +227,14 @@ fn build(options: &Options) -> Result<Artifacts> {
     let mut files = Vec::new();
     for program in USER_PROGRAMS {
         files.push((format!("bin/{program}"), fs::read(user_dir.join(program))?));
+    }
+    build_windows_programs()?;
+    let windows_dir = target.join(WINDOWS_TARGET).join("release");
+    for program in WINDOWS_PROGRAMS {
+        files.push((
+            format!("bin/{program}"),
+            fs::read(windows_dir.join(program))?,
+        ));
     }
     Ok(Artifacts {
         loader: target
@@ -573,7 +636,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\n",
+                "\ncat\ncrash\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinrun\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -715,6 +778,82 @@ const BOOT_TESTS: &[BootTest] = &[
             ("/mnt/hello", "\nHello from user mode! I am process 1 "),
             ("umount /mnt", ""),
         ],
+        ends_with_reset: false,
+        display: false,
+    },
+    BootTest {
+        name: "windows-programs",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "winfloat 1: registers intact, H(1000) = 7.485470",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &[
+            "KERNEL PANIC",
+            "KERNEL EXCEPTION",
+            "[ERROR]",
+            "[WARN ]",
+            "CORRUPTED",
+            "FAILED",
+        ],
+        script: &[
+            // A Windows executable is recognised and run by name.
+            ("winhello.exe", "\nHello from a Windows executable!\r\n"),
+            // Arguments arrive as a Windows command line; the exit code
+            // returned from the entry point reaches the shell.
+            (
+                "wintest.exe one 'two words' three",
+                "wintest: command line: [/bin/wintest.exe one \"two words\" three]\r\n",
+            ),
+            ("echo marker-1", "\nmarker-1\n"),
+            // The whole run, into a file, to check every line of it.
+            (
+                "wintest.exe > /wintest.log",
+                "wintest.exe: exited with status 42\n",
+            ),
+            (
+                "cat /wintest.log",
+                "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: time ok\r\nwintest: all 57 checks passed\r\n",
+            ),
+            // The directory the test created and removed is gone.
+            ("ls /", "ls /\nbin\nwintest.log\nomit:/# "),
+            // Missing functions are reported before the program starts.
+            (
+                "winmissing.exe",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateThread, which is not implemented\nwinrun: /bin/winmissing.exe: needs user32.dll!MessageBoxA, which is not implemented\nwinrun: /bin/winmissing.exe: 2 of the Windows functions it needs are not implemented\nwinmissing.exe: exited with status 127\n",
+            ),
+            // Files that are not 64-bit Windows programs.
+            ("echo MZ-but-not-really > /fake.exe", ""),
+            (
+                "/fake.exe",
+                "winrun: /fake.exe: not a Windows executable (no PE signature)\nfake.exe: exited with status 126\n",
+            ),
+            ("winrun", "usage: winrun PROGRAM.EXE [ARGUMENT...]\n"),
+            ("winrun --list", "\nKERNEL32.dll!WriteFile\n"),
+            (
+                "winrun /bin/hello",
+                "winrun: /bin/hello: not an executable (no MZ signature)\n",
+            ),
+            // Two Windows programs at once: each keeps values in SSE
+            // registers and checks that the other's never show up.
+            // (The first one's report is checked in `must_contain`.)
+            // The background one runs for a shorter time, so that it has
+            // reported before the foreground one returns.
+            ("winfloat.exe 1 800 &", "] winfloat.exe\n"),
+            (
+                "winfloat.exe 2 2000",
+                "winfloat 2: registers intact, H(1000) = 7.485470\r\n",
+            ),
+            // A program started by another program (the spawn system
+            // call) can be a Windows executable too.
+            (
+                "run /bin/winhello.exe",
+                "\nHello from a Windows executable!\r\n",
+            ),
+            ("ps", "PID"),
+        ],
+        reboot_script: &[],
         ends_with_reset: false,
         display: false,
     },
@@ -1341,10 +1480,18 @@ fn cmd_test(options: &Options) -> Result<ExitCode> {
             .unwrap_or(120),
     );
 
+    let tests: Vec<&BootTest> = BOOT_TESTS
+        .iter()
+        .filter(|test| options.only.as_deref().is_none_or(|name| name == test.name))
+        .collect();
+    if tests.is_empty() {
+        return Err("no boot test has that name".into());
+    }
+
     println!("TAP version 13");
-    println!("1..{}", BOOT_TESTS.len());
+    println!("1..{}", tests.len());
     let mut failed = 0;
-    for (index, test) in BOOT_TESTS.iter().enumerate() {
+    for (index, test) in tests.iter().enumerate() {
         let (failures, run) = run_boot_test(test, &artifacts, options, timeout)?;
         let number = index + 1;
         if failures.is_empty() {
@@ -1370,7 +1517,7 @@ fn cmd_test(options: &Options) -> Result<ExitCode> {
         options.profile_dir(),
         options.accel.as_deref().unwrap_or("tcg"),
         options.cpu.as_deref().unwrap_or("max"),
-        BOOT_TESTS.len() - failed,
+        tests.len() - failed,
         out_dir(options)?.display()
     );
     Ok(if failed == 0 {

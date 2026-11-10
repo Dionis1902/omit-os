@@ -8,7 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+omit-pe.workspace = true
 omit-rt.workspace = true
+omit-win32.workspace = true
 
 [lints]
 workspace = true

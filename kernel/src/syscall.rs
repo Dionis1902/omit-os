@@ -12,7 +12,7 @@ use alloc::vec::Vec;
 
 use omit_abi::{
     ARGS_MAX, Errno, KIND_DIRECTORY, KIND_FILE, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, Stat,
-    WRITE_MAX, nr, open,
+    WRITE_MAX, nr, open, protect,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
@@ -43,6 +43,27 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4:
         nr::MAP => process::map_memory(a0, a1).ok_or(Errno::NoSpace),
         nr::UNMAP => {
             if process::unmap_memory(a0, a1) {
+                Ok(0)
+            } else {
+                Err(Errno::InvalidArgument)
+            }
+        }
+        nr::PROTECT => {
+            let writable = a2 & protect::WRITE != 0;
+            let executable = a2 & protect::EXECUTE != 0;
+            if a2 & !(protect::WRITE | protect::EXECUTE) == 0
+                && process::protect_memory(a0, a1, writable, executable)
+            {
+                Ok(0)
+            } else {
+                Err(Errno::InvalidArgument)
+            }
+        }
+        nr::SET_THREAD_POINTER => {
+            // Only addresses in the user half: loading a non-canonical or
+            // kernel address into GS base is never legitimate.
+            if a0 == 0 || crate::arch::uspace::is_user_range(a0, 1) {
+                sched::set_thread_pointer(a0);
                 Ok(0)
             } else {
                 Err(Errno::InvalidArgument)
@@ -248,10 +269,23 @@ fn spawn(path_address: u64, path_length: u64, args_address: u64, args_length: u6
         }
     }
 
-    let image = fs::root()
+    let mut image = fs::root()
         .ok_or(Errno::NotFound)?
         .read_file(&path)
         .map_err(errno)?;
+    if image.starts_with(omit_shell::WINDOWS_MAGIC) {
+        // A Windows executable: run the Windows program loader on it, as
+        // the shell does.
+        image = fs::root()
+            .ok_or(Errno::NotFound)?
+            .read_file(omit_shell::WINDOWS_LOADER)
+            .map_err(|_| Errno::NotExecutable)?;
+        if args.is_empty() {
+            args.push(String::new());
+        }
+        args[0] = omit_shell::WINDOWS_LOADER.into();
+        args.insert(1, path.clone());
+    }
     let cwd = process::current_dir().ok_or(Errno::InvalidArgument)?;
     let name = path::file_name(&path).unwrap_or("program");
     process::spawn(name, &image, &args, &cwd, process::stdout_file()).map_err(|error| match error {

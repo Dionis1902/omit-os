@@ -1,0 +1,11 @@
+[package]
+name = "omit-win-samples"
+description = "Windows console programs used to test the Windows compatibility layer; built for x86_64-pc-windows-msvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

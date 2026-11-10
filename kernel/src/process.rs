@@ -504,3 +504,36 @@ pub fn unmap_memory(address: u64, length: u64) -> bool {
     }
     true
 }
+
+/// Changes the access rights of the calling process's memory in
+/// `[address, address + length)`, which must lie in the `map` area and be
+/// page-aligned and fully mapped. Returns `false` otherwise, or for a
+/// request to make memory both writable and executable; in that case some
+/// pages may already have been changed.
+pub fn protect_memory(address: u64, length: u64, writable: bool, executable: bool) -> bool {
+    let Some(end) = address.checked_add(length) else {
+        return false;
+    };
+    if (writable && executable)
+        || !address.is_multiple_of(PAGE_SIZE)
+        || address < USER_MAP_BASE
+        || end > USER_MAP_END
+    {
+        return false;
+    }
+    let pages = length.div_ceil(PAGE_SIZE);
+    let mut done = 0;
+    while done < pages {
+        let batch = (pages - done).min(MAP_BATCH);
+        let ok = sched::with_address_space(|space| {
+            (0..batch).all(|index| {
+                space.protect(address + (done + index) * PAGE_SIZE, writable, executable)
+            })
+        });
+        if ok != Some(true) {
+            return false;
+        }
+        done += batch;
+    }
+    true
+}

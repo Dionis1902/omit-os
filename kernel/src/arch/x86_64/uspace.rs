@@ -178,6 +178,56 @@ impl AddressSpace {
         }
     }
 
+    /// Changes the access rights of the mapped user page at `virt`.
+    /// Returns `false` if the page is not mapped or the combination is
+    /// writable and executable.
+    pub fn protect(&mut self, virt: u64, writable: bool, executable: bool) -> bool {
+        if (writable && executable)
+            || !virt.is_multiple_of(PAGE_SIZE)
+            || !is_user_range(virt, PAGE_SIZE)
+        {
+            return false;
+        }
+        let path = indices(virt);
+        let mut current = self.root;
+        for &index in &path[..3] {
+            let Some(entries) = table(current) else {
+                return false;
+            };
+            // SAFETY: `current` is a page-table frame owned by this address
+            // space; the entry is only read.
+            let entry = unsafe { (*entries)[index] };
+            if entry & PRESENT == 0 || entry & HUGE != 0 {
+                return false;
+            }
+            current = entry & ADDRESS_MASK;
+        }
+        let Some(entries) = table(current) else {
+            return false;
+        };
+        // SAFETY: `entries` is the level-1 table for `virt`, owned by this
+        // address space (`&mut self`). The frame address is kept and only
+        // the permission bits change; `invlpg` drops the stale translation
+        // in case this address space is active.
+        unsafe {
+            let slot = &raw mut (*entries)[path[3]];
+            let entry = slot.read();
+            if entry & PRESENT == 0 {
+                return false;
+            }
+            let mut flags = PRESENT | USER;
+            if writable {
+                flags |= WRITABLE;
+            }
+            if !executable {
+                flags |= NO_EXECUTE;
+            }
+            slot.write((entry & ADDRESS_MASK) | flags);
+            core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
+        }
+        true
+    }
+
     /// Looks up the user page containing `virt`. Returns the frame it is
     /// mapped to and whether user code may write to it.
     pub fn translate(&self, virt: u64) -> Option<(u64, bool)> {

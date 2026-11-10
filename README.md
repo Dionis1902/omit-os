@@ -108,7 +108,8 @@ All `xtask` commands:
 | `cargo xtask test` | Build and run the QEMU integration tests (TAP output) |
 
 Options: `--release`, `--cmdline "<text>"` (image/run), `--cpu <model>`,
-`--memory <size>`, `--accel <name>` (e.g. `kvm`), `--iso` (use an ISO instead of
+`--memory <size>`, `--accel <name>` (e.g. `kvm`), `--only <test>` (run a
+single boot test), `--iso` (use an ISO instead of
 a disk image), `--gdb` (run). `xtask run` also attaches a 32 MiB VirtIO data
 disk (`target/omit/<profile>/omit-data.img`) that persists between runs; try
 `mkfs vda`, `mkdir /mnt`, `mount vda /mnt`. Environment: `QEMU`, `OVMF_CODE` +
@@ -184,9 +185,12 @@ keyboard); otherwise the only way to type is a serial port (COM1, 115200 8N1).
 ## Status
 
 Milestones 0 (development environment), 1 (bootable kernel), 2 (memory and
-interrupts), 3 (terminal and filesystem) and 4 (processes and userspace) are
-implemented, with one
-addition from Milestone 8: a framebuffer text console.
+interrupts), 3 (terminal and filesystem), 4 (processes and userspace),
+5 (storage; coreutils only in part), 6 (driver compatibility, first
+instance) and 7 (Windows executables, first instance) are implemented, with
+one addition from Milestone 8: a framebuffer text console. "First instance"
+means what it says: one Linux driver, and Windows programs that use only a
+small part of one system library.
 
 | Component | State |
 | --- | --- |
@@ -233,7 +237,12 @@ addition from Milestone 8: a framebuffer text console.
 | Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
 | Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
 | SMP | Not started |
-| Persistent storage, drivers, Windows/Linux compatibility | Not started |
+| SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
+| PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
+| Windows program loader `winrun`: mapping, relocation, import binding, W^X section rights, stack, TEB/PEB | Working, tested in QEMU |
+| Windows API: 43 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process information) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else can run**; see ADR 0011 |
+| Windows programs started by name from the shell or by `spawn`; missing functions reported before start | Working, tested |
+| Windows: C runtime, threads, DLLs, exceptions, TLS, graphics, registry, networking, 32-bit programs | Not started |
 
 ### What has been verified, and how
 
@@ -316,6 +325,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Linux driver reuse is demonstrated for a single small driver without
   interrupts or DMA, in emulation. It says little about how hard network,
   storage or graphics drivers will be.
+- Windows compatibility covers console programs that import only the 43
+  implemented `KERNEL32.dll` functions (`winrun --list`). Practically no
+  existing Windows software fits that; the test programs are built in this
+  repository and have not been run on Windows itself for comparison.
+- AVX is not enabled, and no memory can be writable and executable.
 - No performance measurements have been made, and no performance claims are
   made.
 
@@ -330,6 +344,9 @@ libs/abi/        system call numbers and error codes shared by kernel and usersp
 libs/acpi/       ACPI static table parser (RSDP, RSDT/XSDT, MADT), host-tested
 libs/elf/        safe ELF64 program-header parser
 compat/linux-kpi/  our implementation of the Linux kernel API subset used by reused drivers
+compat/windows/pe/      PE32+ (Windows executable) parser, host-tested
+compat/windows/win32/   machine-independent parts of the Windows API layer, host-tested
+compat/windows/samples/ Windows test programs (built for x86_64-pc-windows-msvc)
 drivers/linux/   Linux driver sources, unmodified, with provenance
 libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
@@ -338,7 +355,8 @@ libs/term/       terminal emulator and keyboard scancode decoder, host-tested
 libs/vfs/        virtual filesystem layer and RAM filesystem, host-tested
 shell/           the built-in shell (line editor, parser, commands), host-tested
 userspace/rt/    runtime for user programs: entry point, system calls, printing
-userspace/programs/  sample user programs, shipped in the initial ramdisk
+userspace/programs/  user programs shipped in the initial ramdisk, including
+                 `winrun`, the Windows program loader and API implementation
 tools/xtask/     build / image / run / test driver
 docs/adr/        architecture decision records
 .github/         CI
@@ -409,13 +427,14 @@ tests on every push and pull request.
 
 Development proceeds in independently verifiable milestones. The long-term
 goals — reusing Linux drivers through a compatibility layer, and running
-Windows executables natively — are research-heavy and far away; nothing in
-this repository implements them yet.
+Windows executables natively — each have a first working instance (ADRs
+0010 and 0011). Both are far from being generally useful.
 
-**Next step:** Milestone 7 — a PE32+ loader and the first pieces of a native
-Windows compatibility layer, aiming at a simple console executable. Still
+**Next step:** Milestone 8 — graphics beyond the text console: a pixel
+drawing interface for programs, a mouse, and a simple window system. Still
 open from earlier milestones: interrupts for device drivers (MSI-X), an
-installer, loadable drivers and packages, a Rust `std` port for coreutils.
+installer, loadable drivers and packages, a Rust `std` port for coreutils,
+threads, and the Windows functions the C runtime needs.
 
 ## Licence
 

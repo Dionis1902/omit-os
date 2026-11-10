@@ -113,6 +113,10 @@ name = "omit-mm"
 version = "0.1.0"
 
 [[package]]
+name = "omit-pe"
+version = "0.1.0"
+
+[[package]]
 name = "omit-rt"
 version = "0.1.0"
 dependencies = [
@@ -135,12 +139,25 @@ version = "0.1.0"
 name = "omit-user-programs"
 version = "0.1.0"
 dependencies = [
+ "omit-pe",
  "omit-rt",
+ "omit-win32",
 ]
 
 [[package]]
 name = "omit-vfs"
 version = "0.1.0"
+
+[[package]]
+name = "omit-win-samples"
+version = "0.1.0"
+
+[[package]]
+name = "omit-win32"
+version = "0.1.0"
+dependencies = [
+ "omit-abi",
+]
 
 [[package]]
 name = "proc-macro2"

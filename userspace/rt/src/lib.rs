@@ -223,6 +223,43 @@ pub unsafe fn unmap(address: *mut u8, length: usize) -> Result<(), Errno> {
     result(unsafe { syscall(nr::UNMAP, address as u64, length as u64, 0) }).map(|_| ())
 }
 
+/// Changes the access rights of memory obtained from [`map`]:
+/// `protection` is [`abi::protect::READ`], `WRITE` or `EXECUTE`. Memory
+/// cannot be writable and executable at once.
+///
+/// # Safety
+///
+/// Nothing may rely on the access being taken away: no live reference may
+/// point into memory that stops being writable, for example.
+pub unsafe fn protect(address: *mut u8, length: usize, protection: u64) -> Result<(), Errno> {
+    // SAFETY: the caller guarantees that nothing depends on the old rights.
+    result(unsafe { syscall(nr::PROTECT, address as u64, length as u64, protection) }).map(|_| ())
+}
+
+/// Sets the base address of the `GS` segment for this thread, for code
+/// that expects per-thread data there. Zero clears it.
+pub fn set_thread_pointer(address: usize) -> Result<(), Errno> {
+    // SAFETY: plain integer argument; the kernel validates it. This
+    // runtime does not use `GS` itself.
+    result(unsafe { syscall(nr::SET_THREAD_POINTER, address as u64, 0, 0) }).map(|_| ())
+}
+
+/// Reads the whole file at `path`.
+pub fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
+    let fd = open(path, abi::open::READ)?;
+    let mut contents = Vec::new();
+    let mut buffer = alloc::vec![0u8; 16 * 1024];
+    let outcome = loop {
+        match read(fd, &mut buffer) {
+            Ok(0) => break Ok(()),
+            Ok(count) => contents.extend_from_slice(&buffer[..count]),
+            Err(error) => break Err(error),
+        }
+    };
+    let _ = close(fd);
+    outcome.map(|()| contents)
+}
+
 /// Information about the file or directory at `path`.
 pub fn stat(path: &str) -> Result<abi::Stat, Errno> {
     let mut stat = abi::Stat::default();

@@ -37,6 +37,23 @@ USB stick (this erases the stick; replace `/dev/sdX` with its device):
 sudo dd if=omit-os-*-x86_64.img of=/dev/sdX bs=4M conv=fsync status=progress
 ```
 
+## Things to try
+
+At the `omit:/#` prompt:
+
+```text
+help                 the built-in commands
+ls /bin              the programs on the image
+hello                a native program
+winhello.exe         a Windows console program, run natively
+wintest.exe          a Windows program that tests the Windows API layer
+winrun --list        the Windows functions that are implemented
+lspci                hardware, with driver status
+```
+
+Windows support is a first step: only console programs that use a small
+set of `KERNEL32.dll` functions run. Existing Windows software does not.
+
 ## Status
 
 See the README for exactly what works, what has been tested and how, and the
