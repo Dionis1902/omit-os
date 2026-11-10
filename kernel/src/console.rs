@@ -79,6 +79,17 @@ pub fn read_byte() -> u8 {
     byte.expect("wait_until returns only once the condition holds")
 }
 
+/// Like [`read_byte`], but gives up and returns `None` if the calling
+/// process is killed while waiting.
+pub fn read_byte_unless_killed() -> Option<u8> {
+    let mut byte = None;
+    INPUT_AVAILABLE.wait_until(|| {
+        byte = INPUT.lock().pop();
+        byte.is_some() || crate::sched::current_killed()
+    });
+    byte
+}
+
 /// Number of input bytes discarded because the queue was full.
 pub fn dropped_input() -> u64 {
     INPUT.lock().dropped

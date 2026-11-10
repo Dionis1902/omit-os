@@ -189,6 +189,25 @@ impl AddressSpace {
         })
     }
 
+    /// Copies `data` to user address `addr`. Returns `false` if any part of
+    /// the range is not mapped writable for user code (in which case an
+    /// earlier part may already have been written).
+    pub fn write(&mut self, addr: u64, data: &[u8]) -> bool {
+        self.for_each_chunk(addr, data.len(), true, |phys, offset, len| {
+            let Some(destination) = mm::phys_to_virt(phys, len as u64) else {
+                return false;
+            };
+            // SAFETY: `destination` aliases `len` bytes inside a frame that
+            // is mapped user-writable in this address space, to which
+            // `&mut self` gives exclusive access; the source range is
+            // inside `data`.
+            unsafe {
+                core::ptr::copy_nonoverlapping(data[offset..].as_ptr(), destination, len);
+            }
+            true
+        })
+    }
+
     /// Splits `[addr, addr + len)` at page boundaries and calls `visit`
     /// with the physical address, the offset into the range and the length
     /// of each piece. Stops and returns `false` at the first unmapped (or,

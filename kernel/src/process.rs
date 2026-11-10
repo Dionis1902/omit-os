@@ -1,16 +1,18 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! User processes.
 //!
-//! A process is a user address space plus one kernel thread that runs it.
-//! Creating one means building the address space from an ELF image and
-//! starting a thread that drops to user mode at the program's entry point.
+//! A process is a user address space plus one kernel thread that runs it,
+//! a working directory and a table of open files. Creating one means
+//! building the address space from an ELF image and starting a thread that
+//! drops to user mode at the program's entry point.
 
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::vec::Vec;
 use core::fmt;
 
-use omit_abi::{EXIT_KILLED, USER_STACK_SIZE, USER_STACK_TOP};
+use omit_abi::{ARGS_MAX, EXIT_KILLED, MAX_OPEN_FILES, USER_STACK_SIZE, USER_STACK_TOP};
 use omit_elf::{EM_X86_64, ET_EXEC, Elf64, ElfError};
 
 use crate::arch::gdt::{USER_CS, USER_DS};
@@ -31,6 +33,8 @@ pub enum ExecError {
     Elf(ElfError),
     /// The image is valid ELF but not a program this kernel can run.
     Unsupported(&'static str),
+    /// The arguments exceed [`ARGS_MAX`] bytes.
+    ArgumentsTooLong,
     /// Building the address space failed.
     Map(MapError),
     /// The thread could not be created.
@@ -42,16 +46,38 @@ impl fmt::Display for ExecError {
         match self {
             Self::Elf(e) => write!(f, "not an executable: {e}"),
             Self::Unsupported(what) => write!(f, "cannot execute: {what}"),
+            Self::ArgumentsTooLong => write!(f, "argument list too long"),
             Self::Map(e) => write!(f, "cannot build address space: {e}"),
             Self::Spawn(e) => write!(f, "cannot create thread: {e:?}"),
         }
     }
 }
 
+/// An open file: a path and a position in it.
+///
+/// Files are identified by path rather than by inode, so renaming or
+/// removing a file while it is open affects the descriptor. That is a
+/// known simplification.
+#[derive(Debug, Clone)]
+pub struct OpenFile {
+    /// Normalised absolute path.
+    pub path: String,
+    /// Position of the next read or write.
+    pub offset: u64,
+    /// Opened for writing rather than reading.
+    pub writable: bool,
+    /// Every write goes to the end of the file.
+    pub append: bool,
+}
+
 struct Record {
     thread: ThreadId,
     /// Set when the process ends.
     exit_status: Option<i32>,
+    /// Working directory: a normalised absolute path.
+    cwd: String,
+    /// Open files, indexed by descriptor minus 3 (0-2 are the console).
+    files: Vec<Option<OpenFile>>,
 }
 
 struct Table {
@@ -64,28 +90,31 @@ static TABLE: SpinLock<Table> = SpinLock::new(Table {
     next_pid: 1,
 });
 
+/// First descriptor number available to files.
+const FIRST_FILE_FD: u64 = 3;
+
 /// Where a new process starts executing.
 struct Start {
     entry: u64,
     stack: u64,
 }
 
-/// Allocates a zeroed frame, fills it with `data` at `offset`, and maps it
-/// at `virt`.
+/// Allocates a zeroed frame, fills its start with `data`, and maps it at
+/// `virt`.
 fn map_page(
     space: &mut AddressSpace,
     virt: u64,
     data: &[u8],
-    offset: usize,
     writable: bool,
     executable: bool,
 ) -> Result<(), ExecError> {
+    debug_assert!(data.len() <= PAGE_SIZE as usize);
     let phys = frame::alloc_zeroed(0).ok_or(ExecError::Map(MapError::OutOfMemory))?;
     if !data.is_empty() {
         let page = mm::phys_to_virt(phys, PAGE_SIZE).expect("frames are in the direct map");
         // SAFETY: the frame was just allocated and is referenced by nothing
-        // else; `offset + data.len() <= PAGE_SIZE` is ensured by the caller.
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), page.add(offset), data.len()) };
+        // else; `data` is at most one page long.
+        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), page, data.len()) };
     }
     space.map(virt, phys, writable, executable).map_err(|e| {
         // SAFETY: the mapping failed, so the frame is still only ours.
@@ -94,8 +123,43 @@ fn map_page(
     })
 }
 
+/// Writes the program arguments at the top of the user stack and returns
+/// the initial stack pointer.
+///
+/// Layout at the returned address, as 64-bit words: the argument count,
+/// then one pointer per argument, then a null pointer. The strings
+/// themselves (NUL-terminated) sit above.
+fn push_arguments(space: &mut AddressSpace, args: &[String]) -> Result<u64, ExecError> {
+    let strings: usize = args.iter().map(|arg| arg.len() + 1).sum();
+    if strings > ARGS_MAX || args.iter().any(|arg| arg.as_bytes().contains(&0)) {
+        return Err(ExecError::ArgumentsTooLong);
+    }
+    let fault = ExecError::Map(MapError::InvalidRange);
+
+    let mut cursor = USER_STACK_TOP;
+    let mut pointers = Vec::with_capacity(args.len());
+    for arg in args {
+        cursor -= arg.len() as u64 + 1;
+        // The stack frames are zero-filled, which provides the terminator.
+        if !space.write(cursor, arg.as_bytes()) {
+            return Err(fault);
+        }
+        pointers.push(cursor);
+    }
+
+    // argc, the pointers and the null terminator, 16-byte aligned so the
+    // stack pointer the program starts with satisfies the ABI.
+    let words = args.len() as u64 + 2;
+    let base = (cursor - words * 8) & !0xF;
+    let mut ok = space.write(base, &(args.len() as u64).to_le_bytes());
+    for (index, pointer) in pointers.iter().enumerate() {
+        ok &= space.write(base + 8 * (index as u64 + 1), &pointer.to_le_bytes());
+    }
+    if ok { Ok(base) } else { Err(fault) }
+}
+
 /// Builds a user address space from an ELF image.
-fn load(image: &[u8]) -> Result<(AddressSpace, Start), ExecError> {
+fn load(image: &[u8], args: &[String]) -> Result<(AddressSpace, Start), ExecError> {
     let elf = Elf64::parse(image).map_err(ExecError::Elf)?;
     if elf.machine() != EM_X86_64 {
         return Err(ExecError::Unsupported("not an x86-64 program"));
@@ -132,7 +196,6 @@ fn load(image: &[u8]) -> Result<(AddressSpace, Start), ExecError> {
                 &mut space,
                 segment.vaddr + page * PAGE_SIZE,
                 chunk,
-                0,
                 segment.is_writable(),
                 segment.is_executable(),
             )?;
@@ -150,16 +213,16 @@ fn load(image: &[u8]) -> Result<(AddressSpace, Start), ExecError> {
             &mut space,
             stack_bottom + page * PAGE_SIZE,
             &[],
-            0,
             true,
             false,
         )?;
     }
+    let stack = push_arguments(&mut space, args)?;
     Ok((
         space,
         Start {
             entry: elf.entry(),
-            stack: USER_STACK_TOP,
+            stack,
         },
     ))
 }
@@ -173,14 +236,16 @@ fn enter(start: usize) {
     drop(start);
     // SAFETY: this thread was created by `spawn_process` with the address
     // space built by `load`, which is active now: it maps `entry` inside an
-    // executable user segment and the stack below `stack`. The scheduler
+    // executable user segment and the stack around `stack`. The scheduler
     // registered this thread's kernel stack when it switched to it.
     unsafe { enter_user(entry, stack, u64::from(USER_CS), u64::from(USER_DS)) }
 }
 
-/// Starts the program in `image` as a new process called `name`.
-pub fn spawn(name: &str, image: &[u8]) -> Result<Pid, ExecError> {
-    let (space, start) = load(image)?;
+/// Starts the program in `image` as a new process called `name`, with
+/// arguments `args` and working directory `cwd` (a normalised absolute
+/// path).
+pub fn spawn(name: &str, image: &[u8], args: &[String], cwd: &str) -> Result<Pid, ExecError> {
+    let (space, start) = load(image, args)?;
     let start = Box::into_raw(Box::new(start));
 
     let mut table = TABLE.lock();
@@ -193,6 +258,8 @@ pub fn spawn(name: &str, image: &[u8]) -> Result<Pid, ExecError> {
                 Record {
                     thread,
                     exit_status: None,
+                    cwd: cwd.into(),
+                    files: Vec::new(),
                 },
             );
             Ok(pid)
@@ -213,6 +280,8 @@ pub fn exit(status: i32) -> ! {
         && let Some(record) = TABLE.lock().processes.get_mut(&pid)
     {
         record.exit_status = Some(status);
+        // Open files hold no resources beyond their table entries.
+        record.files.clear();
     }
     sched::exit()
 }
@@ -249,8 +318,7 @@ pub fn kill(pid: Pid) -> bool {
     sched::kill(pid)
 }
 
-/// Describes why the current process is being terminated after a CPU
-/// exception, for the console.
+/// The ID and name of the calling process, for diagnostics.
 pub fn describe_current() -> (Pid, String) {
     let pid = sched::current_pid().unwrap_or(0);
     let name = sched::threads()
@@ -259,4 +327,67 @@ pub fn describe_current() -> (Pid, String) {
         .map(|thread| thread.name)
         .unwrap_or_default();
     (pid, name)
+}
+
+/// Runs `f` on the calling process's record.
+fn with_current<R>(f: impl FnOnce(&mut Record) -> R) -> Option<R> {
+    let pid = sched::current_pid()?;
+    TABLE.lock().processes.get_mut(&pid).map(f)
+}
+
+/// The calling process's working directory.
+pub fn current_dir() -> Option<String> {
+    with_current(|record| record.cwd.clone())
+}
+
+/// Adds `file` to the calling process's open files and returns its
+/// descriptor, or `None` if the table is full.
+pub fn install_file(file: OpenFile) -> Option<u64> {
+    with_current(|record| {
+        let slot = match record.files.iter().position(Option::is_none) {
+            Some(slot) => slot,
+            None if record.files.len() + (FIRST_FILE_FD as usize) < MAX_OPEN_FILES => {
+                record.files.push(None);
+                record.files.len() - 1
+            }
+            None => return None,
+        };
+        record.files[slot] = Some(file);
+        Some(slot as u64 + FIRST_FILE_FD)
+    })
+    .flatten()
+}
+
+/// A copy of the calling process's open file `fd`.
+pub fn file(fd: u64) -> Option<OpenFile> {
+    let slot = usize::try_from(fd.checked_sub(FIRST_FILE_FD)?).ok()?;
+    with_current(|record| record.files.get(slot).cloned().flatten()).flatten()
+}
+
+/// Sets the position of the calling process's open file `fd`.
+pub fn set_file_offset(fd: u64, offset: u64) {
+    let Some(slot) = fd
+        .checked_sub(FIRST_FILE_FD)
+        .and_then(|slot| usize::try_from(slot).ok())
+    else {
+        return;
+    };
+    with_current(|record| {
+        if let Some(Some(file)) = record.files.get_mut(slot) {
+            file.offset = offset;
+        }
+    });
+}
+
+/// Closes the calling process's descriptor `fd`; `false` if it was not
+/// open.
+pub fn close_file(fd: u64) -> bool {
+    let Some(slot) = fd
+        .checked_sub(FIRST_FILE_FD)
+        .and_then(|slot| usize::try_from(slot).ok())
+    else {
+        return false;
+    };
+    with_current(|record| record.files.get_mut(slot).and_then(Option::take).is_some())
+        .unwrap_or(false)
 }

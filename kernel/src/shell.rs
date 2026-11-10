@@ -2,35 +2,30 @@
 //! Runs the interactive shell on the kernel console.
 //!
 //! The shell itself lives in the `omit_shell` crate; this module provides
-//! its environment: console input and output, a RAM filesystem populated
-//! from the initial ramdisk, and the ability to run programs as processes.
-//!
-//! The filesystem is owned by this function rather than being a kernel-wide
-//! object. The shell is still its only user: programs have no file system
-//! calls yet.
+//! its environment: console input and output, the root filesystem, and the
+//! ability to run programs as processes.
 
-use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use omit_shell::{Host, LineEditor, MemoryInfo, Outcome, Shell, SystemInfo, TaskInfo};
-use omit_vfs::ramfs::RamFs;
-use omit_vfs::{Vfs, tar};
 
 use crate::console::{self, Writer};
-use crate::{arch, info, kprintln, mm, process, sched, time, warn};
+use crate::{arch, fs, info, kprintln, mm, process, sched, time, warn};
 
 /// Connects the shell's process commands to the kernel.
 struct KernelHost;
 
 impl Host for KernelHost {
-    fn spawn(&mut self, name: &str, image: &[u8]) -> Result<u64, String> {
-        process::spawn(name, image).map_err(|error| format!("{error}"))
-    }
-
-    fn wait(&mut self, pid: u64) -> Option<i32> {
-        process::wait(pid)
+    fn spawn(
+        &mut self,
+        name: &str,
+        image: &[u8],
+        args: &[String],
+        cwd: &str,
+    ) -> Result<u64, String> {
+        process::spawn(name, image, args, cwd).map_err(|error| format!("{error}"))
     }
 
     fn kill(&mut self, pid: u64) -> bool {
@@ -64,22 +59,9 @@ impl Host for KernelHost {
     }
 }
 
-/// Runs the shell until the user types `exit`. `initrd` is the initial
-/// ramdisk (a tar archive, possibly empty) to unpack into the root
-/// filesystem.
-pub fn run(initrd: &[u8]) {
-    let mut vfs = Vfs::new(Box::new(RamFs::new()));
-    info!("vfs: RAM filesystem mounted at /");
-    if !initrd.is_empty() {
-        match tar::unpack(&mut vfs, initrd) {
-            Ok(files) => info!(
-                "vfs: unpacked {files} file(s) from the initial ramdisk ({} KiB)",
-                initrd.len() / 1024
-            ),
-            Err(error) => warn!("vfs: initial ramdisk is damaged: {error}"),
-        }
-    }
-
+/// Runs the shell until the user types `exit`. The root filesystem must
+/// have been initialised.
+pub fn run() {
     let mut shell = Shell::new(SystemInfo {
         sysname: "Omit OS",
         release: env!("CARGO_PKG_VERSION"),
@@ -100,8 +82,21 @@ pub fn run(initrd: &[u8]) {
                 break line;
             }
         };
-        if shell.execute(&line, &mut vfs, &mut host, &mut out) == Outcome::Exit {
-            break;
+
+        // The filesystem is locked only while the shell itself works on
+        // it. It must be free again before waiting for a program, which
+        // may use it.
+        let outcome = match fs::root() {
+            Some(mut root) => shell.execute(&line, &mut root, &mut host, &mut out),
+            None => {
+                warn!("shell: no root filesystem");
+                break;
+            }
+        };
+        match outcome {
+            Outcome::Continue => {}
+            Outcome::Exit => break,
+            Outcome::Wait { pid } => shell.finish_wait(process::wait(pid), &mut out),
         }
     }
 

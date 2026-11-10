@@ -125,7 +125,7 @@ struct Artifacts {
 }
 
 /// User programs shipped in `/bin` of the initial ramdisk.
-const USER_PROGRAMS: &[&str] = &["crash", "hello", "sleeper", "spin"];
+const USER_PROGRAMS: &[&str] = &["cat", "crash", "echo", "hello", "sleeper", "spin", "tee"];
 
 /// Packs `files` (archive path, contents) into a `ustar` archive with no
 /// timestamps, so identical inputs give identical output.
@@ -530,7 +530,7 @@ const BOOT_TESTS: &[BootTest] = &[
                 "hello",
                 "\nHello from user mode! I am process 1 and the system has been up for ",
             ),
-            ("ls /bin", "\ncrash\nhello\nsleeper\nspin\n"),
+            ("ls /bin", "\ncat\ncrash\necho\nhello\nsleeper\nspin\ntee\n"),
             // A program that misbehaves is stopped; the shell carries on.
             (
                 "crash",
@@ -549,6 +549,26 @@ const BOOT_TESTS: &[BootTest] = &[
             ("sleeper", "sleeper: tick 5\n"),
             ("kill 4", "\nkill: 4: no such process\n"),
             ("free", "\nMemory: "),
+            // Programs with arguments, files and standard input. The
+            // built-ins `echo` and `cat` take precedence over the programs
+            // of the same name, so those are run by path.
+            ("/bin/echo  from   'user space'", "\nfrom user space\n"),
+            ("echo file contents > /note", ""),
+            ("/bin/cat /note /note", "\nfile contents\nfile contents\n"),
+            ("cd /bin", ""),
+            ("./cat ../note", "\nfile contents\n"),
+            ("cd /", ""),
+            (
+                "/bin/cat /missing /note",
+                "\ncat: /missing: No such file or directory\nfile contents\ncat: exited with status 1\n",
+            ),
+            ("/bin/cat /bin", "\ncat: /bin: Is a directory\n"),
+            // Standard input: two lines typed, then Ctrl-D for end of input.
+            (
+                "tee /typed\rfirst line\rsecond line\r\x04",
+                "first line\nfirst line\nsecond line\nsecond line\n",
+            ),
+            ("cat /typed", "\nfirst line\nsecond line\n"),
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],
@@ -871,7 +891,13 @@ fn run_qemu_captured(
         }
         for (line, expected) in script {
             let Some(from) = position else { break };
-            if stdin.write_all(format!("{line}\r").as_bytes()).is_err() {
+            // A line ending in Ctrl-D ends a program's input; pressing
+            // Enter after it would be read by the shell as an empty command.
+            let ending = if line.ends_with('\x04') { "" } else { "\r" };
+            if stdin
+                .write_all(format!("{line}{ending}").as_bytes())
+                .is_err()
+            {
                 failures.push(format!("could not send {line:?}"));
                 break;
             }

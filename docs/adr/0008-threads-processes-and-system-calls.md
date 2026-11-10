@@ -81,12 +81,31 @@ tick.
 - tar was chosen over a custom format because standard tools can create and
   inspect it and the reader is about a hundred lines.
 
+### Files, arguments and standard input (addendum)
+
+- The root filesystem is now one kernel-wide object behind a **sleeping
+  mutex** (`sync::Mutex`, built on the wait queue). The shell locks it only
+  while a built-in command runs and releases it before waiting for a
+  program, which may need it.
+- Each process has a working directory (inherited from the shell) and a
+  table of up to 32 descriptors. 0-2 are the console; files are opened with
+  `open` and addressed by **path plus offset**, not by inode. That keeps the
+  VFS interface unchanged for now at the cost of wrong behaviour when an
+  open file is renamed or removed; it will be replaced by inode handles when
+  the persistent filesystem arrives.
+- **Arguments** are written to the top of the new process's stack in the
+  conventional layout (count, pointer array, null, strings); `rsp` points at
+  the count on entry.
+- **Standard input** is line-oriented: the kernel applies the same line
+  editor the shell uses and returns one line per `read`; Ctrl-D on an empty
+  line is end of input. A process blocked on input can still be killed.
+
 ## Not done
 
-- No file, memory-management or process-creation system calls: a program
-  cannot open a file, allocate memory beyond its image and stack, or start
-  another program. Only the shell can start processes.
-- No program arguments or environment, no standard input, no output
+- No memory-management or process-creation system calls: a program cannot
+  allocate memory beyond its image and stack, or start another program.
+  Only the shell can start processes.
+- No directory system calls, no environment, no pipes, and no output
   redirection for programs.
 - No signals; `kill` is unconditional termination.
 - Panic and exception backtraces only cover the boot thread's stack.

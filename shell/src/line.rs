@@ -47,6 +47,11 @@ impl LineEditor {
         }
     }
 
+    /// Whether nothing has been typed on the current line.
+    pub fn is_empty(&self) -> bool {
+        self.line.is_empty()
+    }
+
     /// Processes one input byte, writing any echo to `echo`. Returns the
     /// finished line when the byte completes one.
     pub fn feed(&mut self, byte: u8, echo: &mut dyn Write) -> Option<String> {

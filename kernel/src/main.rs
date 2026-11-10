@@ -12,6 +12,7 @@ extern crate alloc;
 mod arch;
 mod console;
 mod fbcon;
+mod fs;
 mod log;
 mod mm;
 mod panic;
@@ -128,8 +129,9 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
         inject_fault(kind);
     }
 
+    fs::init(initrd);
     if !cmdline.flag("noshell") {
-        shell::run(initrd);
+        shell::run();
     }
 
     qemu::exit(ExitCode::Success);

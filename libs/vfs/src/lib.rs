@@ -290,6 +290,33 @@ impl Vfs {
         Ok(())
     }
 
+    /// Reads from the file at `path` starting at `offset` into `buffer`;
+    /// returns the number of bytes read (0 at or past the end).
+    pub fn read_at(&self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
+        let inode = self.resolve(path)?;
+        if self.root.metadata(inode)?.file_type != FileType::File {
+            return Err(FsError::IsADirectory);
+        }
+        self.root.read(inode, offset, buffer)
+    }
+
+    /// Writes `data` to the existing file at `path` starting at `offset`
+    /// (or at its end, with `offset` of `None`); returns the offset just
+    /// past the written data.
+    pub fn write_at(&mut self, path: &str, offset: Option<u64>, data: &[u8]) -> FsResult<u64> {
+        let inode = self.resolve(path)?;
+        let metadata = self.root.metadata(inode)?;
+        if metadata.file_type != FileType::File {
+            return Err(FsError::IsADirectory);
+        }
+        let offset = offset.unwrap_or(metadata.size);
+        let written = self.root.write(inode, offset, data)?;
+        if written != data.len() {
+            return Err(FsError::NoSpace);
+        }
+        Ok(offset + written as u64)
+    }
+
     /// Removes the file or empty directory at `path`.
     pub fn remove(&mut self, path: &str) -> FsResult<()> {
         let (dir, name) = self.resolve_parent(path)?;
@@ -391,6 +418,25 @@ mod tests {
             v.write_file("/etc/motd/x", b"", WriteMode::Truncate),
             Err(FsError::NotADirectory)
         );
+    }
+
+    #[test]
+    fn offset_io() {
+        let mut v = vfs();
+        v.write_file("/f", b"0123456789", WriteMode::Truncate)
+            .unwrap();
+        let mut buf = [0u8; 4];
+        assert_eq!(v.read_at("/f", 3, &mut buf), Ok(4));
+        assert_eq!(&buf, b"3456");
+        assert_eq!(v.read_at("/f", 8, &mut buf), Ok(2));
+        assert_eq!(v.read_at("/f", 10, &mut buf), Ok(0));
+        assert_eq!(v.write_at("/f", Some(2), b"AB"), Ok(4));
+        assert_eq!(v.write_at("/f", None, b"!"), Ok(11));
+        assert_eq!(v.read_file("/f").unwrap(), b"01AB456789!");
+        assert_eq!(v.write_at("/nope", None, b"x"), Err(FsError::NotFound));
+        v.create_dir("/d").unwrap();
+        assert_eq!(v.read_at("/d", 0, &mut buf), Err(FsError::IsADirectory));
+        assert_eq!(v.write_at("/d", None, b"x"), Err(FsError::IsADirectory));
     }
 
     #[test]

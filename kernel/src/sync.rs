@@ -104,3 +104,71 @@ impl<T> Drop for SpinLockGuard<'_, T> {
         interrupts::restore(self.interrupts_were_enabled);
     }
 }
+
+/// A mutual-exclusion lock for data that is held across blocking
+/// operations.
+///
+/// Unlike [`SpinLock`], a thread that finds the mutex taken goes to sleep
+/// and interrupts stay enabled while it is held, so it is suitable for long
+/// critical sections such as filesystem operations. It must not be used
+/// from interrupt handlers.
+pub struct Mutex<T> {
+    locked: AtomicBool,
+    waiters: crate::sched::WaitQueue,
+    value: UnsafeCell<T>,
+}
+
+// SAFETY: as for `SpinLock`: at most one guard, and therefore one `&mut T`,
+// exists at a time.
+unsafe impl<T: Send> Sync for Mutex<T> {}
+
+impl<T> Mutex<T> {
+    /// Creates an unlocked mutex holding `value`.
+    pub const fn new(value: T) -> Self {
+        Self {
+            locked: AtomicBool::new(false),
+            waiters: crate::sched::WaitQueue::new(),
+            value: UnsafeCell::new(value),
+        }
+    }
+
+    /// Acquires the mutex, sleeping until it is available.
+    pub fn lock(&self) -> MutexGuard<'_, T> {
+        self.waiters.wait_until(|| {
+            self.locked
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .is_ok()
+        });
+        MutexGuard { mutex: self }
+    }
+}
+
+/// Grants access to the value protected by a [`Mutex`]; releases it and
+/// wakes waiting threads when dropped.
+pub struct MutexGuard<'a, T> {
+    mutex: &'a Mutex<T>,
+}
+
+impl<T> Deref for MutexGuard<'_, T> {
+    type Target = T;
+
+    fn deref(&self) -> &T {
+        // SAFETY: the guard exists only while `locked` is held, and only
+        // one guard can exist at a time.
+        unsafe { &*self.mutex.value.get() }
+    }
+}
+
+impl<T> DerefMut for MutexGuard<'_, T> {
+    fn deref_mut(&mut self) -> &mut T {
+        // SAFETY: as in `deref`, plus `&mut self` for uniqueness.
+        unsafe { &mut *self.mutex.value.get() }
+    }
+}
+
+impl<T> Drop for MutexGuard<'_, T> {
+    fn drop(&mut self) {
+        self.mutex.locked.store(false, Ordering::Release);
+        self.mutex.waiters.wake_all();
+    }
+}

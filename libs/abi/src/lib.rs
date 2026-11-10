@@ -39,7 +39,42 @@ pub mod nr {
     pub const SLEEP: u64 = 4;
     /// `uptime() -> milliseconds since boot`.
     pub const UPTIME: u64 = 5;
+    /// `open(path: *const u8, path_len, flags) -> fd` — see [`super::open`].
+    pub const OPEN: u64 = 6;
+    /// `read(fd, buf: *mut u8, len) -> bytes read` — 0 means end of file.
+    /// Reading descriptor 0 returns one line of console input.
+    pub const READ: u64 = 7;
+    /// `close(fd)`.
+    pub const CLOSE: u64 = 8;
 }
+
+/// Flags for the `open` system call.
+pub mod open {
+    /// Open for reading (the default when [`WRITE`] is absent).
+    pub const READ: u64 = 0;
+    /// Open for writing instead of reading.
+    pub const WRITE: u64 = 1 << 0;
+    /// Create the file if it does not exist (with [`WRITE`]).
+    pub const CREATE: u64 = 1 << 6;
+    /// Discard existing contents (with [`WRITE`]).
+    pub const TRUNCATE: u64 = 1 << 9;
+    /// Every write goes to the end of the file (with [`WRITE`]).
+    pub const APPEND: u64 = 1 << 10;
+    /// All flags the kernel understands.
+    pub const ALL: u64 = WRITE | CREATE | TRUNCATE | APPEND;
+}
+
+/// Standard input file descriptor.
+pub const STDIN: u64 = 0;
+/// Largest number of files a process may have open, including the three
+/// standard descriptors.
+pub const MAX_OPEN_FILES: usize = 32;
+/// Longest path accepted by a system call, in bytes.
+pub const PATH_MAX: u64 = 4096;
+/// Largest number of bytes one `read` call returns.
+pub const READ_MAX: u64 = 64 * 1024;
+/// Largest total size of a program's arguments, in bytes.
+pub const ARGS_MAX: usize = 4096;
 
 /// Standard output file descriptor.
 pub const STDOUT: u64 = 1;
@@ -53,14 +88,43 @@ pub const WRITE_MAX: u64 = 1 << 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i64)]
 pub enum Errno {
+    /// No such file or directory.
+    NotFound = 2,
     /// Bad file descriptor.
     BadFileDescriptor = 9,
     /// A pointer argument does not refer to accessible user memory.
     Fault = 14,
+    /// The file already exists.
+    Exists = 17,
+    /// A path component is not a directory.
+    NotADirectory = 20,
+    /// The operation needs a file but the path names a directory.
+    IsADirectory = 21,
     /// An argument is out of range.
     InvalidArgument = 22,
+    /// The process has too many files open.
+    TooManyOpenFiles = 24,
+    /// Out of memory or storage.
+    NoSpace = 28,
     /// Unknown system call number.
     NoSuchSyscall = 38,
+}
+
+impl core::fmt::Display for Errno {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::NotFound => "No such file or directory",
+            Self::BadFileDescriptor => "Bad file descriptor",
+            Self::Fault => "Bad address",
+            Self::Exists => "File exists",
+            Self::NotADirectory => "Not a directory",
+            Self::IsADirectory => "Is a directory",
+            Self::InvalidArgument => "Invalid argument",
+            Self::TooManyOpenFiles => "Too many open files",
+            Self::NoSpace => "No space left on device",
+            Self::NoSuchSyscall => "Function not implemented",
+        })
+    }
 }
 
 impl Errno {
@@ -72,9 +136,15 @@ impl Errno {
     /// Decodes a system call result.
     pub const fn from_result(result: i64) -> Option<Self> {
         match -result {
+            2 => Some(Self::NotFound),
             9 => Some(Self::BadFileDescriptor),
             14 => Some(Self::Fault),
+            17 => Some(Self::Exists),
+            20 => Some(Self::NotADirectory),
+            21 => Some(Self::IsADirectory),
             22 => Some(Self::InvalidArgument),
+            24 => Some(Self::TooManyOpenFiles),
+            28 => Some(Self::NoSpace),
             38 => Some(Self::NoSuchSyscall),
             _ => None,
         }
@@ -106,6 +176,12 @@ mod tests {
     #[test]
     fn errno_round_trip() {
         for errno in [
+            Errno::NotFound,
+            Errno::Exists,
+            Errno::NotADirectory,
+            Errno::IsADirectory,
+            Errno::TooManyOpenFiles,
+            Errno::NoSpace,
             Errno::BadFileDescriptor,
             Errno::Fault,
             Errno::InvalidArgument,

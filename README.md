@@ -11,8 +11,8 @@ the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
 (with a PS/2 keyboard) and on the serial console. There is no persistent
-storage and no driver model yet, and programs can do very little so far
-(print, sleep, exit). See [Status](#status) for exactly what exists and what
+storage and no driver model yet, and programs are limited to arguments,
+console and file I/O (no memory allocation, no starting other programs). See [Status](#status) for exactly what exists and what
 has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -206,15 +206,17 @@ addition from Milestone 8: a framebuffer text console.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write` (console), `getpid`, `yield`, `sleep`, `uptime` | Working, tested. No file, memory or process-creation calls yet |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `getpid`, `yield`, `sleep`, `uptime` | Working, tested. No memory-management or process-creation calls yet |
+| Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
+| Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and sample programs `hello`, `sleeper`, `spin`, `crash` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `hello`, `sleeper`, `spin`, `crash` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
-| Program arguments, standard input, files from programs, dynamic memory for programs | Not started |
+| Dynamic memory for programs, pipes and redirection for programs, directory system calls, `fork`/`exec` | Not started |
 | SMP | Not started |
 | Persistent storage, drivers, Windows/Linux compatibility | Not started |
 
@@ -223,7 +225,7 @@ addition from Milestone 8: a framebuffer text console.
 On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 (TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 110 host unit tests (`cargo test`): boot protocol validation, memory map
+- 111 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
   input, the buddy allocator and the heap (each including a randomised test
   against an independent model), ACPI table parsing, the VFS and RAM
@@ -279,8 +281,10 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   rather than being a kernel-wide object (see ADR 0006).
 - Built-in shell commands cannot be interrupted, there are no pipes,
   variables or globs, and `cp` does not copy directories.
-- Programs take no arguments, cannot read input or files, and cannot
-  allocate memory or start other programs. The system call ABI is unstable.
+- Programs cannot allocate memory beyond their image and stack, list or
+  create directories, or start other programs, and their output cannot be
+  redirected or piped. Open files are tracked by path, so renaming a file
+  that is open confuses its descriptor. The system call ABI is unstable.
 - The scheduler is plain round-robin on one CPU with a 10 ms slice; it has
   no priorities and has not been measured.
 - Panic and exception backtraces only cover the boot thread's stack.
@@ -357,7 +361,7 @@ checks both QEMU's exit status and the serial log:
 | Test | Checks |
 | --- | --- |
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
-| `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`) |
+| `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`), and `echo`/`cat`/`tee` exercising arguments, relative paths, file reads and writes, error reporting and typed standard input |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
@@ -375,10 +379,11 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step:** make programs useful — file and memory system calls, program
-arguments and standard input — so that real utilities can be ported
-(Milestone 5: coreutils and storage, starting with a VirtIO block driver and
-a persistent filesystem).
+**Next step:** dynamic memory for programs (so the Rust `alloc` crate works in
+userspace), directory and process system calls, and pipes — the remaining
+prerequisites for porting real utilities. Then Milestone 5 proper: a VirtIO
+block driver and a persistent filesystem, which is also what an installer
+needs.
 
 ## Licence
 

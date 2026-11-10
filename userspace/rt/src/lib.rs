@@ -17,25 +17,29 @@
 //!
 //! The runtime provides the `_start` entry point, safe wrappers for the
 //! system calls, `print!`/`println!`, and a panic handler that reports the
-//! panic and exits with status 101. There is no heap, no arguments and no
-//! environment yet.
+//! panic and exits with status 101. Programs can read their arguments,
+//! standard input and files. There is no heap and no environment yet.
 
 #![no_std]
 
 use core::arch::{asm, global_asm};
+use core::ffi::{CStr, c_char};
 use core::fmt;
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 pub use omit_abi as abi;
 use omit_abi::{Errno, nr};
 
-// The kernel starts a process with RSP at the top of its stack and nothing
-// on it. Align the stack as the ABI expects at a call site and enter Rust.
+// The kernel starts a process with RSP pointing at the argument block (see
+// `args`). Pass that address on, align the stack as the ABI expects at a
+// call site, and enter Rust.
 global_asm!(
     r#"
 .section .text._start, "ax", @progbits
 .global _start
 _start:
     xor ebp, ebp
+    mov rdi, rsp
     and rsp, -16
     call {start}
     ud2
@@ -48,7 +52,11 @@ unsafe extern "Rust" {
     fn __omit_main() -> i32;
 }
 
-extern "C" fn rust_start() -> ! {
+/// Where the kernel left the argument block: the address of `argc`.
+static ARGUMENTS: AtomicUsize = AtomicUsize::new(0);
+
+extern "C" fn rust_start(arguments: usize) -> ! {
+    ARGUMENTS.store(arguments, Ordering::Relaxed);
     // SAFETY: every program linked against this runtime defines
     // `__omit_main` through `entry!`, with exactly this signature.
     let status = unsafe { __omit_main() };
@@ -108,9 +116,75 @@ pub fn exit(status: i32) -> ! {
 /// Writes `bytes` to file descriptor `fd`; returns the number written.
 pub fn write(fd: u64, bytes: &[u8]) -> Result<usize, Errno> {
     // SAFETY: the pointer and length describe a live, readable slice.
-    let result = unsafe { syscall(nr::WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64) };
-    usize::try_from(result)
-        .map_err(|_| Errno::from_result(result).unwrap_or(Errno::InvalidArgument))
+    result(unsafe { syscall(nr::WRITE, fd, bytes.as_ptr() as u64, bytes.len() as u64) })
+        .map(|count| count as usize)
+}
+
+/// Writes all of `bytes` to `fd`.
+pub fn write_all(fd: u64, mut bytes: &[u8]) -> Result<(), Errno> {
+    while !bytes.is_empty() {
+        match write(fd, bytes)? {
+            0 => return Err(Errno::NoSpace),
+            written => bytes = &bytes[written..],
+        }
+    }
+    Ok(())
+}
+
+/// The program's arguments, starting with the name it was invoked by.
+/// Arguments that are not valid UTF-8 are skipped.
+pub fn args() -> impl Iterator<Item = &'static str> {
+    let block = ARGUMENTS.load(Ordering::Relaxed) as *const usize;
+    let count = if block.is_null() {
+        // Only possible before `_start` has run, which `main` never sees.
+        0
+    } else {
+        // SAFETY: the kernel places the argument block on the initial
+        // stack: a count, that many pointers to NUL-terminated strings, and
+        // a null pointer. It lies above everything the program pushes, so
+        // it is valid and unchanged for the life of the process.
+        unsafe { *block }
+    };
+    (0..count).filter_map(move |index| {
+        // SAFETY: the argument block (see above) holds `count` pointers
+        // after the count itself, and `index < count`.
+        let pointer = unsafe { *block.add(1 + index) } as *const c_char;
+        // SAFETY: each pointer refers to a NUL-terminated string in the
+        // argument block.
+        unsafe { CStr::from_ptr(pointer) }.to_str().ok()
+    })
+}
+
+fn result(value: i64) -> Result<u64, Errno> {
+    u64::try_from(value).map_err(|_| Errno::from_result(value).unwrap_or(Errno::InvalidArgument))
+}
+
+/// Opens the file at `path`; `flags` are from [`abi::open`]. Returns a
+/// file descriptor.
+pub fn open(path: &str, flags: u64) -> Result<u64, Errno> {
+    // SAFETY: the pointer and length describe a live, readable string.
+    result(unsafe { syscall(nr::OPEN, path.as_ptr() as u64, path.len() as u64, flags) })
+}
+
+/// Reads up to `buffer.len()` bytes from `fd`; 0 means end of file.
+/// Reading standard input returns one line at a time.
+pub fn read(fd: u64, buffer: &mut [u8]) -> Result<usize, Errno> {
+    // SAFETY: the pointer and length describe a live, writable buffer.
+    result(unsafe {
+        syscall(
+            nr::READ,
+            fd,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+        )
+    })
+    .map(|count| count as usize)
+}
+
+/// Closes file descriptor `fd`.
+pub fn close(fd: u64) -> Result<(), Errno> {
+    // SAFETY: plain integer argument.
+    result(unsafe { syscall(nr::CLOSE, fd, 0, 0) }).map(|_| ())
 }
 
 /// The calling process's ID.
@@ -169,6 +243,15 @@ macro_rules! println {
     ($($arg:tt)*) => {{
         use ::core::fmt::Write as _;
         let _ = ::core::writeln!($crate::Fd($crate::abi::STDOUT), $($arg)*);
+    }};
+}
+
+/// Prints a line to standard error.
+#[macro_export]
+macro_rules! eprintln {
+    ($($arg:tt)*) => {{
+        use ::core::fmt::Write as _;
+        let _ = ::core::writeln!($crate::Fd($crate::abi::STDERR), $($arg)*);
     }};
 }
 

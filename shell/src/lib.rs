@@ -59,12 +59,16 @@ pub struct TaskInfo {
 /// What the shell needs from the system it runs on, beyond the filesystem.
 pub trait Host {
     /// Starts the program whose executable image is `image` as a new
-    /// process called `name`; returns its process ID.
-    fn spawn(&mut self, name: &str, image: &[u8]) -> Result<u64, String>;
-
-    /// Blocks until process `pid` ends and returns its exit status, or
-    /// `None` if there is no such process.
-    fn wait(&mut self, pid: u64) -> Option<i32>;
+    /// process called `name`, with arguments `args` (the first being the
+    /// program name as typed) and working directory `cwd`; returns its
+    /// process ID.
+    fn spawn(
+        &mut self,
+        name: &str,
+        image: &[u8],
+        args: &[String],
+        cwd: &str,
+    ) -> Result<u64, String>;
 
     /// Requests termination of process `pid`; `false` if it does not exist.
     fn kill(&mut self, pid: u64) -> bool;
@@ -94,6 +98,13 @@ pub enum Outcome {
     Continue,
     /// The user asked to leave the shell.
     Exit,
+    /// A program was started in the foreground. The caller must wait for
+    /// process `pid` to end — without holding the filesystem, which the
+    /// program may need — and then call [`Shell::finish_wait`].
+    Wait {
+        /// The process to wait for.
+        pid: u64,
+    },
 }
 
 /// A command failure: the message is printed as `command: message`.
@@ -151,6 +162,10 @@ pub struct Shell {
     cwd: String,
     system: SystemInfo,
     last_status: i32,
+    /// Name of the foreground program being waited for.
+    foreground: Option<String>,
+    /// Set by `run_program` when the caller has to wait for a process.
+    pending_wait: Option<u64>,
 }
 
 impl Shell {
@@ -160,6 +175,8 @@ impl Shell {
             cwd: "/".into(),
             system,
             last_status: 0,
+            foreground: None,
+            pending_wait: None,
         }
     }
 
@@ -257,7 +274,21 @@ impl Shell {
                 1
             }
         };
-        Outcome::Continue
+        match self.pending_wait.take() {
+            Some(pid) => Outcome::Wait { pid },
+            None => Outcome::Continue,
+        }
+    }
+
+    /// Completes a foreground program started by [`Shell::execute`]:
+    /// records its exit status (`None` if the process could not be waited
+    /// for) and reports a non-zero one.
+    pub fn finish_wait(&mut self, status: Option<i32>, out: &mut dyn Write) {
+        let name = self.foreground.take().unwrap_or_default();
+        self.last_status = status.unwrap_or(0);
+        if self.last_status != 0 {
+            let _ = writeln!(out, "{name}: exited with status {}", self.last_status);
+        }
     }
 
     fn run(
@@ -329,27 +360,30 @@ impl Shell {
             }
             Err(error) => return Err(Failure(format!("{error}"))),
         };
-        // Programs write straight to the console and take no arguments yet;
-        // say so rather than silently ignoring what was typed.
+        // Programs write straight to the console; say so rather than
+        // silently ignoring the redirection.
         if redirected {
             return Err(Failure(
                 "output redirection is not supported for programs yet".into(),
             ));
         }
-        if !args.is_empty() {
-            return Err(Failure("program arguments are not supported yet".into()));
-        }
 
         let display_name = path::file_name(&path).unwrap_or(name);
-        let pid = host.spawn(display_name, &image).map_err(Failure)?;
+        // By convention the first argument is the name the program was
+        // invoked by.
+        let mut argv = Vec::with_capacity(args.len() + 1);
+        argv.push(String::from(name));
+        argv.extend_from_slice(args);
+        let pid = host
+            .spawn(display_name, &image, &argv, &self.cwd)
+            .map_err(Failure)?;
         if background {
             writeln!(out, "[{pid}] {display_name}")?;
-            return Ok(());
+        } else {
+            self.foreground = Some(display_name.into());
+            self.pending_wait = Some(pid);
         }
-        match host.wait(pid) {
-            Some(0) | None => Ok(()),
-            Some(status) => Err(Failure(format!("exited with status {status}"))),
-        }
+        Ok(())
     }
 
     fn ps(&self, args: &[String], host: &mut dyn Host, out: &mut dyn Write) -> CommandResult {
@@ -659,19 +693,25 @@ mod tests {
         spawned: Vec<(String, Vec<u8>)>,
         exit_status: i32,
         killed: Vec<u64>,
+        last_args: Vec<String>,
+        last_cwd: String,
     }
 
     impl Host for MockHost {
-        fn spawn(&mut self, name: &str, image: &[u8]) -> Result<u64, String> {
+        fn spawn(
+            &mut self,
+            name: &str,
+            image: &[u8],
+            args: &[String],
+            cwd: &str,
+        ) -> Result<u64, String> {
             if image.starts_with(b"bad") {
                 return Err("not an executable".into());
             }
             self.spawned.push((name.into(), image.to_vec()));
+            self.last_args = args.to_vec();
+            self.last_cwd = cwd.into();
             Ok(self.spawned.len() as u64)
-        }
-
-        fn wait(&mut self, _pid: u64) -> Option<i32> {
-            Some(self.exit_status)
         }
 
         fn kill(&mut self, pid: u64) -> bool {
@@ -722,14 +762,22 @@ mod tests {
             }
         }
 
-        /// Runs `line` and returns everything it printed.
+        /// Runs `line`, waiting for a foreground program as the kernel
+        /// would, and returns everything it printed.
         fn run(&mut self, line: &str) -> String {
             let mut out = String::new();
-            assert_eq!(
-                self.shell
-                    .execute(line, &mut self.vfs, &mut self.host, &mut out),
-                Outcome::Continue
-            );
+            match self
+                .shell
+                .execute(line, &mut self.vfs, &mut self.host, &mut out)
+            {
+                Outcome::Continue => {}
+                Outcome::Wait { pid } => {
+                    assert_eq!(pid as usize, self.host.spawned.len());
+                    let status = self.host.exit_status;
+                    self.shell.finish_wait(Some(status), &mut out);
+                }
+                Outcome::Exit => panic!("`{line}` exited the shell"),
+            }
             out
         }
 
@@ -926,7 +974,13 @@ mod tests {
 
         s.host.exit_status = 7;
         assert_eq!(s.err("hello"), "hello: exited with status 7\n");
-        assert_eq!(s.shell.last_status(), 1);
+        assert_eq!(s.shell.last_status(), 7);
+        s.host.exit_status = 0;
+
+        // Arguments and the working directory are passed on.
+        s.ok("hello 'two words' -x");
+        assert_eq!(s.host.last_args, ["hello", "two words", "-x"]);
+        assert_eq!(s.host.last_cwd, "/opt");
 
         s.ok("echo -n bad-image > /bin/broken");
         assert_eq!(s.err("broken"), "broken: not an executable\n");
@@ -946,10 +1000,6 @@ mod tests {
         assert_eq!(
             s.err("spin > out"),
             "spin: output redirection is not supported for programs yet\n"
-        );
-        assert_eq!(
-            s.err("spin fast"),
-            "spin: program arguments are not supported yet\n"
         );
         assert_eq!(s.host.spawned.len(), 1, "rejected commands start nothing");
         assert_eq!(
