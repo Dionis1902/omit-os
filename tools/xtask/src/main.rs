@@ -714,7 +714,10 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[
             ("pwd", "\n/\n"),
-            ("uname -a", "\nOmit OS 0.1.0 x86_64\n"),
+            (
+                "uname -a",
+                concat!("\nOmit OS ", env!("CARGO_PKG_VERSION"), " x86_64\n"),
+            ),
             ("mkdir /home", ""),
             ("mkdir -p /home/user/docs", ""),
             ("cd /home/user", ""),

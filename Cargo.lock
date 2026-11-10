@@ -57,15 +57,15 @@ checksum = "09b7b72dee69e4110d1b91fb8d497c1b74a54082da5738dff84136142c4f767b"
 
 [[package]]
 name = "omit-abi"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-acpi"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-boot"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-bootproto",
  "omit-elf",
@@ -74,44 +74,44 @@ dependencies = [
 
 [[package]]
 name = "omit-bootproto"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-elf"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-ext2"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-vfs",
 ]
 
 [[package]]
 name = "omit-fat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fatfs",
 ]
 
 [[package]]
 name = "omit-gfx"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "noto-sans-mono-bitmap",
 ]
 
 [[package]]
 name = "omit-gpt"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-hwdb"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-kernel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "noto-sans-mono-bitmap",
  "omit-abi",
@@ -130,15 +130,15 @@ dependencies = [
 
 [[package]]
 name = "omit-mm"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-pe"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-rt"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-abi",
  "omit-mm",
@@ -147,7 +147,7 @@ dependencies = [
 
 [[package]]
 name = "omit-shell"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-abi",
  "omit-vfs",
@@ -155,11 +155,11 @@ dependencies = [
 
 [[package]]
 name = "omit-term"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-user-programs"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-gfx",
  "omit-pe",
@@ -170,36 +170,36 @@ dependencies = [
 
 [[package]]
 name = "omit-vfs"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-win-sample-dll"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-win-samples",
 ]
 
 [[package]]
 name = "omit-win-sample-plugin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-win-samples",
 ]
 
 [[package]]
 name = "omit-win-samples"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "omit-win32"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "omit-abi",
 ]
 
 [[package]]
 name = "omit-window"
-version = "0.1.0"
+version = "0.1.1"
 
 [[package]]
 name = "proc-macro2"
@@ -310,7 +310,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 
 [[package]]
 name = "xtask"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fatfs",
  "omit-gfx",

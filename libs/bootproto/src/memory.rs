@@ -122,6 +122,46 @@ impl MemoryRegion {
     }
 }
 
+/// Marks the pages `[start, start + pages * 4096)` in the map
+/// `regions[..count]` as `kind`, splitting the region that contains them
+/// into up to three. The pieces are appended, not kept in order: sort the
+/// map afterwards. Returns the new number of regions, or `None` — leaving
+/// the map unchanged — if the range does not lie within a single region,
+/// is empty or overflows, or `regions` has no room for the pieces.
+pub fn retag(
+    regions: &mut [MemoryRegion],
+    count: usize,
+    start: u64,
+    pages: u64,
+    kind: MemoryKind,
+) -> Option<usize> {
+    const PAGE: u64 = 4096;
+    let end = start.checked_add(pages.checked_mul(PAGE)?)?;
+    if pages == 0 || count > regions.len() {
+        return None;
+    }
+    let index = regions[..count].iter().position(|region| {
+        region.start <= start && region.end().is_some_and(|region_end| end <= region_end)
+    })?;
+    let whole = regions[index];
+    let whole_end = whole.end()?;
+    let before = (start > whole.start)
+        .then(|| MemoryRegion::new(whole.start, (start - whole.start) / PAGE, whole.kind));
+    let after =
+        (end < whole_end).then(|| MemoryRegion::new(end, (whole_end - end) / PAGE, whole.kind));
+    let extra = usize::from(before.is_some()) + usize::from(after.is_some());
+    if count + extra > regions.len() {
+        return None;
+    }
+    regions[index] = MemoryRegion::new(start, pages, kind);
+    let mut count = count;
+    for piece in [before, after].into_iter().flatten() {
+        regions[count] = piece;
+        count += 1;
+    }
+    Some(count)
+}
+
 /// A defect found by [`validate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MemoryMapError {
@@ -367,5 +407,57 @@ mod tests {
     fn region_layout_is_stable() {
         assert_eq!(size_of::<MemoryRegion>(), 24);
         assert_eq!(align_of::<MemoryRegion>(), 8);
+    }
+
+    #[test]
+    fn retag_splits_the_containing_region() {
+        let region = |start: u64, pages: u64, kind| MemoryRegion::new(start * 4096, pages, kind);
+        let mut map = [MemoryRegion::new(0, 0, MemoryKind::RESERVED); 8];
+        map[0] = region(0, 16, MemoryKind::USABLE);
+        map[1] = region(16, 32, MemoryKind::BOOT_RECLAIMABLE);
+        map[2] = region(48, 16, MemoryKind::USABLE);
+        // The middle of a region: three pieces.
+        let count = retag(&mut map, 3, 20 * 4096, 4, MemoryKind::PAGE_TABLES).unwrap();
+        assert_eq!(count, 5);
+        // The start of what is left before it, and the very end of what
+        // is left after it: two pieces each, then exactly one.
+        let count = retag(&mut map, count, 16 * 4096, 1, MemoryKind::INITRD).unwrap();
+        let count = retag(&mut map, count, 47 * 4096, 1, MemoryKind::BOOT_INFO).unwrap();
+        let count = retag(&mut map, count, 17 * 4096, 3, MemoryKind::KERNEL_STACK).unwrap();
+        assert_eq!(count, 7);
+        let count = sort_and_merge(&mut map[..count]);
+        assert_eq!(
+            &map[..count],
+            &[
+                region(0, 16, MemoryKind::USABLE),
+                region(16, 1, MemoryKind::INITRD),
+                region(17, 3, MemoryKind::KERNEL_STACK),
+                region(20, 4, MemoryKind::PAGE_TABLES),
+                region(24, 23, MemoryKind::BOOT_RECLAIMABLE),
+                region(47, 1, MemoryKind::BOOT_INFO),
+                region(48, 16, MemoryKind::USABLE),
+            ]
+        );
+        assert!(validate(&map[..count]).is_ok());
+
+        // Refused, with the map untouched: across two regions, outside
+        // every region, empty, overflowing, and without room.
+        let before = map;
+        for (start, pages) in [(14u64, 4u64), (100, 1), (20, 0), (u64::MAX / 4096, 2)] {
+            assert_eq!(
+                retag(
+                    &mut map,
+                    count,
+                    start.wrapping_mul(4096),
+                    pages,
+                    MemoryKind::INITRD
+                ),
+                None
+            );
+        }
+        assert_eq!(retag(&mut map[..7], 7, 4096, 1, MemoryKind::INITRD), None);
+        assert_eq!(map, before);
+        // One piece fits where two would not.
+        assert_eq!(retag(&mut map[..7], 7, 0, 16, MemoryKind::INITRD), Some(7));
     }
 }

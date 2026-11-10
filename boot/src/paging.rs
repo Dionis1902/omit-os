@@ -12,8 +12,8 @@
 //!   direct map's lower-level tables. The loader needs it to survive the CR3
 //!   switch; the kernel removes it.
 
+use omit_bootproto::memory::MemoryKind;
 use omit_bootproto::{PAGE_SIZE, PHYS_MAP_BASE, PHYS_MAP_MAX_SIZE};
-use uefi::boot::MemoryType;
 
 use crate::{Error, alloc_zeroed_pages};
 
@@ -37,16 +37,16 @@ const MIB_2: u64 = 2 << 20;
 /// the physical addresses of the tables double as pointers.
 pub struct AddressSpace {
     pml4: u64,
-    table_type: MemoryType,
 }
 
+/// How the kernel is told about the pages that hold tables.
+const TABLES: Option<MemoryKind> = Some(MemoryKind::PAGE_TABLES);
+
 impl AddressSpace {
-    /// Allocates an empty top-level table. Every table page is allocated
-    /// with UEFI memory type `table_type`.
-    pub fn new(table_type: MemoryType) -> Result<Self, Error> {
+    /// Allocates an empty top-level table.
+    pub fn new() -> Result<Self, Error> {
         Ok(Self {
-            pml4: alloc_zeroed_pages(table_type, 1)?,
-            table_type,
+            pml4: alloc_zeroed_pages(TABLES, 1)?,
         })
     }
 
@@ -84,7 +84,7 @@ impl AddressSpace {
             }
             return Ok(entry & ADDRESS_MASK);
         }
-        let next = alloc_zeroed_pages(self.table_type, 1)?;
+        let next = alloc_zeroed_pages(TABLES, 1)?;
         // Intermediate entries are maximally permissive; the leaf decides.
         Self::write(table, index, next | PRESENT | WRITABLE);
         Ok(next)
@@ -133,12 +133,12 @@ impl AddressSpace {
             return Err(Error::new("direct map slot already in use"));
         }
 
-        let pdpt = alloc_zeroed_pages(self.table_type, 1)?;
+        let pdpt = alloc_zeroed_pages(TABLES, 1)?;
         for gib in 0..size / GIB {
             if use_1g_pages {
                 Self::write(pdpt, gib, (gib * GIB) | PRESENT | WRITABLE | HUGE);
             } else {
-                let pd = alloc_zeroed_pages(self.table_type, 1)?;
+                let pd = alloc_zeroed_pages(TABLES, 1)?;
                 for i in 0..ENTRIES {
                     let phys = gib * GIB + i * MIB_2;
                     Self::write(pd, i, phys | PRESENT | WRITABLE | HUGE);

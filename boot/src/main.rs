@@ -25,7 +25,7 @@ mod paging;
 use core::arch::asm;
 use core::arch::x86_64::__cpuid;
 use core::fmt::{self, Write};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use core::time::Duration;
 
 use omit_bootproto::{
@@ -45,14 +45,78 @@ use uefi::{CStr16, system};
 
 use paging::{AddressSpace, NO_EXECUTE, WRITABLE};
 
-// OS-defined UEFI memory types (the range 0x8000_0000.. is reserved for OS
-// loaders by the UEFI specification). Tagging allocations this way lets the
-// memory map conversion tell the kernel exactly what each one holds.
-const MEM_KERNEL_IMAGE: MemoryType = MemoryType::custom(0x8000_0001);
-const MEM_KERNEL_STACK: MemoryType = MemoryType::custom(0x8000_0002);
-const MEM_PAGE_TABLES: MemoryType = MemoryType::custom(0x8000_0003);
-const MEM_BOOT_INFO: MemoryType = MemoryType::custom(0x8000_0004);
-const MEM_INITRD: MemoryType = MemoryType::custom(0x8000_0005);
+/// What the loader's own allocations hold, so that the memory map handed
+/// to the kernel can say so.
+///
+/// The UEFI specification offers "OS-defined memory types" for exactly
+/// this, and an earlier version of this loader used them. The firmware
+/// of VirtualBox 7 crashes in `ExitBootServices` when the memory map
+/// contains such a type, so everything is allocated as ordinary loader
+/// data and the bookkeeping is done here instead.
+struct Allocations {
+    starts: [AtomicU64; ALLOCATIONS_MAX],
+    pages: [AtomicU64; ALLOCATIONS_MAX],
+    kinds: [AtomicU32; ALLOCATIONS_MAX],
+    len: AtomicUsize,
+}
+
+/// Most separately recorded allocations. Neighbouring allocations of one
+/// kind are recorded as one, and the firmware hands out neighbouring
+/// pages, so the real number is a handful.
+const ALLOCATIONS_MAX: usize = 128;
+
+static ALLOCATIONS: Allocations = Allocations {
+    starts: [const { AtomicU64::new(0) }; ALLOCATIONS_MAX],
+    pages: [const { AtomicU64::new(0) }; ALLOCATIONS_MAX],
+    kinds: [const { AtomicU32::new(0) }; ALLOCATIONS_MAX],
+    len: AtomicUsize::new(0),
+};
+
+impl Allocations {
+    /// Records that `pages` pages at `start` hold `kind`. `false` if the
+    /// table is full. (The loader runs on one CPU without interrupts of
+    /// its own; the atomics only make the static safe to write.)
+    fn record(&self, start: u64, pages: u64, kind: MemoryKind) -> bool {
+        let len = self.len.load(Ordering::Relaxed);
+        for index in 0..len {
+            if self.kinds[index].load(Ordering::Relaxed) != kind.0 {
+                continue;
+            }
+            let (other, count) = (
+                self.starts[index].load(Ordering::Relaxed),
+                self.pages[index].load(Ordering::Relaxed),
+            );
+            if other + count * PAGE_SIZE == start {
+                self.pages[index].store(count + pages, Ordering::Relaxed);
+                return true;
+            }
+            if start + pages * PAGE_SIZE == other {
+                self.starts[index].store(start, Ordering::Relaxed);
+                self.pages[index].store(count + pages, Ordering::Relaxed);
+                return true;
+            }
+        }
+        if len == ALLOCATIONS_MAX {
+            return false;
+        }
+        self.starts[len].store(start, Ordering::Relaxed);
+        self.pages[len].store(pages, Ordering::Relaxed);
+        self.kinds[len].store(kind.0, Ordering::Relaxed);
+        self.len.store(len + 1, Ordering::Relaxed);
+        true
+    }
+
+    /// The recorded allocations: start, pages, kind.
+    fn iter(&self) -> impl Iterator<Item = (u64, u64, MemoryKind)> + '_ {
+        (0..self.len.load(Ordering::Relaxed)).map(|index| {
+            (
+                self.starts[index].load(Ordering::Relaxed),
+                self.pages[index].load(Ordering::Relaxed),
+                MemoryKind(self.kinds[index].load(Ordering::Relaxed)),
+            )
+        })
+    }
+}
 
 /// Upper bound on the size of the initial ramdisk.
 const INITRD_MAX: u64 = 64 << 20;
@@ -120,16 +184,23 @@ macro_rules! println {
     };
 }
 
-/// Allocates `pages` zero-filled pages of UEFI memory type `ty` and returns
-/// their physical address.
-pub fn alloc_zeroed_pages(ty: MemoryType, pages: u64) -> Result<u64, Error> {
+/// Allocates `pages` zero-filled pages and returns their physical
+/// address. With `kind`, the kernel is told that they hold that;
+/// otherwise they are ordinary loader memory, which it may reuse.
+pub fn alloc_zeroed_pages(kind: Option<MemoryKind>, pages: u64) -> Result<u64, Error> {
     let count = usize::try_from(pages).map_err(|_| Error::new("allocation too large"))?;
-    let ptr = boot::allocate_pages(AllocateType::AnyPages, ty, count)
+    let ptr = boot::allocate_pages(AllocateType::AnyPages, MemoryType::LOADER_DATA, count)
         .map_err(Error::uefi("out of memory"))?;
     // SAFETY: the firmware just handed us `count` whole pages starting at
     // `ptr`, exclusively owned and writable.
     unsafe { ptr.as_ptr().write_bytes(0, count * PAGE_SIZE as usize) };
-    Ok(ptr.as_ptr() as u64)
+    let address = ptr.as_ptr() as u64;
+    if let Some(kind) = kind
+        && !ALLOCATIONS.record(address, pages, kind)
+    {
+        return Err(Error::new("too many separate allocations to keep track of"));
+    }
+    Ok(address)
 }
 
 fn pages_for(bytes: u64) -> u64 {
@@ -144,7 +215,7 @@ fn read_file(
     root: &mut Directory,
     path: &str,
     max_size: u64,
-    memory_type: MemoryType,
+    kind: Option<MemoryKind>,
 ) -> Result<Option<&'static [u8]>, Error> {
     let mut path_buf = [0u16; 64];
     let path = CStr16::from_str_with_buf(path, &mut path_buf)
@@ -173,7 +244,7 @@ fn read_file(
         return Ok(Some(&[]));
     }
 
-    let address = alloc_zeroed_pages(memory_type, pages_for(size))?;
+    let address = alloc_zeroed_pages(kind, pages_for(size))?;
     // SAFETY: `address` is a fresh, zero-initialised allocation of at least
     // `size` bytes that is never freed or otherwise referenced, so a unique
     // `'static` slice over it is sound.
@@ -256,7 +327,7 @@ fn load_kernel(elf: &Elf64<'_>, space: &mut AddressSpace) -> Result<LoadedKernel
 
     // Pass 2: copy and map. The allocation is zero-filled, which takes care
     // of .bss and of padding between segments.
-    let phys_base = alloc_zeroed_pages(MEM_KERNEL_IMAGE, size / PAGE_SIZE)?;
+    let phys_base = alloc_zeroed_pages(Some(MemoryKind::KERNEL_IMAGE), size / PAGE_SIZE)?;
     for ph in elf.load_segments() {
         if ph.memsz == 0 {
             continue;
@@ -304,11 +375,6 @@ fn memory_kind(ty: MemoryType) -> MemoryKind {
         MemoryType::MMIO | MemoryType::MMIO_PORT_SPACE => MemoryKind::MMIO,
         MemoryType::UNUSABLE => MemoryKind::UNUSABLE,
         MemoryType::PERSISTENT_MEMORY => MemoryKind::PERSISTENT,
-        MEM_KERNEL_IMAGE => MemoryKind::KERNEL_IMAGE,
-        MEM_KERNEL_STACK => MemoryKind::KERNEL_STACK,
-        MEM_PAGE_TABLES => MemoryKind::PAGE_TABLES,
-        MEM_BOOT_INFO => MemoryKind::BOOT_INFO,
-        MEM_INITRD => MemoryKind::INITRD,
         _ => MemoryKind::RESERVED,
     }
 }
@@ -444,27 +510,17 @@ fn run() -> Result<core::convert::Infallible, Error> {
         let mut root = fs
             .open_volume()
             .map_err(Error::uefi("cannot open the boot volume"))?;
-        let kernel = read_file(
-            &mut root,
-            KERNEL_PATH,
-            KERNEL_FILE_MAX,
-            MemoryType::LOADER_DATA,
-        )?
-        .ok_or(Error::new("kernel image \\EFI\\OMIT\\KERNEL.ELF not found"))?;
-        let cmdline = read_file(
-            &mut root,
-            CMDLINE_PATH,
-            CMDLINE_MAX_LEN as u64,
-            MemoryType::LOADER_DATA,
-        )?
-        .unwrap_or(&[]);
+        let kernel = read_file(&mut root, KERNEL_PATH, KERNEL_FILE_MAX, None)?
+            .ok_or(Error::new("kernel image \\EFI\\OMIT\\KERNEL.ELF not found"))?;
+        let cmdline =
+            read_file(&mut root, CMDLINE_PATH, CMDLINE_MAX_LEN as u64, None)?.unwrap_or(&[]);
         // Unlike the kernel file, the ramdisk is handed to the kernel as
-        // is, so it gets its own memory type.
+        // is, so the kernel is told where it is.
         let initrd = read_file(
             &mut root,
             omit_bootproto::INITRD_PATH,
             INITRD_MAX,
-            MEM_INITRD,
+            Some(MemoryKind::INITRD),
         )?
         .unwrap_or(&[]);
         (kernel, cmdline, initrd)
@@ -474,11 +530,11 @@ fn run() -> Result<core::convert::Infallible, Error> {
 
     // --- Build the kernel address space -----------------------------------
     let elf = Elf64::parse(kernel_file).map_err(|_| Error::new("kernel image is not valid ELF"))?;
-    let mut space = AddressSpace::new(MEM_PAGE_TABLES)?;
+    let mut space = AddressSpace::new()?;
     let kernel = load_kernel(&elf, &mut space)?;
 
     let stack_pages = KERNEL_STACK_SIZE / PAGE_SIZE;
-    let stack_phys = alloc_zeroed_pages(MEM_KERNEL_STACK, stack_pages)?;
+    let stack_phys = alloc_zeroed_pages(Some(MemoryKind::KERNEL_STACK), stack_pages)?;
     space.map_range(
         KERNEL_STACK_BOTTOM,
         stack_phys,
@@ -515,9 +571,11 @@ fn run() -> Result<core::convert::Infallible, Error> {
     // --- Boot information block -------------------------------------------
     // Page 0: `BootInfo`, with the command line at CMDLINE_OFFSET.
     // Pages 1..: the memory region array.
-    let region_capacity = firmware_entries + MEMORY_MAP_SLACK;
+    // (Marking one of the loader's allocations can split a region in
+    // three.)
+    let region_capacity = firmware_entries + MEMORY_MAP_SLACK + 2 * ALLOCATIONS_MAX;
     let region_bytes = (region_capacity * size_of::<MemoryRegion>()) as u64;
-    let info_phys = alloc_zeroed_pages(MEM_BOOT_INFO, 1 + pages_for(region_bytes))?;
+    let info_phys = alloc_zeroed_pages(Some(MemoryKind::BOOT_INFO), 1 + pages_for(region_bytes))?;
     let cmdline_phys = info_phys + CMDLINE_OFFSET;
     let regions_phys = info_phys + PAGE_SIZE;
     // SAFETY: `cmdline.len() <= CMDLINE_MAX_LEN` (enforced by `read_file`),
@@ -583,6 +641,19 @@ fn run() -> Result<core::convert::Infallible, Error> {
             memory_kind(descriptor.ty),
         );
         count += 1;
+    }
+    // Say what the loader's own allocations hold; to the firmware they
+    // were all just loader data.
+    for (start, pages, kind) in ALLOCATIONS.iter() {
+        match memory::retag(regions, count, start, pages, kind) {
+            Some(new_count) => count = new_count,
+            None => {
+                emergency_serial(
+                    "omit-boot: fatal: an allocation is missing from the memory map\r\n",
+                );
+                halt();
+            }
+        }
     }
     let region_count = memory::sort_and_merge(&mut regions[..count]);
     // The firmware map's backing memory must not be returned to the (now
