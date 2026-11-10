@@ -84,6 +84,8 @@ enum Object {
     /// last first.
     Find(Vec<FoundFile>),
     Process(Arc<Process>),
+    Mutex(Arc<WinMutex>),
+    Semaphore(Arc<Semaphore>),
 }
 
 /// What a thread and the holders of its handle share.
@@ -1377,7 +1379,14 @@ extern "win64" fn GetFileType(handle: Handle) -> u32 {
             FILE_TYPE_CHAR
         }
         // Not a file of any kind.
-        Some(Object::Thread { .. } | Object::Event(_) | Object::Find(_) | Object::Process(_)) => {
+        Some(
+            Object::Thread { .. }
+            | Object::Event(_)
+            | Object::Find(_)
+            | Object::Process(_)
+            | Object::Mutex(_)
+            | Object::Semaphore(_),
+        ) => {
             set_last_error(ERROR_INVALID_HANDLE);
             0
         }
@@ -2149,32 +2158,378 @@ extern "win64" fn SwitchToThread() -> Bool {
 /// signalled, or until `milliseconds` have passed (`INFINITE`: no limit).
 /// Returns `WAIT_OBJECT_0` (0), `WAIT_TIMEOUT` (258) or `WAIT_FAILED`.
 extern "win64" fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32 {
-    enum Target {
-        Thread(omit_rt::thread::Waiter),
-        Event(Arc<Event>),
-        Process(Arc<Process>),
-    }
     // The lock is released before waiting.
-    let target = with_state(|state| match state.handles.get(handle) {
-        Some(Object::Thread { handle, .. }) => Some(Target::Thread(handle.waiter())),
-        Some(Object::Event(event)) => Some(Target::Event(event.clone())),
-        Some(Object::Process(process)) => Some(Target::Process(process.clone())),
-        _ => None,
-    });
-    let timeout = (milliseconds != INFINITE).then_some(u64::from(milliseconds));
-    let signalled = match target {
-        Some(Target::Thread(waiter)) => waiter.wait(timeout),
-        Some(Target::Event(event)) => event.wait(timeout),
-        Some(Target::Process(process)) => process.wait(timeout),
-        None => {
-            set_last_error(ERROR_INVALID_HANDLE);
-            return WAIT_FAILED;
-        }
+    let Some(target) = with_state(|state| Waitable::of(state.handles.get(handle))) else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return WAIT_FAILED;
     };
-    if signalled {
+    let timeout = (milliseconds != INFINITE).then_some(u64::from(milliseconds));
+    if target.wait(timeout) {
         WAIT_OBJECT_0
     } else {
         WAIT_TIMEOUT
+    }
+}
+
+/// Something a thread can wait for.
+enum Waitable {
+    Thread(omit_rt::thread::Waiter),
+    Event(Arc<Event>),
+    Process(Arc<Process>),
+    Mutex(Arc<WinMutex>),
+    Semaphore(Arc<Semaphore>),
+}
+
+impl Waitable {
+    fn of(object: Option<&Object>) -> Option<Self> {
+        Some(match object? {
+            Object::Thread { handle, .. } => Self::Thread(handle.waiter()),
+            Object::Event(event) => Self::Event(event.clone()),
+            Object::Process(process) => Self::Process(process.clone()),
+            Object::Mutex(mutex) => Self::Mutex(mutex.clone()),
+            Object::Semaphore(semaphore) => Self::Semaphore(semaphore.clone()),
+            _ => return None,
+        })
+    }
+
+    /// Waits until the object is signalled — taking what waiting for it
+    /// takes: the signal of an auto-reset event, the mutex, a count of
+    /// the semaphore — or the time has passed.
+    fn wait(&self, timeout_ms: Option<u64>) -> bool {
+        match self {
+            Self::Thread(waiter) => waiter.wait(timeout_ms),
+            Self::Event(event) => event.wait(timeout_ms),
+            Self::Process(process) => process.wait(timeout_ms),
+            Self::Mutex(mutex) => mutex.wait(timeout_ms),
+            Self::Semaphore(semaphore) => semaphore.wait(timeout_ms),
+        }
+    }
+
+    /// Like [`Waitable::wait`] with no time at all.
+    fn try_take(&self) -> bool {
+        match self {
+            Self::Thread(waiter) => waiter.is_finished(),
+            Self::Process(process) => process.poll(),
+            Self::Event(event) => event.wait(Some(0)),
+            Self::Mutex(mutex) => mutex.try_take(),
+            Self::Semaphore(semaphore) => semaphore.try_take(),
+        }
+    }
+
+    /// Whether [`Waitable::try_take`] would succeed, without taking.
+    fn ready(&self) -> bool {
+        match self {
+            Self::Thread(waiter) => waiter.is_finished(),
+            Self::Process(process) => process.poll(),
+            Self::Event(event) => event.signalled.load(Ordering::Acquire) == 1,
+            Self::Mutex(mutex) => {
+                let owner = mutex.owner.load(Ordering::Acquire);
+                owner == 0 || owner == GetCurrentThreadId()
+            }
+            Self::Semaphore(semaphore) => semaphore.count.load(Ordering::Acquire) != 0,
+        }
+    }
+}
+
+/// The time left until `deadline` (milliseconds of uptime): `Err` if it
+/// has passed, `Ok(None)` if there is no deadline.
+fn remaining(deadline: Option<u64>) -> Result<Option<u64>, ()> {
+    match deadline {
+        Some(deadline) => {
+            let now = omit_rt::uptime_ms();
+            if now >= deadline {
+                Err(())
+            } else {
+                Ok(Some(deadline - now))
+            }
+        }
+        None => Ok(None),
+    }
+}
+
+/// `MAXIMUM_WAIT_OBJECTS`.
+const MAXIMUM_WAIT_OBJECTS: u32 = 64;
+
+/// `WaitForMultipleObjects`: waits for any one of up to 64 objects, or
+/// for all of them. Returns the index of the object that ended the wait
+/// (the lowest, if several could; 0 when waiting for all), or
+/// `WAIT_TIMEOUT`.
+///
+/// Unlike a wait for one object, this one looks at the objects every
+/// timer tick (10 ms) instead of sleeping until one changes. And when
+/// waiting for all, the objects are taken one after another once all are
+/// seen to be available, not in one indivisible step as on Windows: if
+/// another thread takes one in between, the wait goes on holding those
+/// it has already taken.
+///
+/// # Safety
+///
+/// `handles` must be valid for reading `count` handles.
+unsafe extern "win64" fn WaitForMultipleObjects(
+    count: u32,
+    handles: *const Handle,
+    wait_all: Bool,
+    milliseconds: u32,
+) -> u32 {
+    if count == 0 || count > MAXIMUM_WAIT_OBJECTS || handles.is_null() {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return WAIT_FAILED;
+    }
+    // SAFETY: guaranteed by the caller.
+    let handles = unsafe { core::slice::from_raw_parts(handles, count as usize) };
+    let targets: Option<Vec<Waitable>> = with_state(|state| {
+        handles
+            .iter()
+            .map(|&handle| Waitable::of(state.handles.get(handle)))
+            .collect()
+    });
+    let Some(targets) = targets else {
+        set_last_error(ERROR_INVALID_HANDLE);
+        return WAIT_FAILED;
+    };
+    let deadline = (milliseconds != INFINITE)
+        .then(|| omit_rt::uptime_ms().saturating_add(u64::from(milliseconds)));
+    // Which of the objects this wait has taken so far (waiting for all).
+    let mut taken = alloc::vec![false; targets.len()];
+    loop {
+        if wait_all != 0 {
+            if targets
+                .iter()
+                .zip(&taken)
+                .all(|(target, taken)| *taken || target.ready())
+            {
+                for (target, taken) in targets.iter().zip(&mut taken) {
+                    *taken = *taken || target.try_take();
+                }
+                if taken.iter().all(|&taken| taken) {
+                    return WAIT_OBJECT_0;
+                }
+            }
+        } else if let Some(index) = targets.iter().position(Waitable::try_take) {
+            return WAIT_OBJECT_0 + index as u32;
+        }
+        if remaining(deadline).is_err() {
+            return WAIT_TIMEOUT;
+        }
+        omit_rt::sleep_ms(1);
+    }
+}
+
+// ---------------------------------------------------------------------
+// Mutexes and semaphores
+// ---------------------------------------------------------------------
+
+/// A mutex object: owned by one thread at a time, which may take it
+/// several times and must release it as often.
+struct WinMutex {
+    /// The ID of the owning thread, 0 if free. Also the futex waiters
+    /// sleep on.
+    owner: AtomicU32,
+    recursion: AtomicU32,
+}
+
+impl WinMutex {
+    fn try_take(&self) -> bool {
+        let me = GetCurrentThreadId();
+        if self.owner.load(Ordering::Acquire) == me {
+            self.recursion.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        if self
+            .owner
+            .compare_exchange(0, me, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            self.recursion.store(1, Ordering::Relaxed);
+            return true;
+        }
+        false
+    }
+
+    fn wait(&self, timeout_ms: Option<u64>) -> bool {
+        let deadline = timeout_ms.map(|timeout| omit_rt::uptime_ms().saturating_add(timeout));
+        loop {
+            if self.try_take() {
+                return true;
+            }
+            let Ok(remaining) = remaining(deadline) else {
+                return false;
+            };
+            // Sleeps only while the same thread still owns the mutex.
+            let owner = self.owner.load(Ordering::Acquire);
+            if owner != 0 {
+                let _ = omit_rt::futex_wait(&self.owner, owner, remaining);
+            }
+        }
+    }
+
+    /// Releases one level of ownership; `false` if the calling thread
+    /// does not own the mutex.
+    fn release(&self) -> bool {
+        if self.owner.load(Ordering::Acquire) != GetCurrentThreadId() {
+            return false;
+        }
+        if self.recursion.fetch_sub(1, Ordering::Relaxed) == 1 {
+            self.owner.store(0, Ordering::Release);
+            omit_rt::futex_wake(&self.owner, 1);
+        }
+        true
+    }
+}
+
+/// A semaphore object: a count that waiting takes one from.
+struct Semaphore {
+    /// Also the futex waiters sleep on while it is 0.
+    count: AtomicU32,
+    maximum: u32,
+}
+
+impl Semaphore {
+    fn try_take(&self) -> bool {
+        self.count
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+                count.checked_sub(1)
+            })
+            .is_ok()
+    }
+
+    fn wait(&self, timeout_ms: Option<u64>) -> bool {
+        let deadline = timeout_ms.map(|timeout| omit_rt::uptime_ms().saturating_add(timeout));
+        loop {
+            if self.try_take() {
+                return true;
+            }
+            let Ok(remaining) = remaining(deadline) else {
+                return false;
+            };
+            let _ = omit_rt::futex_wait(&self.count, 0, remaining);
+        }
+    }
+}
+
+/// `ERROR_NOT_OWNER`.
+const ERROR_NOT_OWNER: u32 = 288;
+/// `ERROR_TOO_MANY_POSTS`.
+const ERROR_TOO_MANY_POSTS: u32 = 298;
+
+/// `CreateMutexA`: creates an unnamed mutex, owned by the caller if
+/// `initial_owner` says so. Named mutexes (shared between processes on
+/// Windows) are not supported.
+///
+/// # Safety
+///
+/// `name` is only compared with null.
+unsafe extern "win64" fn CreateMutexA(
+    _security: *mut c_void,
+    initial_owner: Bool,
+    name: *const c_char,
+) -> Handle {
+    if !name.is_null() {
+        set_last_error(ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    let mutex = Arc::new(WinMutex {
+        owner: AtomicU32::new(0),
+        recursion: AtomicU32::new(0),
+    });
+    if initial_owner != 0 {
+        mutex.try_take();
+    }
+    match with_state(|state| state.handles.insert(Object::Mutex(mutex))) {
+        Ok(handle) => handle,
+        Err(_) => {
+            set_last_error(ERROR_TOO_MANY_OPEN_FILES);
+            0
+        }
+    }
+}
+
+/// `ReleaseMutex`: fails with `ERROR_NOT_OWNER` for a thread that does
+/// not own the mutex.
+extern "win64" fn ReleaseMutex(handle: Handle) -> Bool {
+    let mutex = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Mutex(mutex)) => Some(mutex.clone()),
+        _ => None,
+    });
+    match mutex {
+        Some(mutex) if mutex.release() => TRUE,
+        Some(_) => fail(ERROR_NOT_OWNER),
+        None => fail(ERROR_INVALID_HANDLE),
+    }
+}
+
+/// `CreateSemaphoreA`: creates an unnamed semaphore. Named semaphores
+/// are not supported.
+///
+/// # Safety
+///
+/// `name` is only compared with null.
+unsafe extern "win64" fn CreateSemaphoreA(
+    _security: *mut c_void,
+    initial: i32,
+    maximum: i32,
+    name: *const c_char,
+) -> Handle {
+    if !name.is_null() {
+        set_last_error(ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    if maximum <= 0 || initial < 0 || initial > maximum {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    let semaphore = Arc::new(Semaphore {
+        count: AtomicU32::new(initial as u32),
+        maximum: maximum as u32,
+    });
+    match with_state(|state| state.handles.insert(Object::Semaphore(semaphore))) {
+        Ok(handle) => handle,
+        Err(_) => {
+            set_last_error(ERROR_TOO_MANY_OPEN_FILES);
+            0
+        }
+    }
+}
+
+/// `ReleaseSemaphore`: adds `release` to the count, unless that would
+/// exceed the maximum (`ERROR_TOO_MANY_POSTS`, and nothing changes).
+///
+/// # Safety
+///
+/// `previous` must be null or valid for a write.
+unsafe extern "win64" fn ReleaseSemaphore(
+    handle: Handle,
+    release: i32,
+    previous: *mut i32,
+) -> Bool {
+    let semaphore = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Semaphore(semaphore)) => Some(semaphore.clone()),
+        _ => None,
+    });
+    let Some(semaphore) = semaphore else {
+        return fail(ERROR_INVALID_HANDLE);
+    };
+    if release <= 0 {
+        return fail(ERROR_INVALID_PARAMETER);
+    }
+    let release = release as u32;
+    let updated = semaphore
+        .count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            count
+                .checked_add(release)
+                .filter(|&sum| sum <= semaphore.maximum)
+        });
+    match updated {
+        Ok(before) => {
+            if !previous.is_null() {
+                // SAFETY: guaranteed by the caller.
+                unsafe { previous.write_unaligned(before as i32) };
+            }
+            omit_rt::futex_wake(&semaphore.count, release as usize);
+            TRUE
+        }
+        Err(_) => fail(ERROR_TOO_MANY_POSTS),
     }
 }
 
@@ -2482,7 +2837,9 @@ exports! {
     CreateEventA,
     CreateFileA,
     CreateFileW,
+    CreateMutexA,
     CreateProcessA,
+    CreateSemaphoreA,
     CreateThread,
     DeleteCriticalSection,
     DeleteFileA,
@@ -2534,6 +2891,8 @@ exports! {
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
     ReadFile,
+    ReleaseMutex,
+    ReleaseSemaphore,
     RemoveDirectoryA,
     ResetEvent,
     SetEvent,
@@ -2550,6 +2909,7 @@ exports! {
     TryEnterCriticalSection,
     VirtualAlloc,
     VirtualFree,
+    WaitForMultipleObjects,
     WaitForSingleObject,
     WriteConsoleA,
     WriteConsoleW,

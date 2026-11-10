@@ -50,6 +50,9 @@ pub const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
 pub const INFINITE: u32 = u32::MAX;
 pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 258;
+pub const WAIT_FAILED: u32 = u32::MAX;
+pub const ERROR_NOT_OWNER: u32 = 288;
+pub const ERROR_TOO_MANY_POSTS: u32 = 298;
 pub const STILL_ACTIVE: u32 = 259;
 
 pub const FILE_BEGIN: u32 = 0;
@@ -230,6 +233,21 @@ unsafe extern "system" {
         name: *const c_char,
     ) -> Handle;
     pub safe fn SetEvent(event: Handle) -> Bool;
+    pub fn CreateMutexA(security: *mut c_void, initial_owner: Bool, name: *const c_char) -> Handle;
+    pub safe fn ReleaseMutex(mutex: Handle) -> Bool;
+    pub fn CreateSemaphoreA(
+        security: *mut c_void,
+        initial: i32,
+        maximum: i32,
+        name: *const c_char,
+    ) -> Handle;
+    pub fn ReleaseSemaphore(semaphore: Handle, release: i32, previous: *mut i32) -> Bool;
+    pub fn WaitForMultipleObjects(
+        count: u32,
+        handles: *const Handle,
+        wait_all: Bool,
+        milliseconds: u32,
+    ) -> u32;
     pub safe fn ResetEvent(event: Handle) -> Bool;
     pub fn InitializeCriticalSection(section: *mut CriticalSection);
     pub fn EnterCriticalSection(section: *mut CriticalSection);

@@ -263,6 +263,192 @@ fn events(checks: &mut Checks) {
     say!("winthread: events ok");
 }
 
+/// The mutex and semaphore the helper threads below work on.
+static MUTEX: AtomicUsize = AtomicUsize::new(0);
+static SEMAPHORE: AtomicUsize = AtomicUsize::new(0);
+/// Counted under [`MUTEX`], in two steps on purpose.
+static GUARDED: AtomicU32 = AtomicU32::new(0);
+
+/// Tries the mutex for a moment (1 if it got it — and gives it back),
+/// then tries to release it without owning it (adds 2 if that is
+/// refused as it should be).
+unsafe extern "system" fn mutex_prober(_: *mut c_void) -> u32 {
+    let mutex = MUTEX.load(Ordering::Relaxed) as Handle;
+    let mut result = 0;
+    if WaitForSingleObject(mutex, 30) == WAIT_OBJECT_0 {
+        ReleaseMutex(mutex);
+        result |= 1;
+    }
+    if ReleaseMutex(mutex) == 0 && GetLastError() == ERROR_NOT_OWNER {
+        result |= 2;
+    }
+    result
+}
+
+/// Counts under the mutex.
+unsafe extern "system" fn mutex_counter(_: *mut c_void) -> u32 {
+    let mutex = MUTEX.load(Ordering::Relaxed) as Handle;
+    for round in 0..1000u32 {
+        WaitForSingleObject(mutex, INFINITE);
+        let value = GUARDED.load(Ordering::Relaxed);
+        if round % 128 == 0 {
+            Sleep(0);
+        }
+        GUARDED.store(value + 1, Ordering::Relaxed);
+        ReleaseMutex(mutex);
+    }
+    0
+}
+
+/// Waits for the semaphore without a time limit.
+unsafe extern "system" fn semaphore_waiter(_: *mut c_void) -> u32 {
+    WaitForSingleObject(SEMAPHORE.load(Ordering::Relaxed) as Handle, INFINITE)
+}
+
+fn exit_code(thread: Handle) -> u32 {
+    let mut code = 0;
+    WaitForSingleObject(thread, 10_000);
+    // SAFETY: `code` is a live variable.
+    unsafe { GetExitCodeThread(thread, &raw mut code) };
+    CloseHandle(thread);
+    code
+}
+
+fn mutexes_and_semaphores(checks: &mut Checks) {
+    // SAFETY: null names and attributes; live buffers of the stated
+    // sizes.
+    unsafe {
+        let mutex = CreateMutexA(null_mut(), 0, null_mut());
+        checks.check(!mutex.is_null(), "CreateMutexA");
+        MUTEX.store(mutex as usize, Ordering::Relaxed);
+        // The owner may take it again; others cannot, and cannot release
+        // it either.
+        checks.check(
+            WaitForSingleObject(mutex, 0) == WAIT_OBJECT_0
+                && WaitForSingleObject(mutex, 0) == WAIT_OBJECT_0,
+            "a mutex is taken, and again by its owner",
+        );
+        checks.check(
+            exit_code(start(mutex_prober)) == 2,
+            "another thread neither gets nor releases an owned mutex",
+        );
+        checks.check(ReleaseMutex(mutex) != 0, "ReleaseMutex");
+        checks.check(
+            exit_code(start(mutex_prober)) == 2,
+            "one release of two does not free the mutex",
+        );
+        checks.check(ReleaseMutex(mutex) != 0, "the second release");
+        checks.check(
+            ReleaseMutex(mutex) == 0 && GetLastError() == ERROR_NOT_OWNER,
+            "ERROR_NOT_OWNER",
+        );
+        checks.check(
+            exit_code(start(mutex_prober)) == 3,
+            "a free mutex can be taken",
+        );
+        // Four threads counting under it.
+        let counters = [(); THREADS].map(|()| start(mutex_counter));
+        checks.check(
+            WaitForMultipleObjects(THREADS as u32, counters.as_ptr(), 1, 30_000) == WAIT_OBJECT_0,
+            "WaitForMultipleObjects for all threads",
+        );
+        checks.check(
+            GUARDED.load(Ordering::Relaxed) == 1000 * THREADS as u32,
+            "the mutex kept the count intact",
+        );
+        for thread in counters {
+            CloseHandle(thread);
+        }
+        // Created owned.
+        let owned = CreateMutexA(null_mut(), 1, null_mut());
+        checks.check(ReleaseMutex(owned) != 0, "a mutex created owned");
+        CloseHandle(owned);
+
+        // A semaphore with room for two.
+        let semaphore = CreateSemaphoreA(null_mut(), 0, 2, null_mut());
+        checks.check(!semaphore.is_null(), "CreateSemaphoreA");
+        SEMAPHORE.store(semaphore as usize, Ordering::Relaxed);
+        checks.check(
+            WaitForSingleObject(semaphore, 20) == WAIT_TIMEOUT,
+            "an empty semaphore makes a wait time out",
+        );
+        let mut previous = -1;
+        checks.check(
+            ReleaseSemaphore(semaphore, 2, &raw mut previous) != 0 && previous == 0,
+            "ReleaseSemaphore reports the previous count",
+        );
+        checks.check(
+            ReleaseSemaphore(semaphore, 1, null_mut()) == 0
+                && GetLastError() == ERROR_TOO_MANY_POSTS,
+            "ERROR_TOO_MANY_POSTS",
+        );
+        checks.check(
+            WaitForSingleObject(semaphore, 0) == WAIT_OBJECT_0
+                && WaitForSingleObject(semaphore, 0) == WAIT_OBJECT_0
+                && WaitForSingleObject(semaphore, 0) == WAIT_TIMEOUT,
+            "two counts, two successful waits",
+        );
+        let waiter = start(semaphore_waiter);
+        checks.check(
+            WaitForSingleObject(waiter, 30) == WAIT_TIMEOUT,
+            "a thread waits for the semaphore",
+        );
+        ReleaseSemaphore(semaphore, 1, null_mut());
+        checks.check(exit_code(waiter) == WAIT_OBJECT_0, "and is released by it");
+        checks.check(
+            CreateSemaphoreA(null_mut(), 3, 2, null_mut()).is_null()
+                && CreateSemaphoreA(null_mut(), 0, 0, null_mut()).is_null(),
+            "impossible semaphores are refused",
+        );
+
+        // Waiting for several things at once.
+        let first = CreateEventA(null_mut(), 0, 0, null_mut());
+        let second = CreateEventA(null_mut(), 0, 0, null_mut());
+        let objects = [first, second, semaphore];
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 0, 30) == WAIT_TIMEOUT,
+            "nothing signalled: time-out",
+        );
+        SetEvent(second);
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 0, 1000) == WAIT_OBJECT_0 + 1,
+            "the index of the signalled object",
+        );
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 0, 0) == WAIT_TIMEOUT,
+            "the wait consumed the signal",
+        );
+        // All: not while one is missing, and nothing is consumed by the
+        // failed attempt.
+        SetEvent(first);
+        ReleaseSemaphore(semaphore, 1, null_mut());
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 1, 30) == WAIT_TIMEOUT,
+            "waiting for all with one missing times out",
+        );
+        SetEvent(second);
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 1, 1000) == WAIT_OBJECT_0,
+            "waiting for all succeeds once all are signalled",
+        );
+        checks.check(
+            WaitForMultipleObjects(3, objects.as_ptr(), 0, 0) == WAIT_TIMEOUT,
+            "and took all of them",
+        );
+        let bad = [first, 0x7777 as Handle];
+        checks.check(
+            WaitForMultipleObjects(2, bad.as_ptr(), 0, 0) == WAIT_FAILED
+                && WaitForMultipleObjects(0, objects.as_ptr(), 0, 0) == WAIT_FAILED
+                && WaitForMultipleObjects(65, objects.as_ptr(), 0, 0) == WAIT_FAILED,
+            "invalid waits fail",
+        );
+        for handle in [mutex, semaphore, first, second] {
+            CloseHandle(handle);
+        }
+    }
+    say!("winthread: mutexes and semaphores ok");
+}
+
 unsafe extern "system" fn sleeper(_: *mut c_void) -> u32 {
     Sleep(INFINITE);
     0
@@ -274,6 +460,7 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     let mut checks = Checks::new("winthread");
     workers(&mut checks);
     events(&mut checks);
+    mutexes_and_semaphores(&mut checks);
 
     // A thread that is still running when the first thread returns ends
     // with the process.

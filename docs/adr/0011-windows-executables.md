@@ -45,7 +45,7 @@ are started like any other.
   Win32 error codes, path translation (`C:\a\b` is `/a/b`), command-line
   quoting, UTF-16 conversion, the handle table. Host-tested.
 - `userspace/programs/src/bin/winrun` — the loader and the implementation
-  of 77 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
+  of 82 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
   Omit OS system calls.
 - `compat/windows/samples` — test programs. They are real Windows console
   executables (target `x86_64-pc-windows-msvc`), built by `cargo xtask`
@@ -122,7 +122,7 @@ Verified in QEMU by the `windows-programs` test:
   section (entered recursively), exit codes including `ExitThread` from a
   nested call, per-thread storage and error codes, auto- and manual-reset
   events with waiters, timeouts, and a thread still running when the
-  program returns (44 self-checked operations);
+  program returns (55 self-checked operations, including mutexes, semaphores and waits for several objects);
 - a graphical program (`wingui.exe`, `desktop` test): it registers a
   window class, creates a window, paints text, a filled rectangle and a
   line in `WM_PAINT`, and runs a message loop. Driven through the
@@ -147,7 +147,7 @@ Verified in QEMU by the `windows-programs` test:
 This is a proof that the approach works, not Windows compatibility.
 
 - **Only programs whose imports are all satisfied by the implemented
-  functions — 77 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
+  functions — 82 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
   `GDI32.dll` — or by DLL files that are present and themselves
   loadable, run.** That excludes practically all existing software:
   anything linked against the C runtime or the Rust standard library, or
@@ -167,8 +167,10 @@ This is a proof that the approach works, not Windows compatibility.
   structured exception handling, or environment.
 - Threads: libraries are not notified of them (`DLL_THREAD_ATTACH`),
   static thread-local storage (`__declspec(thread)`, the PE TLS
-  directory) is not supported — only the `Tls*` functions — and there are
-  no mutex, semaphore or `WaitForMultipleObjects` objects yet. One CPU.
+  directory) is not supported — only the `Tls*` functions. Named objects
+  (shared between processes) do not exist. `WaitForMultipleObjects` looks
+  at its objects every 10 ms rather than sleeping until one changes, and
+  when waiting for all does not take them in one indivisible step. One CPU.
 - The test programs were built here and have **not been run on Windows**
   to confirm they behave identically there.
 - Images without relocation information are refused: the kernel cannot

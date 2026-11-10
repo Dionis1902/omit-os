@@ -219,7 +219,7 @@ and measurements of input latency and frame pacing; Direct3D, Vulkan, GPU
 acceleration and existing games were investigated only (ADR 0013).
 
 "First instance" means what it says: two small Linux drivers; Windows
-programs written for the purpose, using about 120 functions of three
+programs written for the purpose, using about 125 functions of three
 system libraries — no existing Windows application runs; a desktop with a
 handful of built-in windows and a minimal protocol for other programs'
 windows. Milestones 6 to 9 are open-ended by nature, and nothing here
@@ -293,7 +293,7 @@ machine.
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
 | PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
 | Windows program loader `winrun`: mapping, relocation, import binding, W^X section rights, stack, TEB/PEB | Working, tested in QEMU |
-| Windows API: 77 functions of `KERNEL32.dll` (console, files with positioning, directories and listings, heap, virtual memory, time and date, starting and waiting for other programs, process and module information, threads and synchronisation) | Working, tested by a Windows program that checks 94 results. **Only programs importing nothing else from Windows (but see the next row) can run**; see ADR 0011 |
+| Windows API: 82 functions of `KERNEL32.dll` (console, files with positioning, directories and listings, heap, virtual memory, time and date, starting and waiting for other programs, process and module information, threads and synchronisation) | Working, tested by a Windows program that checks 94 results. **Only programs importing nothing else from Windows (but see the next row) can run**; see ADR 0011 |
 | Windows GUI, first slice: 28 functions of `USER32.dll` and 14 of `GDI32.dll` — window classes, one fixed-size top-level window per `CreateWindowExA`, the message loop, painting with text, rectangles, lines and pixels, keyboard and mouse messages, timers, `MessageBoxA` | Working; `wingui.exe` is operated by the QEMU test with mouse and keyboard and checked on screenshots. No controls, menus, dialogs, bitmaps or `...W` functions: enough for a hand-written demonstration program, not for existing applications |
 | Windows libraries (DLL files): export tables, loading with dependencies, initialisation order, `LoadLibraryA`, `GetProcAddress` | Working, tested with two DLLs built in this repository (33 checks). No Windows system DLL exists here |
 | Windows programs started by name from the shell or by `spawn`; missing functions reported before start | Working, tested |
@@ -306,7 +306,7 @@ machine.
 | A terminal emulator, resizable windows for other programs, minimising, graphics modes | Not started |
 | A small game (`/bin/pop`: click the shrinking discs) redrawing 50 times a second, with frame pacing against the clock | Working; the QEMU test plays one move and the game reports its frame intervals (average 20.0 ms at the intended 20 ms, longest 25–30 ms under emulation; ADR 0013). Not synchronised to the display, and only multiples of the 10 ms timer tick can be paced |
 | GPU drivers and acceleration, Vulkan, Direct3D, existing games | Not started; requirements and a proposed order of work are in ADR 0013 |
-| Windows threads: `CreateThread`, exit codes, `WaitForSingleObject`, events, critical sections, `Tls*` storage, per-thread TEB | Working, tested by a multi-threaded Windows program (44 checks) |
+| Windows threads: `CreateThread`, exit codes, `WaitForSingleObject`, events, mutexes, semaphores, `WaitForMultipleObjects`, critical sections, `Tls*` storage, per-thread TEB | Working, tested by a multi-threaded Windows program (44 checks) |
 | Windows: C runtime, exceptions, static TLS, graphics, registry, networking, 32-bit programs | Not started |
 
 ### What has been verified, and how

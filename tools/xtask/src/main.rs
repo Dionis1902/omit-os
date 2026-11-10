@@ -1306,7 +1306,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // when the program returns ends with it.
             (
                 "winthread.exe",
-                "winthread: 4 threads counted to 20000\r\nwinthread: events ok\r\nwinthread: all",
+                "winthread: 4 threads counted to 20000\r\nwinthread: events ok\r\nwinthread: mutexes and semaphores ok\r\nwinthread: all",
             ),
             ("ps", "PID"),
             // A library is not a program.
