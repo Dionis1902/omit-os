@@ -156,6 +156,15 @@ pub const DEVICES: &[DeviceInfo] = &[
         Validation::None,
     ),
     entry(
+        0x1B36,
+        0x0011,
+        "QEMU pvpanic device",
+        Support::Linux {
+            driver: "pvpanic-pci",
+        },
+        Validation::Emulation,
+    ),
+    entry(
         0x8086,
         0x100E,
         "Intel 82540EM Gigabit Ethernet",

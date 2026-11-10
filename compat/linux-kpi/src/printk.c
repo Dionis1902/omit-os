@@ -6,8 +6,8 @@
  * functions cannot be defined in stable Rust, so the formatting is done
  * here and the finished line is handed to the kernel.
  *
- * Supported conversions: %d %i %u %x %X %s %c %p %%, with the l, ll, z and
- * h length modifiers and zero/space padding to a width. That covers the
+ * Supported conversions: %d %i %u %x %X %s %c %p %pe %%, with the l, ll, z
+ * and h length modifiers and zero/space padding to a width. That covers the
  * drivers ported so far; an unsupported conversion is printed literally.
  */
 
@@ -115,6 +115,14 @@ static void format(struct buffer *out, const char *fmt, va_list args)
 			break;
 		}
 		case 'p':
+			if (fmt[1] == 'e') {
+				/* %pe: an error pointer, shown as its number. */
+				fmt++;
+				long error = (long)va_arg(args, void *);
+				put_number(out, 0ULL - (unsigned long long)error, 10,
+					   true, false, 0, ' ');
+				break;
+			}
 			put_string(out, "0x");
 			put_number(out, (uintptr_t)va_arg(args, void *), 16, false, false, 16, '0');
 			break;
@@ -157,4 +165,16 @@ void omit_kpi_printf(int level, const char *prefix, const char *fmt, ...)
 		out.used--;
 	out.data[out.used] = '\0';
 	omit_kpi_log(level, line);
+}
+
+int sysfs_emit(char *buf, const char *fmt, ...)
+{
+	struct buffer out = { .data = buf, .size = 4096, .used = 0 };
+	va_list args;
+
+	va_start(args, fmt);
+	format(&out, fmt, args);
+	va_end(args);
+	out.data[out.used] = '\0';
+	return (int)out.used;
 }

@@ -395,6 +395,19 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     // Devices. Storage is optional: the system runs from RAM without it.
     let functions = pci::init();
     info!("pci: {functions} function(s) found");
+    // SAFETY: the boot information was validated in step 2; the memory
+    // map it refers to is still mapped.
+    let map = unsafe { boot_info.memory_map() };
+    let assigned = pci::assign_unassigned_bars(|start, length| {
+        // Free means: no RAM and nothing the firmware reserved.
+        !map.iter().any(|region| {
+            let region_end = region.start + region.pages * mm::PAGE_SIZE;
+            start < region_end && region.start < start + length
+        })
+    });
+    if assigned != 0 {
+        info!("pci: assigned {assigned} memory region(s) that firmware left unassigned");
+    }
     match drivers::virtio_blk::init() {
         Ok(Some(sectors)) => {
             // Reading the first sector proves the request path end to end

@@ -8,7 +8,9 @@
  * Linux drivers if they differ.
  */
 
+#include <linux/notifier.h>
 #include <linux/pci.h>
+#include <linux/reboot.h>
 #include <linux/watchdog.h>
 
 const unsigned long omit_kpi_layout[] = {
@@ -25,5 +27,13 @@ const unsigned long omit_kpi_layout[] = {
 	sizeof(struct watchdog_device),
 	offsetof(struct watchdog_device, timeout),
 	offsetof(struct watchdog_device, status),
+	offsetof(struct pci_driver, dev_groups),
+	sizeof(struct notifier_block),
+	offsetof(struct notifier_block, priority),
+	sizeof(struct attribute),
+	sizeof(struct attribute_group),
+	sizeof(struct device_attribute),
+	offsetof(struct device_attribute, store),
+	sizeof(struct sys_off_data),
 };
 const unsigned long omit_kpi_layout_len = ARRAY_SIZE(omit_kpi_layout);

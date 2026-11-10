@@ -58,6 +58,41 @@ What has been demonstrated, in QEMU:
 - started and left alone, the hardware resets the machine;
 - unbinding detaches it.
 
+### Second driver, from another subsystem: pvpanic
+
+`drivers/misc/pvpanic/` from Linux v6.12 (three files, about 290 lines,
+GPL-2.0-or-later) lets a virtual machine tell its hypervisor that the
+guest kernel has panicked. It was added to find out how much of the layer
+was specific to the first driver. It uses none of the watchdog interface
+and a different slice of the kernel API: linked lists, spinlocks, the
+panic notifier chain, power-off ("sys-off") handlers, managed clean-up
+actions, device attributes with `show`/`store` functions, strict number
+parsing, and a driver split over two modules. All three files compile
+unmodified; the layer grew by thirteen headers and about 400 lines of
+Rust. Nothing written for the first driver had to change, only to be
+extended (one new field in `struct pci_driver`).
+
+What that required of the native kernel is as instructive as the layer:
+
+- **PCI resource assignment.** The device's register block is two bytes
+  long, and the firmware (OVMF) leaves such a BAR unassigned. Like Linux,
+  the kernel now assigns addresses to memory BARs the firmware skipped —
+  by a simple rule (directly above the highest firmware-assigned region
+  on the root bus, checked against the memory map), because the proper
+  source of the bridge window is ACPI byte code the kernel cannot read.
+- **Panic hook.** The panic handler calls the Linux panic notifier chain
+  after printing its own report.
+- **Attributes without sysfs.** There is no sysfs; the attributes a driver
+  declares are reachable through the shell's `devattr` command, which
+  calls the driver's own `show` and `store`.
+
+Demonstrated in QEMU: the driver binds; `capability` and `events` read
+back the device's values; writing `events` goes through the driver's
+validation (bad values are rejected with its error code); unbinding runs
+the driver's clean-up action; and a kernel panic makes QEMU — started
+with `-action panic=exit-failure` — terminate with the status reserved
+for a guest panic, which only the driver's write to the device can cause.
+
 ### Hardware database
 
 `libs/hwdb` maps PCI IDs to names and support status and is what `lspci`
@@ -66,8 +101,8 @@ has been validated; a unit test enforces that the two fields agree.
 
 ## What this does not show
 
-- **One driver, about 350 lines, one bus, no interrupts, no DMA, no
-  sleeping, no timers, no work queues.** Those are exactly the areas where
+- **Two small drivers (about 640 lines together), one bus, no interrupts,
+  no DMA, no sleeping, no timers, no work queues.** Those are exactly the areas where
   a compatibility layer gets hard: Linux's locking rules, memory allocation
   contexts, the device model, power management and the network or block
   stacks. Network, storage, USB and above all GPU drivers need orders of

@@ -28,4 +28,27 @@ struct module;
 #define MODULE_DESCRIPTION(x) _Static_assert(1, "description")
 #define MODULE_LICENSE(x) _Static_assert(1, "license")
 
+/* Every symbol is visible to everything linked into the kernel. */
+#define EXPORT_SYMBOL(sym) _Static_assert(1, "export")
+#define EXPORT_SYMBOL_GPL(sym) _Static_assert(1, "export")
+
+/*
+ * On Linux these mark a module's initialisation and clean-up functions.
+ * Here they generate functions the kernel calls by name, derived from
+ * KBUILD_MODNAME, which the build passes per file. Nothing unloads a
+ * driver's code, so the exit function is generated but never called.
+ */
+#define __omit_module_paste(a, b) a##b
+#define __omit_module_name(prefix, mod) __omit_module_paste(prefix, mod)
+#define module_init(fn) \
+	int __omit_module_name(omit_linux_module_init_, KBUILD_MODNAME)(void) \
+	{ \
+		return fn(); \
+	}
+#define module_exit(fn) \
+	void __omit_module_name(omit_linux_module_exit_, KBUILD_MODNAME)(void) \
+	{ \
+		fn(); \
+	}
+
 #endif

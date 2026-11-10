@@ -12,6 +12,8 @@ const C_SOURCES: &[(&str, &str)] = &[
     ("compat/linux-kpi/src/printk.c", "omit_kpi_printk"),
     ("compat/linux-kpi/src/layout.c", "omit_kpi_layout"),
     ("drivers/linux/watchdog/i6300esb.c", "i6300esb"),
+    ("drivers/linux/misc/pvpanic/pvpanic.c", "pvpanic"),
+    ("drivers/linux/misc/pvpanic/pvpanic-pci.c", "pvpanic_pci"),
 ];
 
 /// Flags for freestanding kernel code: no host headers or libraries, no red

@@ -5,14 +5,14 @@
 Omit OS is a from-scratch operating system for x86-64 with its own kernel,
 written in Rust. It is not a Linux distribution: the kernel is independent,
 and the only Linux code in the tree is individual device drivers reused
-unmodified (currently one; see `drivers/linux/`). It contains no Windows code.
+unmodified (currently two; see `drivers/linux/`). It contains no Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
 the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
 (with a PS/2 keyboard) and on the serial console, and can format, mount and
-use an ext2 filesystem on a VirtIO disk. One unmodified Linux driver runs
+use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
 There is no installer yet. See [Status](#status) for exactly what exists,
@@ -72,7 +72,7 @@ hello from omit
 | Tool | Purpose | Debian/Ubuntu |
 | --- | --- | --- |
 | [rustup](https://rustup.rs) | Rust toolchain (version, components and targets are pinned in `rust-toolchain.toml` and installed automatically) | — |
-| clang or gcc | compiling the reused Linux driver into the kernel | `apt install clang` |
+| clang or gcc | compiling the reused Linux drivers into the kernel | `apt install clang` |
 | QEMU (x86-64 system emulator) | running and testing | `apt install qemu-system-x86` |
 | e2fsprogs (optional) | independent check of the ext2 driver in the tests | `apt install e2fsprogs` |
 | OVMF | UEFI firmware for QEMU | `apt install ovmf` |
@@ -197,7 +197,7 @@ interrupts), 3 (terminal and filesystem), 4 (processes and userspace),
 5 (storage; coreutils only in part), 6 (driver compatibility, first
 instance), 7 (Windows executables, first instance) and 8 (graphics and a
 desktop, first instance) are implemented. "First instance" means what it
-says: one Linux driver; Windows programs that use only a small part of one
+says: two small Linux drivers; Windows programs that use only a small part of one
 system library; a desktop that is a single program.
 
 | Component | State |
@@ -240,7 +240,9 @@ system library; a desktop that is a single program.
 | ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
 | Hardware database: device names and support status in `lspci` | Working, host-tested |
 | Driver registry (`lsdrv`), unbinding of Linux drivers (`unbind`) | Working, tested |
-| LinuxKPI: one unmodified Linux driver (Intel 6300ESB watchdog, Linux v6.12) | Working **in QEMU only**: probe, start/stop, keep-alives prevent the reset, expiry resets the machine, unbind. Not a general Linux driver layer; see ADR 0010 |
+| LinuxKPI: unmodified Linux driver for the Intel 6300ESB watchdog (Linux v6.12) | Working **in QEMU only**: probe, start/stop, keep-alives prevent the reset, expiry resets the machine, unbind. Not a general Linux driver layer; see ADR 0010 |
+| LinuxKPI: unmodified Linux `pvpanic` driver (a second subsystem: notifier chains, lists, spinlocks, device attributes) | Working **in QEMU only**: probe, attributes via `devattr`, unbind, kernel panic reported to the hypervisor |
+| PCI: assignment of memory BARs that firmware left unassigned | Working for the one case that needs it (QEMU pvpanic under OVMF); a simple placement rule, bus 0 only |
 | Loadable drivers, driver packages, automatic driver installation | Not started |
 | Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
 | Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
@@ -338,7 +340,7 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Only the boot CPU is used.
 - No Secure Boot support; the loader does not authenticate the kernel.
 - No kernel address-space randomisation.
-- Linux driver reuse is demonstrated for a single small driver without
+- Linux driver reuse is demonstrated for two small drivers without
   interrupts or DMA, in emulation. It says little about how hard network,
   storage or graphics drivers will be.
 - Windows compatibility covers console programs that import only the 47

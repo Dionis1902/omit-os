@@ -19,6 +19,7 @@
 #define EBUSY 16
 #define ENODEV 19
 #define EINVAL 22
+#define ERANGE 34
 
 /* Atomicity is irrelevant for the drivers supported so far: they only test
  * flag bits that are set once during probing. */

@@ -102,6 +102,40 @@ impl Host for KernelHost {
             .collect()
     }
 
+    fn device_attribute(
+        &mut self,
+        device: &str,
+        name: Option<&str>,
+        value: Option<&str>,
+    ) -> Result<Vec<String>, String> {
+        use crate::linuxkpi;
+        match (name, value) {
+            (None, _) => {
+                let attributes = linuxkpi::attributes(device)
+                    .ok_or("no Linux driver is bound to that device")?;
+                Ok(attributes
+                    .iter()
+                    .map(|attribute| {
+                        let access = if attribute.writable {
+                            "read/write"
+                        } else {
+                            "read-only"
+                        };
+                        format!("{:<16} {access}", attribute.name)
+                    })
+                    .collect())
+            }
+            (Some(name), None) => {
+                let text = linuxkpi::read_attribute(device, name)?;
+                Ok(text.lines().map(String::from).collect())
+            }
+            (Some(name), Some(value)) => {
+                linuxkpi::write_attribute(device, name, value)?;
+                Ok(Vec::new())
+            }
+        }
+    }
+
     fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
         if crate::linuxkpi::unbind(device) {
             Ok(())
@@ -232,4 +266,10 @@ pub fn run() {
         warn!("console: {dropped} input byte(s) were dropped");
     }
     info!("shell exited");
+    // The system is going down in an orderly way: give drivers that asked
+    // for it the chance to act (Linux "sys-off" handlers).
+    let handlers = crate::linuxkpi::notify::call_power_off_handlers();
+    if handlers != 0 {
+        info!("linuxkpi: {handlers} power-off handler(s) called");
+    }
 }

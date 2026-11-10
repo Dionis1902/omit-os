@@ -401,6 +401,7 @@ fn qemu_command(
     vars: &Path,
     data_disk: &Path,
     monitor: Option<&Path>,
+    extra: &[&str],
     options: &Options,
 ) -> Result<Command> {
     let media = if options.iso {
@@ -448,7 +449,8 @@ fn qemu_command(
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
         .args(["-nic", "none"])
-        .arg("-no-reboot");
+        .arg("-no-reboot")
+        .args(extra);
     match monitor {
         Some(socket) => {
             let _ = fs::remove_file(socket);
@@ -514,7 +516,7 @@ fn cmd_run(options: &Options) -> Result<ExitCode> {
     if !data_disk.exists() {
         create_data_disk(&data_disk)?;
     }
-    let mut command = qemu_command(&image, &vars, &data_disk, None, options)?;
+    let mut command = qemu_command(&image, &vars, &data_disk, None, &[], options)?;
     if options.gdb {
         command.args(["-s", "-S"]);
         eprintln!("xtask: QEMU is paused; attach with `gdb -ex 'target remote :1234'`");
@@ -562,6 +564,8 @@ struct BootTest {
     /// emulated mouse and keyboard, checking screenshots (see
     /// [`desktop_scenario`]). Requires `display`.
     desktop: bool,
+    /// Additional QEMU arguments, for devices only this test needs.
+    qemu_args: &'static [&'static str],
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -591,6 +595,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "shell-session",
@@ -715,6 +720,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "display-and-keyboard",
@@ -731,6 +737,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: true,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "desktop",
@@ -747,6 +754,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: true,
         desktop: true,
+        qemu_args: &[],
     },
     BootTest {
         name: "disk-persistence",
@@ -803,6 +811,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "windows-programs",
@@ -891,6 +900,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -971,6 +981,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -994,6 +1005,88 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: true,
         display: false,
         desktop: false,
+        qemu_args: &[],
+    },
+    BootTest {
+        name: "linux-driver-pvpanic",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &["[INFO ] shell exited"],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            (
+                "lspci",
+                " 1b36:0011 QEMU pvpanic device [Linux driver: pvpanic-pci]\n",
+            ),
+            ("lsdrv", "00:04.0  linux-kpi  pvpanic-pci\n"),
+            // The attributes the driver declares; on Linux they would be
+            // files in sysfs.
+            (
+                "devattr 00:04.0",
+                "\ncapability       read-only\nevents           read/write\n",
+            ),
+            // The device (as emulated by QEMU 8) reports "panicked" and
+            // "crash loaded" events: bits 0 and 1.
+            ("devattr 00:04.0 capability", "\n3\n"),
+            ("devattr 00:04.0 events", "\n3\n"),
+            // Writing goes through the driver's own parsing and checks.
+            (
+                "devattr 00:04.0 events 1",
+                "devattr 00:04.0 events 1\nomit:/# ",
+            ),
+            ("devattr 00:04.0 events", "\n1\n"),
+            (
+                "devattr 00:04.0 events 8",
+                "devattr: 00:04.0: the driver rejected the value (error 22)\n",
+            ),
+            (
+                "devattr 00:04.0 events junk",
+                "devattr: 00:04.0: the driver rejected the value (error 22)\n",
+            ),
+            (
+                "devattr 00:04.0 capability 1",
+                "devattr: 00:04.0: the attribute is read-only\n",
+            ),
+            ("devattr 00:04.0 events", "\n1\n"),
+            ("devattr 00:03.0", "devattr 00:03.0\nomit:/# "),
+            (
+                "devattr 00:02.0",
+                "devattr: 00:02.0: no Linux driver is bound to that device\n",
+            ),
+            // Unbinding runs the clean-up action the driver registered.
+            ("unbind 00:04.0", "unbind 00:04.0\nomit:/# "),
+            (
+                "devattr 00:04.0",
+                "devattr: 00:04.0: no Linux driver is bound to that device\n",
+            ),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &["-device", "pvpanic-pci"],
+    },
+    // With the pvpanic device and its Linux driver, a kernel panic is
+    // reported to the hypervisor. QEMU is told to exit with status 1 when
+    // that happens, which is distinct from the status of the kernel's own
+    // debug-exit device (see "panic-diagnostics", which has no pvpanic
+    // device) — so status 1 proves the driver's panic notifier ran and
+    // wrote to the device.
+    BootTest {
+        name: "linux-driver-pvpanic-notifies-host",
+        cmdline: "fault=panic",
+        expected_exit: 1,
+        must_contain: &[
+            "[INFO ] linuxkpi: 2 device(s) bound to Linux drivers",
+            "==== KERNEL PANIC ====",
+        ],
+        must_not_contain: &[],
+        script: &[],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &["-device", "pvpanic-pci", "-action", "panic=exit-failure"],
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1012,6 +1105,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1028,6 +1122,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1044,6 +1139,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1059,6 +1155,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ends_with_reset: false,
         display: false,
         desktop: false,
+        qemu_args: &[],
     },
 ];
 
@@ -1664,6 +1761,7 @@ fn run_boot_test(
             &vars,
             &data_disk,
             display.as_ref().map(|d| d.monitor.as_path()),
+            test.qemu_args,
             options,
         )?,
         test.script,
@@ -1679,7 +1777,7 @@ fn run_boot_test(
     if !test.reboot_script.is_empty() {
         // Same machine, same data disk, fresh boot.
         let second = run_qemu_captured(
-            qemu_command(&image, &vars, &data_disk, None, options)?,
+            qemu_command(&image, &vars, &data_disk, None, test.qemu_args, options)?,
             test.reboot_script,
             false,
             None,

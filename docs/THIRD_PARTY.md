@@ -41,6 +41,7 @@ checksums, is [`drivers/linux/README.md`](../drivers/linux/README.md).
 | File | Licence | Copyright |
 | --- | --- | --- |
 | `drivers/linux/watchdog/i6300esb.c` | GPL-2.0-or-later | (c) 2004 Google Inc.; (c) 2005 David Härdeman; see the file header |
+| `drivers/linux/misc/pvpanic/pvpanic.c`, `pvpanic-pci.c`, `pvpanic.h` | GPL-2.0-or-later | (c) 2013 Fujitsu; (c) 2018 ZTE; (c) 2021 Oracle; see the file headers |
 
 The LinuxKPI headers and runtime in `compat/linux-kpi/` are original Omit OS
 code under GPL-2.0-only. They declare interfaces compatible with Linux's but

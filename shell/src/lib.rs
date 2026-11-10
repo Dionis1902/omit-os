@@ -102,6 +102,16 @@ pub trait Host {
     /// (`bus:device.function`).
     fn unbind_driver(&mut self, device: &str) -> Result<(), String>;
 
+    /// Attributes that the driver of `device` exposes. Without `name`,
+    /// lists them (one line each); with `name`, returns the attribute's
+    /// value; with `value` as well, sets it and returns nothing.
+    fn device_attribute(
+        &mut self,
+        device: &str,
+        name: Option<&str>,
+        value: Option<&str>,
+    ) -> Result<Vec<String>, String>;
+
     /// Runs a watchdog subcommand and returns what to print.
     fn watchdog(&mut self, args: &[String]) -> Result<String, String>;
 
@@ -151,7 +161,7 @@ type CommandResult = Result<(), Failure>;
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
     "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
-    "watchdog",
+    "devattr", "watchdog",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -187,6 +197,8 @@ Built-in commands:
   lsblk                list block devices
   lsdrv                list drivers and the devices they control
   unbind DEVICE        detach the driver from a device (e.g. 00:03.0)
+  devattr DEVICE [NAME [VALUE]]
+                       list, show or set the attributes a driver exposes
   watchdog [COMMAND]   status, start, stop, ping, timeout SECONDS
   mkfs DEVICE          create an empty ext2 filesystem (erases the device)
   mount [DEVICE DIR]   mount a filesystem, or list what is mounted
@@ -378,6 +390,21 @@ impl Shell {
                 };
                 host.unbind_driver(device)
                     .map_err(|error| Failure(format!("{device}: {error}")))
+            }
+            "devattr" => {
+                let (device, name, value) = match args {
+                    [device] => (device, None, None),
+                    [device, name] => (device, Some(name.as_str()), None),
+                    [device, name, value] => (device, Some(name.as_str()), Some(value.as_str())),
+                    _ => return Err(Failure("usage: devattr DEVICE [NAME [VALUE]]".into())),
+                };
+                let lines = host
+                    .device_attribute(device, name, value)
+                    .map_err(|error| Failure(format!("{device}: {error}")))?;
+                for line in lines {
+                    writeln!(out, "{line}")?;
+                }
+                Ok(())
             }
             "watchdog" => Ok(out.write_str(&host.watchdog(args).map_err(Failure)?)?),
             "lsblk" => {
@@ -871,6 +898,27 @@ mod tests {
             alloc::vec!["00:02.0  native     virtio-blk".into()]
         }
 
+        fn device_attribute(
+            &mut self,
+            device: &str,
+            name: Option<&str>,
+            value: Option<&str>,
+        ) -> Result<Vec<String>, String> {
+            if device != "00:04.0" {
+                return Err("no Linux driver is bound to that device".into());
+            }
+            match (name, value) {
+                (None, _) => Ok(Vec::from(["events           read/write".into()])),
+                (Some("events"), None) => Ok(Vec::from([format!("{:x}", self.formatted)])),
+                (Some("events"), Some(value)) => {
+                    self.formatted = u32::from_str_radix(value, 16)
+                        .map_err(|_| String::from("the driver rejected the value (error 22)"))?;
+                    Ok(Vec::new())
+                }
+                _ => Err("no such attribute".into()),
+            }
+        }
+
         fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
             if device == "00:03.0" {
                 Ok(())
@@ -1176,6 +1224,31 @@ mod tests {
 
         s.ok("echo -n bad-image > /bin/broken");
         assert_eq!(s.err("broken"), "broken: not an executable\n");
+    }
+
+    #[test]
+    fn device_attributes() {
+        let mut s = Session::new();
+        assert_eq!(s.ok("devattr 00:04.0"), "events           read/write\n");
+        assert_eq!(s.ok("devattr 00:04.0 events"), "0\n");
+        assert_eq!(s.ok("devattr 00:04.0 events 1f"), "");
+        assert_eq!(s.ok("devattr 00:04.0 events"), "1f\n");
+        assert_eq!(
+            s.err("devattr 00:04.0 events zz"),
+            "devattr: 00:04.0: the driver rejected the value (error 22)\n"
+        );
+        assert_eq!(
+            s.err("devattr 00:04.0 nope"),
+            "devattr: 00:04.0: no such attribute\n"
+        );
+        assert_eq!(
+            s.err("devattr 00:09.0"),
+            "devattr: 00:09.0: no Linux driver is bound to that device\n"
+        );
+        assert_eq!(
+            s.err("devattr"),
+            "devattr: usage: devattr DEVICE [NAME [VALUE]]\n"
+        );
     }
 
     #[test]

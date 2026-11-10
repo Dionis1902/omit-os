@@ -44,6 +44,11 @@ fn panic(info: &PanicInfo<'_>) -> ! {
     });
     kprintln!("======================");
 
+    // Tell whoever asked to be told (a hypervisor, through the pvpanic
+    // driver, for example). After the report, so that a misbehaving
+    // callback cannot prevent it from being seen.
+    crate::linuxkpi::notify::call_panic_notifiers();
+
     qemu::exit(qemu::ExitCode::Failure);
     arch::halt_forever();
 }

@@ -35,6 +35,17 @@ static inline void writel(u32 value, volatile void __iomem *addr)
 	*(volatile u32 *)addr = value;
 }
 
+/* The ioread/iowrite family on memory-mapped registers. */
+static inline u8 ioread8(const void __iomem *addr)
+{
+	return readb(addr);
+}
+
+static inline void iowrite8(u8 value, void __iomem *addr)
+{
+	writeb(value, addr);
+}
+
 void iounmap(volatile void __iomem *addr);
 
 #endif
