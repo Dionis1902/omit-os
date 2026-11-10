@@ -17,7 +17,8 @@ static ROOT: Mutex<Option<Vfs>> = Mutex::new(None);
 
 /// Creates the root filesystem (a RAM filesystem) and unpacks the initial
 /// ramdisk archive into it. Requires the scheduler to be running.
-pub fn init(initrd: &[u8]) {
+pub fn init(initrd: &'static [u8]) {
+    *INITRD.lock() = initrd;
     let mut vfs = Vfs::new(Box::new(RamFs::new()));
     info!("vfs: RAM filesystem mounted at /");
     if !initrd.is_empty() {
@@ -30,6 +31,16 @@ pub fn init(initrd: &[u8]) {
         }
     }
     *ROOT.lock() = Some(vfs);
+}
+
+/// The initial ramdisk archive as the boot loader provided it. The
+/// installer copies it to the installed system unchanged.
+static INITRD: crate::sync::SpinLock<&'static [u8]> = crate::sync::SpinLock::new(&[]);
+
+/// The initial ramdisk archive this system was booted with (empty if
+/// there was none).
+pub fn initrd() -> &'static [u8] {
+    *INITRD.lock()
 }
 
 /// Exclusive access to the root filesystem.
@@ -79,8 +90,11 @@ impl Disk {
             .find(|(device, _)| device == name)
             .map(|(_, sectors)| sectors)
             .ok_or("no such block device")?;
+        // A device shares its storage with its partitions, and a
+        // partition with its whole device.
+        let related = block::related(name);
         let mut in_use = IN_USE.lock();
-        if in_use.iter().any(|device| device == name) {
+        if in_use.iter().any(|device| related.contains(device)) {
             return Err("device is in use");
         }
         in_use.push(name.into());

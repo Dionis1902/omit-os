@@ -123,9 +123,49 @@ fn out_dir(options: &Options) -> Result<PathBuf> {
 /// Paths of the build products that go onto the EFI system partition.
 struct Artifacts {
     loader: PathBuf,
-    kernel: PathBuf,
+    /// The kernel as it goes onto boot media: the ELF file reduced to
+    /// what the boot loader reads (see [`strip_elf`]).
+    kernel_image: Vec<u8>,
     /// The initial ramdisk: a tar archive of the user programs.
     initrd: Vec<u8>,
+}
+
+/// Reduces an ELF64 executable to its header, program headers and the
+/// contents of its segments: everything a loader needs. Section headers,
+/// symbol tables and debugging information — most of a debug build — are
+/// dropped. The full file stays in `target/` for debuggers and
+/// `addr2line`.
+fn strip_elf(file: &[u8]) -> Result<Vec<u8>> {
+    let u16_at = |offset: usize| -> Result<u64> {
+        let bytes = file.get(offset..offset + 2).ok_or("truncated ELF file")?;
+        Ok(u64::from(u16::from_le_bytes([bytes[0], bytes[1]])))
+    };
+    let u64_at = |offset: usize| -> Result<u64> {
+        let bytes = file.get(offset..offset + 8).ok_or("truncated ELF file")?;
+        let mut value = [0u8; 8];
+        value.copy_from_slice(bytes);
+        Ok(u64::from_le_bytes(value))
+    };
+    if file.get(..5) != Some(b"\x7FELF\x02") {
+        return Err("not an ELF64 file".into());
+    }
+    let program_headers = u64_at(0x20)?;
+    let entry_size = u16_at(0x36)?;
+    let entry_count = u16_at(0x38)?;
+    let mut end = program_headers + entry_size * entry_count;
+    for index in 0..entry_count {
+        let header = (program_headers + index * entry_size) as usize;
+        // Offset and size in the file of the segment's contents.
+        end = end.max(u64_at(header + 0x08)? + u64_at(header + 0x20)?);
+    }
+    let mut stripped = file
+        .get(..end as usize)
+        .ok_or("ELF segments extend past the end of the file")?
+        .to_vec();
+    // No section header table: offset, entry count and string table index.
+    stripped[0x28..0x30].fill(0);
+    stripped[0x3C..0x40].fill(0);
+    Ok(stripped)
 }
 
 /// User programs shipped in `/bin` of the initial ramdisk.
@@ -242,6 +282,20 @@ fn build(options: &Options) -> Result<Artifacts> {
     for program in USER_PROGRAMS {
         files.push((format!("bin/{program}"), fs::read(user_dir.join(program))?));
     }
+    // The installer copies the boot loader and the kernel from the running
+    // system, so they are part of it.
+    let loader = target
+        .join("x86_64-unknown-uefi")
+        .join(options.profile_dir())
+        .join("omit-boot.efi");
+    let kernel_image = strip_elf(&fs::read(
+        target
+            .join("x86_64-unknown-none")
+            .join(options.profile_dir())
+            .join("omit-kernel"),
+    )?)?;
+    files.push(("boot/BOOTX64.EFI".into(), fs::read(&loader)?));
+    files.push(("boot/KERNEL.ELF".into(), kernel_image.clone()));
     build_windows_programs()?;
     let windows_dir = target.join(WINDOWS_TARGET).join("release");
     for program in WINDOWS_PROGRAMS {
@@ -251,14 +305,8 @@ fn build(options: &Options) -> Result<Artifacts> {
         ));
     }
     Ok(Artifacts {
-        loader: target
-            .join("x86_64-unknown-uefi")
-            .join(options.profile_dir())
-            .join("omit-boot.efi"),
-        kernel: target
-            .join("x86_64-unknown-none")
-            .join(options.profile_dir())
-            .join("omit-kernel"),
+        loader,
+        kernel_image,
         initrd: build_tar(&files)?,
     })
 }
@@ -312,7 +360,7 @@ fn write_esp(
     // The removable-media default path: firmware boots it with no
     // boot-manager configuration.
     put(&boot, "BOOTX64.EFI", &fs::read(&artifacts.loader)?)?;
-    put(&omit, "KERNEL.ELF", &fs::read(&artifacts.kernel)?)?;
+    put(&omit, "KERNEL.ELF", &artifacts.kernel_image)?;
     put(&omit, "INITRD", &artifacts.initrd)?;
     if !cmdline.is_empty() {
         put(&omit, "CMDLINE", cmdline.as_bytes())?;
@@ -346,7 +394,7 @@ fn build_iso(artifacts: &Artifacts, cmdline: &str, path: &Path) -> Result<()> {
 }
 
 /// Size of the data disk attached to the virtual machine.
-const DATA_DISK_SIZE: u64 = 32 << 20;
+const DATA_DISK_SIZE: u64 = 128 << 20;
 
 /// Creates an empty (all-zero) data disk image at `path`, replacing any
 /// existing file.
@@ -412,21 +460,24 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
 /// `monitor`, if given, is the path of a Unix socket on which QEMU offers
 /// its human monitor (used by tests to press keys and take screenshots).
 fn qemu_command(
-    image: &Path,
+    image: Option<&Path>,
     vars: &Path,
     data_disk: &Path,
     monitor: Option<&Path>,
     extra: &[&str],
     options: &Options,
 ) -> Result<Command> {
-    let media = if options.iso {
-        format!(
-            "format=raw,media=cdrom,readonly=on,file={}",
-            image.display()
-        )
-    } else {
-        format!("format=raw,file={}", image.display())
-    };
+    // Without a boot medium the machine has to start from the data disk.
+    let media = image.map(|image| {
+        if options.iso {
+            format!(
+                "format=raw,media=cdrom,readonly=on,file={}",
+                image.display()
+            )
+        } else {
+            format!("format=raw,file={}", image.display())
+        }
+    });
     let (code, vars_template) = find_ovmf()?;
     fs::copy(vars_template, vars)?;
 
@@ -447,8 +498,6 @@ fn qemu_command(
             "if=pflash,format=raw,unit=1,file={}",
             vars.display()
         ))
-        .arg("-drive")
-        .arg(media)
         // A VirtIO disk for persistent data, separate from the boot medium.
         .arg("-drive")
         .arg(format!(
@@ -466,6 +515,9 @@ fn qemu_command(
         .args(["-nic", "none"])
         .arg("-no-reboot")
         .args(extra);
+    if let Some(media) = media {
+        command.arg("-drive").arg(media);
+    }
     match monitor {
         Some(socket) => {
             let _ = fs::remove_file(socket);
@@ -531,7 +583,7 @@ fn cmd_run(options: &Options) -> Result<ExitCode> {
     if !data_disk.exists() {
         create_data_disk(&data_disk)?;
     }
-    let mut command = qemu_command(&image, &vars, &data_disk, None, &[], options)?;
+    let mut command = qemu_command(Some(&image), &vars, &data_disk, None, &[], options)?;
     if options.gdb {
         command.args(["-s", "-S"]);
         eprintln!("xtask: QEMU is paused; attach with `gdb -ex 'target remote :1234'`");
@@ -581,6 +633,12 @@ struct BootTest {
     desktop: bool,
     /// Additional QEMU arguments, for devices only this test needs.
     qemu_args: &'static [&'static str],
+    /// The reboot (see `reboot_script`) starts from the data disk alone,
+    /// without the boot medium: the first boot is expected to have
+    /// installed the system onto it. Afterwards the disk is checked as an
+    /// installed disk (see [`check_installed_disk`]) instead of as one
+    /// ext2 filesystem.
+    boot_installed: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -601,7 +659,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] console: serial input enabled",
             "[INFO ] sched: round-robin scheduler started; preemption self-test passed",
             "[INFO ] syscall: user mode and system call entry enabled",
-            "[INFO ] virtio-blk: vda ready, 32 MiB; read test passed",
+            "[INFO ] virtio-blk: vda ready, 128 MiB; read test passed",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
@@ -611,6 +669,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "shell-session",
@@ -784,6 +843,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -801,6 +861,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: true,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "desktop",
@@ -818,19 +879,20 @@ const BOOT_TESTS: &[BootTest] = &[
         display: true,
         desktop: true,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "disk-persistence",
         cmdline: "",
         expected_exit: QEMU_EXIT_SUCCESS,
         must_contain: &[
-            "[INFO ] virtio-blk: vda ready, 32 MiB; read test passed",
+            "[INFO ] virtio-blk: vda ready, 128 MiB; read test passed",
             "[INFO ] shell exited",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         // First boot: create a filesystem on the blank disk and fill it.
         script: &[
-            ("lsblk", "\nvda       32 MiB\n"),
+            ("lsblk", "\nvda      128 MiB\n"),
             (
                 "lspci",
                 " 1af4:1001 VirtIO block device (transitional) [native driver: virtio-blk]\n",
@@ -875,6 +937,68 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
+    },
+    // The installer: the system writes itself to the VirtIO disk, the
+    // machine is restarted without the boot medium, and must come up from
+    // the disk with the data partition in place.
+    BootTest {
+        name: "install-to-disk",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] block: vda has 2 partition(s)",
+            "[INFO ] fs: data partition vda2 mounted at /data",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("lsblk", "\nvda      128 MiB\nomit:/# "),
+            // Erasing a disk needs explicit confirmation.
+            ("install vda", "install: usage: install DEVICE --erase\n"),
+            (
+                "install vda --erase",
+                "\nvda2: data partition, 78 MiB, empty ext2 filesystem (mounted at /data when the installed system starts)\ninstalled on vda; remove the installation medium and restart\n",
+            ),
+            (
+                "lsblk",
+                "\nvda      128 MiB\nvda1      48 MiB\nvda2      78 MiB\n",
+            ),
+            // The new data partition can be used at once; leave something
+            // on it for the installed system to find.
+            ("mkdir /data", ""),
+            ("mount vda2 /data", "mount vda2 /data\nomit:/# "),
+            ("echo written before the restart > /data/note", ""),
+            ("cp /bin/hello /data/hello", ""),
+            // A disk with a mounted filesystem is not installed over.
+            (
+                "install vda --erase",
+                "install: vda: a filesystem on this disk is mounted; unmount it first\n",
+            ),
+            ("umount /data", "umount /data\nomit:/# "),
+            // Nor is a partition a place to install to.
+            (
+                "install vda2 --erase",
+                "install: vda2: this is a partition; install onto the whole disk\n",
+            ),
+        ],
+        // Second boot: from the VirtIO disk alone.
+        reboot_script: &[
+            ("mount", "\nramfs on /\nvda2 on /data\n"),
+            ("cat /data/note", "\nwritten before the restart\n"),
+            ("/data/hello", "\nHello from user mode! I am process 1 "),
+            // The installed system is complete: programs, Windows
+            // programs, and the files the installer itself needs.
+            ("winhello.exe", "\nHello from a Windows executable!\r\n"),
+            ("ls /boot", "\nBOOTX64.EFI\nKERNEL.ELF\n"),
+            ("echo and after > /data/second", ""),
+            ("umount /data", "umount /data\nomit:/# "),
+        ],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: true,
     },
     BootTest {
         name: "windows-programs",
@@ -912,7 +1036,7 @@ const BOOT_TESTS: &[BootTest] = &[
                 "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: time ok\r\nwintest: all 57 checks passed\r\n",
             ),
             // The directory the test created and removed is gone.
-            ("ls /", "ls /\nbin\nwintest.log\nomit:/# "),
+            ("ls /", "ls /\nbin\nboot\nwintest.log\nomit:/# "),
             // Libraries: one imported by the program, one loaded on
             // request that itself uses the first.
             (
@@ -972,6 +1096,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1053,6 +1178,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1077,6 +1203,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1136,6 +1263,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &["-device", "pvpanic-pci"],
+        boot_installed: false,
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1158,6 +1286,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &["-device", "pvpanic-pci", "-action", "panic=exit-failure"],
+        boot_installed: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1177,6 +1306,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1194,6 +1324,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1211,6 +1342,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1227,6 +1359,7 @@ const BOOT_TESTS: &[BootTest] = &[
         display: false,
         desktop: false,
         qemu_args: &[],
+        boot_installed: false,
     },
 ];
 
@@ -1653,6 +1786,86 @@ fn check_ext2(image: &Path) -> Vec<String> {
     }
 }
 
+/// Checks a disk the system was installed on, independently of the
+/// installer's own code paths in the kernel: the partition table is read
+/// back, the files on the EFI System Partition are read with the `fatfs`
+/// crate and compared with the build products, and the data partition is
+/// checked with `e2fsck`.
+fn check_installed_disk(
+    disk: &Path,
+    artifacts: &Artifacts,
+    cmdline: &str,
+    dir: &Path,
+) -> Vec<String> {
+    use omit_gpt::{SECTOR_SIZE, TYPE_EFI_SYSTEM, TYPE_OMIT_DATA};
+    let data = match fs::read(disk) {
+        Ok(data) => data,
+        Err(error) => return vec![format!("cannot read the installed disk: {error}")],
+    };
+    let partitions = omit_gpt::parse(data.len() as u64 / SECTOR_SIZE, |lba, buffer| {
+        let start = (lba * SECTOR_SIZE) as usize;
+        data.get(start..start + buffer.len())
+            .map(|sector| buffer.copy_from_slice(sector))
+            .is_some()
+    });
+    let partitions = match partitions {
+        Ok(partitions) => partitions,
+        Err(error) => return vec![format!("installed disk: {error}")],
+    };
+    let types: Vec<_> = partitions.iter().map(|p| p.type_guid).collect();
+    if types != [TYPE_EFI_SYSTEM, TYPE_OMIT_DATA] {
+        return vec![format!(
+            "installed disk: unexpected partitions {partitions:?}"
+        )];
+    }
+    let bytes_of = |index: usize| {
+        let partition = &partitions[index];
+        let start = (partition.first_lba * SECTOR_SIZE) as usize;
+        data[start..start + (partition.sectors() * SECTOR_SIZE) as usize].to_vec()
+    };
+
+    let mut failures = Vec::new();
+    let mut system = bytes_of(0);
+    match fatfs::FileSystem::new(Cursor::new(&mut system[..]), fatfs::FsOptions::new()) {
+        Ok(volume) => {
+            let expected: [(&str, Vec<u8>); 4] = [
+                (
+                    "EFI/BOOT/BOOTX64.EFI",
+                    fs::read(&artifacts.loader).unwrap_or_default(),
+                ),
+                ("EFI/OMIT/KERNEL.ELF", artifacts.kernel_image.clone()),
+                ("EFI/OMIT/INITRD", artifacts.initrd.clone()),
+                ("EFI/OMIT/CMDLINE", cmdline.as_bytes().to_vec()),
+            ];
+            for (path, contents) in expected {
+                let mut found = Vec::new();
+                let read = volume
+                    .root_dir()
+                    .open_file(path)
+                    .and_then(|mut file| file.read_to_end(&mut found));
+                match read {
+                    Ok(_) if found == contents && !contents.is_empty() => {}
+                    Ok(_) => failures.push(format!(
+                        "installed disk: {path} differs from the build product"
+                    )),
+                    Err(error) => failures.push(format!("installed disk: {path}: {error}")),
+                }
+            }
+        }
+        Err(error) => failures.push(format!(
+            "installed disk: the system partition is not a readable FAT filesystem: {error}"
+        )),
+    }
+
+    let extracted = dir.join("installed-data-partition.img");
+    match fs::write(&extracted, bytes_of(1)) {
+        Ok(()) => failures.extend(check_ext2(&extracted)),
+        Err(error) => failures.push(format!("cannot extract the data partition: {error}")),
+    }
+    let _ = fs::remove_file(&extracted);
+    failures
+}
+
 /// Finds the first shell prompt (`omit:<cwd># `) at or after `from` and
 /// returns the offset just past it.
 fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
@@ -1879,7 +2092,7 @@ fn run_boot_test(
     });
     let run = run_qemu_captured(
         qemu_command(
-            &image,
+            Some(&image),
             &vars,
             &data_disk,
             display.as_ref().map(|d| d.monitor.as_path()),
@@ -1897,9 +2110,11 @@ fn run_boot_test(
     }
     let mut run = run;
     if !test.reboot_script.is_empty() {
-        // Same machine, same data disk, fresh boot.
+        // Same machine, same data disk, fresh boot — from the boot medium
+        // again, or from the data disk if the system was installed on it.
+        let medium = (!test.boot_installed).then_some(image.as_path());
         let second = run_qemu_captured(
-            qemu_command(&image, &vars, &data_disk, None, test.qemu_args, options)?,
+            qemu_command(medium, &vars, &data_disk, None, test.qemu_args, options)?,
             test.reboot_script,
             false,
             None,
@@ -1915,7 +2130,16 @@ fn run_boot_test(
         run.serial.push_str("\n===== reboot =====\n");
         run.serial.push_str(&second.serial);
         run.elapsed += second.elapsed;
-        failures.extend(check_ext2(&data_disk));
+        if test.boot_installed {
+            failures.extend(check_installed_disk(
+                &data_disk,
+                artifacts,
+                cmdline.trim(),
+                &dir,
+            ));
+        } else {
+            failures.extend(check_ext2(&data_disk));
+        }
     }
     fs::write(&log, &run.serial)?;
 

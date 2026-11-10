@@ -197,6 +197,15 @@ impl Host for KernelHost {
         }
     }
 
+    fn install(
+        &mut self,
+        device: &str,
+        loader: &[u8],
+        kernel: &[u8],
+    ) -> Result<Vec<String>, String> {
+        crate::install::install(device, loader, kernel)
+    }
+
     fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
         if crate::linuxkpi::unbind(device) {
             Ok(())
@@ -292,6 +301,31 @@ pub fn run() {
     let mut host = KernelHost;
     let mut editor = LineEditor::new();
     let mut out = Writer;
+
+    // An installed system has a data partition; make it available. This
+    // goes through the shell's own commands so that `mount` and `umount`
+    // know about it like any other mount.
+    if let Some(partition) = crate::drivers::block::data_partition()
+        && let Some(mut root) = fs::root()
+    {
+        let mut report = String::new();
+        shell.execute("mkdir /data", &mut root, &mut host, &mut report);
+        shell.execute(
+            &format!("mount {partition} /data"),
+            &mut root,
+            &mut host,
+            &mut report,
+        );
+        drop(root);
+        if report.is_empty() {
+            info!("fs: data partition {partition} mounted at /data");
+        } else {
+            warn!(
+                "fs: cannot mount data partition {partition}: {}",
+                report.trim()
+            );
+        }
+    }
 
     kprintln!("Omit OS shell. Type 'help' for a list of commands.");
     loop {

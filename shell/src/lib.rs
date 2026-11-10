@@ -116,6 +116,16 @@ pub trait Host {
     /// (`bus:device.function`).
     fn unbind_driver(&mut self, device: &str) -> Result<(), String>;
 
+    /// Installs the running system onto the whole disk `device`, erasing
+    /// it. `loader` and `kernel` are the contents of the boot loader and
+    /// kernel files to put on it. Returns lines describing the result.
+    fn install(
+        &mut self,
+        device: &str,
+        loader: &[u8],
+        kernel: &[u8],
+    ) -> Result<Vec<String>, String>;
+
     /// Attributes that the driver of `device` exposes. Without `name`,
     /// lists them (one line each); with `name`, returns the attribute's
     /// value; with `value` as well, sets it and returns nothing.
@@ -175,7 +185,7 @@ type CommandResult = Result<(), Failure>;
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
     "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
-    "devattr", "watchdog",
+    "devattr", "watchdog", "install",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -196,6 +206,12 @@ pub struct Stage<'a> {
     /// Arguments, starting with the name the program was invoked by.
     pub args: &'a [String],
 }
+
+/// Where the running system keeps the boot loader and kernel that the
+/// installer copies.
+pub const BOOT_LOADER_FILE: &str = "/boot/BOOTX64.EFI";
+/// See [`BOOT_LOADER_FILE`].
+pub const BOOT_KERNEL_FILE: &str = "/boot/KERNEL.ELF";
 
 /// How a Windows (or DOS) executable starts.
 pub const WINDOWS_MAGIC: &[u8] = b"MZ";
@@ -231,6 +247,8 @@ Built-in commands:
   unbind DEVICE        detach the driver from a device (e.g. 00:03.0)
   devattr DEVICE [NAME [VALUE]]
                        list, show or set the attributes a driver exposes
+  install DEVICE --erase
+                       install this system onto a disk, erasing it
   watchdog [COMMAND]   status, start, stop, ping, timeout SECONDS
   mkfs DEVICE          create an empty ext2 filesystem (erases the device)
   mount [DEVICE DIR]   mount a filesystem, or list what is mounted
@@ -437,6 +455,44 @@ impl Shell {
                 };
                 host.unbind_driver(device)
                     .map_err(|error| Failure(format!("{device}: {error}")))
+            }
+            "install" => {
+                // Destroying a disk's contents takes more than a typo.
+                let [device, confirmation] = args else {
+                    return Err(Failure("usage: install DEVICE --erase".into()));
+                };
+                if confirmation != "--erase" {
+                    return Err(Failure(
+                        "this erases the whole disk; confirm with: install DEVICE --erase".into(),
+                    ));
+                }
+                if self
+                    .mount_sources
+                    .iter()
+                    .any(|source| source.starts_with(device.as_str()))
+                {
+                    return Err(Failure(format!(
+                        "{device}: a filesystem on this disk is mounted; unmount it first"
+                    )));
+                }
+                // The boot loader and kernel are copied from the running
+                // system.
+                let read = |path: &str| {
+                    vfs.read_file(path).map_err(|error| {
+                        Failure(format!(
+                            "cannot read {path}, which the installer copies: {error}"
+                        ))
+                    })
+                };
+                let loader = read(BOOT_LOADER_FILE)?;
+                let kernel = read(BOOT_KERNEL_FILE)?;
+                let lines = host
+                    .install(device, &loader, &kernel)
+                    .map_err(|error| Failure(format!("{device}: {error}")))?;
+                for line in lines {
+                    writeln!(out, "{line}")?;
+                }
+                Ok(())
             }
             "devattr" => {
                 let (device, name, value) = match args {
@@ -1100,6 +1156,24 @@ mod tests {
             }
         }
 
+        fn install(
+            &mut self,
+            device: &str,
+            loader: &[u8],
+            kernel: &[u8],
+        ) -> Result<Vec<String>, String> {
+            if device == "vda" {
+                self.formatted += 100;
+                Ok(Vec::from([format!(
+                    "installed on vda: {} + {} bytes",
+                    loader.len(),
+                    kernel.len()
+                )]))
+            } else {
+                Err("no such block device".into())
+            }
+        }
+
         fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
             if device == "00:03.0" {
                 Ok(())
@@ -1476,6 +1550,39 @@ mod tests {
         assert_eq!(
             s.err("cat |"),
             "omsh: syntax error: missing command before or after '|'\n"
+        );
+    }
+
+    #[test]
+    fn install_requires_explicit_confirmation() {
+        let mut s = Session::new();
+        assert_eq!(s.err("install"), "install: usage: install DEVICE --erase\n");
+        assert_eq!(
+            s.err("install vda"),
+            "install: usage: install DEVICE --erase\n"
+        );
+        assert_eq!(
+            s.err("install vda yes"),
+            "install: this erases the whole disk; confirm with: install DEVICE --erase\n"
+        );
+        assert_eq!(s.host.formatted, 0, "nothing was touched");
+        // The files the installer copies must exist.
+        assert_eq!(
+            s.err("install vda --erase"),
+            "install: cannot read /boot/BOOTX64.EFI, which the installer copies: \
+             No such file or directory\n"
+        );
+        s.ok("mkdir /boot");
+        s.ok("echo -n loader > /boot/BOOTX64.EFI");
+        s.ok("echo -n the-kernel > /boot/KERNEL.ELF");
+        assert_eq!(
+            s.ok("install vda --erase"),
+            "installed on vda: 6 + 10 bytes\n"
+        );
+        assert_eq!(s.host.formatted, 100);
+        assert_eq!(
+            s.err("install sdz --erase"),
+            "install: sdz: no such block device\n"
         );
     }
 

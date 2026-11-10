@@ -88,11 +88,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "omit-fat"
+version = "0.1.0"
+dependencies = [
+ "fatfs",
+]
+
+[[package]]
 name = "omit-gfx"
 version = "0.1.0"
 dependencies = [
  "noto-sans-mono-bitmap",
 ]
+
+[[package]]
+name = "omit-gpt"
+version = "0.1.0"
 
 [[package]]
 name = "omit-hwdb"
@@ -108,6 +119,8 @@ dependencies = [
  "omit-bootproto",
  "omit-elf",
  "omit-ext2",
+ "omit-fat",
+ "omit-gpt",
  "omit-hwdb",
  "omit-mm",
  "omit-shell",
@@ -294,5 +307,6 @@ version = "0.1.0"
 dependencies = [
  "fatfs",
  "omit-gfx",
+ "omit-gpt",
  "omit-vfs",
 ]

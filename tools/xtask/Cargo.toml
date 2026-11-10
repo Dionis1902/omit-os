@@ -16,6 +16,9 @@ omit-vfs.workspace = true
 # The desktop test locates buttons and recognises text with the same code
 # the desktop draws with.
 omit-gfx.workspace = true
+# The partition table of the boot image is built by the same code the
+# installer uses.
+omit-gpt.workspace = true
 
 [lints]
 workspace = true

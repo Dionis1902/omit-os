@@ -17,6 +17,7 @@ mod fbcon;
 mod fs;
 mod futex;
 mod input;
+mod install;
 mod linuxkpi;
 mod log;
 mod mm;
@@ -143,6 +144,7 @@ pub unsafe extern "sysv64" fn _start(boot_info: *const BootInfo) -> ! {
     }
 
     fs::init(initrd);
+    install::set_cmdline(cmdline.as_str());
     if !cmdline.flag("noshell") {
         shell::run();
     }
@@ -420,10 +422,16 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
             // without modifying the disk.
             let mut sector = [0u8; drivers::block::SECTOR_SIZE];
             match drivers::block::with_device("vda", |device| device.read(0, &mut sector)) {
-                Ok(()) => info!(
-                    "virtio-blk: vda ready, {} MiB; read test passed",
-                    (sectors * drivers::block::SECTOR_SIZE as u64) >> 20
-                ),
+                Ok(()) => {
+                    info!(
+                        "virtio-blk: vda ready, {} MiB; read test passed",
+                        (sectors * drivers::block::SECTOR_SIZE as u64) >> 20
+                    );
+                    let partitions = drivers::block::scan_partitions("vda");
+                    if partitions != 0 {
+                        info!("block: vda has {partitions} partition(s)");
+                    }
+                }
                 Err(error) => warn!("virtio-blk: vda read test failed: {error}"),
             }
         }

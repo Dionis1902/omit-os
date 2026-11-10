@@ -10,8 +10,36 @@ depend on.
   hard disks.
 - `SHA256SUMS` — checksums of both.
 
-Both boot the same live system: it runs entirely from memory, installs
-nothing and does not touch the machine's disks. There is no installer.
+Both boot the same live system: it runs entirely from memory and does not
+touch the machine's disks unless you tell it to.
+
+## Installing (virtual machines only)
+
+Omit OS can install itself onto a **VirtIO** disk — the kind virtual
+machines offer; it has no driver for the disks of real computers yet.
+Give the VM an empty VirtIO disk of at least 64 MiB, boot the ISO, and at
+the prompt:
+
+```text
+lsblk                    the disk appears as vda
+install vda --erase      writes the system; everything on vda is lost
+```
+
+Then shut the VM down, detach the ISO and start it again: it boots from
+the disk. Files under `/data` are kept across restarts; everything else
+is recreated from the installed image at each start.
+
+With QEMU:
+
+```bash
+qemu-img create -f raw omit-disk.img 256M
+```
+
+```bash
+qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-*-x86_64.iso -drive if=none,id=d,format=raw,file=omit-disk.img -device virtio-blk-pci,drive=d -serial stdio
+```
+
+After `install vda --erase`, start it again without `-cdrom ...`.
 
 ## Requirements
 

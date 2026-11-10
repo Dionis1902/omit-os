@@ -1,0 +1,15 @@
+[package]
+name = "omit-fat"
+description = "Writes a FAT16 filesystem with a given set of files in one pass (no_std)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dev-dependencies]
+# An independent FAT implementation, to read back what this crate writes.
+fatfs = { version = "0.3.6", default-features = false, features = ["std", "alloc"] }
+
+[lints]
+workspace = true

@@ -13,7 +13,9 @@ members = [
     "libs/bootproto",
     "libs/elf",
     "libs/ext2",
+    "libs/fat",
     "libs/gfx",
+    "libs/gpt",
     "libs/hwdb",
     "libs/mm",
     "libs/term",
@@ -32,7 +34,9 @@ default-members = [
     "libs/bootproto",
     "libs/elf",
     "libs/ext2",
+    "libs/fat",
     "libs/gfx",
+    "libs/gpt",
     "libs/hwdb",
     "libs/mm",
     "libs/term",
@@ -50,7 +54,9 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 omit-abi = { path = "libs/abi" }
+omit-fat = { path = "libs/fat" }
 omit-gfx = { path = "libs/gfx" }
+omit-gpt = { path = "libs/gpt" }
 omit-pe = { path = "compat/windows/pe" }
 omit-win32 = { path = "compat/windows/win32" }
 omit-acpi = { path = "libs/acpi" }

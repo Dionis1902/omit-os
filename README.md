@@ -15,8 +15,9 @@ processes. You get an interactive shell with a RAM filesystem, on screen
 use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
-There is no installer yet. See [Status](#status) for exactly what exists,
-how narrow each of those is, and what has been tested.
+It can install itself onto a disk — so far only the VirtIO disks of
+virtual machines. See [Status](#status) for exactly what exists, how
+narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
 
@@ -166,8 +167,11 @@ images and their checksums:
 | `omit-os-<version>-x86_64.iso` | virtual machines (attach as optical drive, enable EFI), optical media |
 | `omit-os-<version>-x86_64.img` | USB sticks (`dd`), virtual hard disks |
 
-Both are live systems: they run from memory and install nothing. **There is
-no installer yet.**
+Both are live systems: they run from memory and leave the machine's disks
+alone. In a virtual machine with a VirtIO disk, `install vda --erase`
+installs the system onto that disk (see
+[`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md)); on real hardware there
+is no disk driver yet, so the live image is the only way to run it.
 
 ```bash
 qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-0.1.0-x86_64.iso -serial stdio
@@ -251,7 +255,9 @@ system library; a desktop that is a single program.
 | Shell pipelines (`a \| b \| c`) and input redirection (`< file`) | Working; host-tested and run in QEMU, including Windows programs in pipelines |
 | Threads within a process (shared address space, `thread_create`, process-wide exit), futex, user-space mutex and join | Working on one CPU; `/bin/threadtest` checks contention, the shared heap, futex semantics and process exit with threads still running |
 | Environment variables, signals, shared memory, more than one CPU | Not started |
-| Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
+| GUID partition tables: partitions of the VirtIO disk as block devices (`vda1`, ...) | Working; library host-tested including damaged and hostile tables |
+| Installer (`install DEVICE --erase`): GPT, FAT16 system partition, ext2 data partition mounted at `/data` on the installed system | Working **on VirtIO disks under QEMU**: the test installs, restarts from the disk alone, and verifies the disk on the host with independent tools. See ADR 0016 |
+| NVMe/AHCI/USB storage (so: installation on real hardware), root filesystem on disk, updates in place | Not started |
 | SMP | Not started |
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
 | PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
@@ -309,8 +315,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   sequences (see ADRs 0012 and 0014). Debug builds draw noticeably slowly
   under emulation.
 - Only PS/2 keyboards (US layout) and PS/2 mice. No USB.
-- There is no installer: the system always boots from the live image into
-  a RAM filesystem. A disk filesystem has to be mounted by hand.
+- Installation works only onto VirtIO disks, i.e. in virtual machines:
+  there is no driver for the disks real machines have. An installed
+  system still runs from memory; only `/data` persists.
+- A file in the RAM filesystem (everything outside a mounted disk) cannot
+  be larger than 4 MiB.
 - The disk filesystem has no journal and no cache: it is slow, and a crash
   mid-operation can leave it needing `e2fsck`. Only VirtIO disks are
   supported, without partition tables.
@@ -376,7 +385,9 @@ compat/windows/pe/      PE32+ (Windows executable) parser, host-tested
 compat/windows/win32/   machine-independent parts of the Windows API layer, host-tested
 compat/windows/samples/ Windows test programs (built for x86_64-pc-windows-msvc)
 drivers/linux/   Linux driver sources, unmodified, with provenance
+libs/fat/        one-pass FAT16 writer for the installer, verified against the fatfs crate
 libs/gfx/        drawing, text and window manager for programs, host-tested
+libs/gpt/        GUID partition tables: build and parse, host-tested
 libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
@@ -434,6 +445,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0013 — Advanced compatibility: what was investigated, what was built](docs/adr/0013-advanced-compatibility-investigation.md)
 - [ADR 0014 — Pipes, standard streams and pipelines](docs/adr/0014-pipes.md)
 - [ADR 0015 — Threads within a process, and the futex](docs/adr/0015-threads-and-futex.md)
+- [ADR 0016 — Installing to a disk](docs/adr/0016-installation.md)
 
 ## Testing
 
