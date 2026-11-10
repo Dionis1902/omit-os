@@ -1790,6 +1790,23 @@ const BOOT_TESTS: &[BootTest] = &[
                 "fetch https://10.0.2.2:18443/hello.txt",
                 "\nfetch: 10.0.2.2: the server's certificate is not signed by an authority this system trusts\n",
             ),
+            // A file larger than any one stretch of memory the kernel
+            // can allocate, fetched both ways; the two copies must be
+            // the same.
+            (
+                "fetch http://10.0.2.2:18080/big /big.http",
+                ": 6291456 bytes, stored as /big.http\n",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/big /big.https",
+                ": 6291456 bytes, stored as /big.https\n",
+            ),
+            (
+                "cmp /big.http /big.https",
+                "cmp /big.http /big.https\nomit:/# ",
+            ),
+            ("rm /big.http", ""),
+            ("rm /big.https", ""),
             // A connection that stops without the server saying it has
             // finished.
             (
@@ -3709,6 +3726,12 @@ fn answer_web_request(stream: &mut (impl Read + Write)) -> Option<String> {
                             Some(bytes) => with_length("200 OK", &bytes),
                             None => with_length("500 Internal Server Error", b""),
                         }
+                    }
+                    // Larger than the largest single allocation of the
+                    // guest's kernel (4 MiB).
+                    "/big" => {
+                        let body: Vec<u8> = (0..6usize << 20).map(|i| (i % 249) as u8).collect();
+                        with_length("200 OK", &body)
                     }
                     // No length: the body ends where the connection does.
                     "/nolength" => {

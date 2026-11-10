@@ -195,6 +195,9 @@ pub struct Vfs {
     mounts: Vec<Mount>,
 }
 
+/// How much of a file [`Vfs::copy_file`] holds in memory at a time.
+const COPY_PART: usize = 64 * 1024;
+
 /// A location inside one mounted filesystem.
 #[derive(Clone, Copy)]
 struct Location {
@@ -501,9 +504,44 @@ impl Vfs {
 
     /// Copies the regular file `from` to `to`, replacing `to` if it is an
     /// existing file. Works across filesystems.
+    ///
+    /// The file is copied a part at a time, so its size is not limited
+    /// by what can be held in memory at once. If the copy fails half
+    /// way, what was written of it is removed.
     pub fn copy_file(&mut self, from: &str, to: &str) -> FsResult<()> {
-        let data = self.read_file(from)?;
-        self.write_file(to, &data, WriteMode::Truncate)
+        let source = self.resolve(from)?;
+        if self.fs(source.mount).metadata(source.inode)?.file_type != FileType::File {
+            return Err(FsError::IsADirectory);
+        }
+        // Onto itself: there is nothing to do, and emptying the target
+        // first would be the end of the source.
+        if let Ok(target) = self.resolve(to)
+            && (target.mount, target.inode) == (source.mount, source.inode)
+        {
+            return Ok(());
+        }
+        self.write_file(to, &[], WriteMode::Truncate)?;
+        let mut part = Vec::new();
+        part.try_reserve_exact(COPY_PART)
+            .map_err(|_| FsError::NoSpace)?;
+        part.resize(COPY_PART, 0);
+        let mut offset = 0;
+        loop {
+            let copied = self
+                .read_at(from, offset, &mut part)
+                .and_then(|count| match count {
+                    0 => Ok(None),
+                    count => self.write_at(to, Some(offset), &part[..count]).map(Some),
+                });
+            match copied {
+                Ok(Some(end)) => offset = end,
+                Ok(None) => return Ok(()),
+                Err(error) => {
+                    let _ = self.remove(to);
+                    return Err(error);
+                }
+            }
+        }
     }
 }
 
@@ -646,6 +684,25 @@ mod tests {
         v.create_dir("/dir").unwrap();
         assert_eq!(v.copy_file("/dir", "/x"), Err(FsError::IsADirectory));
         assert_eq!(v.copy_file("/src", "/dir"), Err(FsError::IsADirectory));
+        // A file copied onto itself is still there.
+        v.copy_file("/src", "/src").unwrap();
+        assert_eq!(v.read_file("/src").unwrap(), b"changed");
+        // An existing target is replaced, not written over at its
+        // start.
+        v.write_file("/dst", b"something much longer", WriteMode::Truncate)
+            .unwrap();
+        v.copy_file("/src", "/dst").unwrap();
+        assert_eq!(v.read_file("/dst").unwrap(), b"changed");
+        // Larger than one part, with a part that is not full at the
+        // end.
+        let big: Vec<u8> = (0..COPY_PART * 5 / 2).map(|i| (i % 253) as u8).collect();
+        v.write_file("/big", &big, WriteMode::Truncate).unwrap();
+        v.copy_file("/big", "/big.copy").unwrap();
+        assert!(v.read_file("/big.copy").unwrap() == big);
+        // An empty file.
+        v.write_file("/empty", b"", WriteMode::Truncate).unwrap();
+        v.copy_file("/empty", "/empty.copy").unwrap();
+        assert_eq!(v.read_file("/empty.copy").unwrap(), b"");
     }
 
     #[test]

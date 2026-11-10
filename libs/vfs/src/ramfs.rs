@@ -2,9 +2,14 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! In-memory filesystem.
 //!
-//! Files are byte vectors and directories are sorted name-to-inode maps,
-//! all kept in one inode table. Contents live on the kernel heap and are
-//! lost at power-off.
+//! Files are sequences of pieces of at most 64 KiB and directories are
+//! sorted name-to-inode maps, all kept in one inode table. Contents live
+//! on the kernel heap and are lost at power-off.
+//!
+//! (A file is kept in pieces because the heap cannot always give one
+//! large stretch of memory: the largest single allocation is a few
+//! megabytes, and after a while not even that is certain. In pieces, a
+//! file can be as large as there is memory.)
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -15,9 +20,108 @@ use crate::{DirEntry, FileSystem, FileType, FsError, FsResult, InodeId, Metadata
 
 const ROOT: InodeId = 1;
 
+/// The size of every piece of a file but the last.
+const PIECE: usize = 64 * 1024;
+/// The largest file: beyond this, growing is refused outright rather
+/// than tried until memory runs out.
+pub const FILE_MAX: usize = 1 << 30;
+
+/// The bytes of a file: full pieces, then one that may be shorter.
+#[derive(Debug, Default)]
+struct Contents {
+    pieces: Vec<Vec<u8>>,
+}
+
+impl Contents {
+    fn len(&self) -> usize {
+        match self.pieces.split_last() {
+            Some((last, full)) => full.len() * PIECE + last.len(),
+            None => 0,
+        }
+    }
+
+    /// Makes the file `len` bytes long: cut off, or continued with
+    /// zeros. If memory runs out while growing, the file is left as it
+    /// was.
+    fn resize(&mut self, len: usize) -> FsResult<()> {
+        let before = self.len();
+        if len > FILE_MAX {
+            return Err(FsError::NoSpace);
+        }
+        if len <= before {
+            self.pieces.truncate(len.div_ceil(PIECE));
+            if let Some(last) = self.pieces.last_mut() {
+                last.truncate(len - (len - 1) / PIECE * PIECE);
+            }
+            return Ok(());
+        }
+        let grown = self.grow(len);
+        if grown.is_err() {
+            // Back to what it was; shrinking cannot fail.
+            let _ = self.resize(before);
+        }
+        grown
+    }
+
+    fn grow(&mut self, len: usize) -> FsResult<()> {
+        let mut missing = len - self.len();
+        while missing != 0 {
+            let room = match self.pieces.last() {
+                Some(last) if last.len() < PIECE => PIECE - last.len(),
+                _ => {
+                    self.pieces.try_reserve(1).map_err(|_| FsError::NoSpace)?;
+                    self.pieces.push(Vec::new());
+                    PIECE
+                }
+            };
+            let Some(last) = self.pieces.last_mut() else {
+                return Err(FsError::NoSpace);
+            };
+            let more = room.min(missing);
+            last.try_reserve(more).map_err(|_| FsError::NoSpace)?;
+            last.resize(last.len() + more, 0);
+            missing -= more;
+        }
+        Ok(())
+    }
+
+    /// Copies from `start` on into `buffer`; returns how many bytes
+    /// there were.
+    fn read(&self, start: usize, buffer: &mut [u8]) -> usize {
+        let count = self.len().saturating_sub(start).min(buffer.len());
+        let mut done = 0;
+        while done < count {
+            let at = start + done;
+            let piece = &self.pieces[at / PIECE][at % PIECE..];
+            let part = piece.len().min(count - done);
+            buffer[done..done + part].copy_from_slice(&piece[..part]);
+            done += part;
+        }
+        count
+    }
+
+    /// Puts `bytes` at `start`, making the file longer if they reach
+    /// beyond its end (a gap before them is filled with zeros).
+    fn write(&mut self, start: usize, bytes: &[u8]) -> FsResult<()> {
+        let end = start.checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
+        if end > self.len() {
+            self.resize(end)?;
+        }
+        let mut done = 0;
+        while done < bytes.len() {
+            let at = start + done;
+            let piece = &mut self.pieces[at / PIECE][at % PIECE..];
+            let part = piece.len().min(bytes.len() - done);
+            piece[..part].copy_from_slice(&bytes[done..done + part]);
+            done += part;
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug)]
 enum Node {
-    File(Vec<u8>),
+    File(Contents),
     Directory {
         /// The containing directory; the root is its own parent.
         parent: InodeId,
@@ -87,14 +191,14 @@ impl RamFs {
         }
     }
 
-    fn file(&self, inode: InodeId) -> FsResult<&Vec<u8>> {
+    fn file(&self, inode: InodeId) -> FsResult<&Contents> {
         match self.node(inode)? {
             Node::File(data) => Ok(data),
             Node::Directory { .. } => Err(FsError::IsADirectory),
         }
     }
 
-    fn file_mut(&mut self, inode: InodeId) -> FsResult<&mut Vec<u8>> {
+    fn file_mut(&mut self, inode: InodeId) -> FsResult<&mut Contents> {
         match self.nodes.get_mut(&inode).ok_or(FsError::NotFound)? {
             Node::File(data) => Ok(data),
             Node::Directory { .. } => Err(FsError::IsADirectory),
@@ -113,17 +217,6 @@ impl RamFs {
             }
         }
     }
-}
-
-/// Grows `data` to `len` bytes, zero-filled, without aborting on allocation
-/// failure.
-fn grow(data: &mut Vec<u8>, len: usize) -> FsResult<()> {
-    if len > data.len() {
-        data.try_reserve(len - data.len())
-            .map_err(|_| FsError::NoSpace)?;
-        data.resize(len, 0);
-    }
-    Ok(())
 }
 
 impl FileSystem for RamFs {
@@ -173,7 +266,7 @@ impl FileSystem for RamFs {
         let inode = self.next_inode;
         self.next_inode += 1;
         let node = match file_type {
-            FileType::File => Node::File(Vec::new()),
+            FileType::File => Node::File(Contents::default()),
             FileType::Directory => Node::Directory {
                 parent: dir,
                 entries: BTreeMap::new(),
@@ -225,36 +318,125 @@ impl FileSystem for RamFs {
         let Ok(start) = usize::try_from(offset) else {
             return Ok(0);
         };
-        let available = data.get(start..).unwrap_or(&[]);
-        let count = available.len().min(buffer.len());
-        buffer[..count].copy_from_slice(&available[..count]);
-        Ok(count)
+        Ok(data.read(start, buffer))
     }
 
     fn write(&mut self, inode: InodeId, offset: u64, bytes: &[u8]) -> FsResult<usize> {
         let data = self.file_mut(inode)?;
         let start = usize::try_from(offset).map_err(|_| FsError::NoSpace)?;
-        let end = start.checked_add(bytes.len()).ok_or(FsError::NoSpace)?;
-        grow(data, end)?;
-        data[start..end].copy_from_slice(bytes);
+        data.write(start, bytes)?;
         Ok(bytes.len())
     }
 
     fn truncate(&mut self, inode: InodeId, size: u64) -> FsResult<()> {
         let data = self.file_mut(inode)?;
         let size = usize::try_from(size).map_err(|_| FsError::NoSpace)?;
-        if size <= data.len() {
-            data.truncate(size);
-            Ok(())
-        } else {
-            grow(data, size)
-        }
+        data.resize(size)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file is kept in pieces; nothing about that may show. Random
+    /// writes, reads and changes of length are done to a file and to a
+    /// plain vector, which must stay equal.
+    #[test]
+    fn a_file_in_pieces_behaves_like_one_stretch_of_bytes() {
+        let mut fs = RamFs::new();
+        let file = fs.create(fs.root(), "f", FileType::File).unwrap();
+        let mut model: Vec<u8> = Vec::new();
+        let mut state = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = |limit: usize| {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state % limit as u64) as usize
+        };
+        // Offsets and lengths cluster around the boundaries of pieces.
+        let place =
+            |next: &mut dyn FnMut(usize) -> usize| next(5) * PIECE + next(7) * PIECE / 6 + next(3);
+        for step in 0..600 {
+            match next(4) {
+                0 | 1 => {
+                    let start = place(&mut next);
+                    let bytes: Vec<u8> = (0..next(3 * PIECE / 2))
+                        .map(|index| (index + step) as u8)
+                        .collect();
+                    assert_eq!(fs.write(file, start as u64, &bytes), Ok(bytes.len()));
+                    if model.len() < start + bytes.len() {
+                        model.resize(start + bytes.len(), 0);
+                    }
+                    model[start..start + bytes.len()].copy_from_slice(&bytes);
+                }
+                2 => {
+                    let size = place(&mut next);
+                    fs.truncate(file, size as u64).unwrap();
+                    model.resize(size, 0);
+                }
+                _ => {
+                    let start = place(&mut next);
+                    let mut buffer = alloc::vec![0xEEu8; next(2 * PIECE)];
+                    let count = fs.read(file, start as u64, &mut buffer).unwrap();
+                    let expected = model.get(start..).unwrap_or(&[]);
+                    let expected = &expected[..expected.len().min(buffer.len())];
+                    assert_eq!(count, expected.len(), "step {step}");
+                    assert!(&buffer[..count] == expected, "step {step}");
+                }
+            }
+            assert_eq!(
+                fs.metadata(file).unwrap().size,
+                model.len() as u64,
+                "step {step}"
+            );
+        }
+        // The whole of it, in the end.
+        let mut all = alloc::vec![0u8; model.len() + 10];
+        let count = fs.read(file, 0, &mut all).unwrap();
+        assert!(all[..count] == model[..]);
+    }
+
+    #[test]
+    fn a_file_can_be_larger_than_any_one_allocation_and_has_a_limit() {
+        let mut fs = RamFs::new();
+        let file = fs.create(fs.root(), "big", FileType::File).unwrap();
+        // 9 MiB, written the way a download arrives: in small parts.
+        let part: Vec<u8> = (0..4096).map(|index| (index % 251) as u8).collect();
+        let parts = 9 * 256;
+        for index in 0..parts {
+            fs.write(file, (index * part.len()) as u64, &part).unwrap();
+        }
+        assert_eq!(fs.metadata(file).unwrap().size, 9 << 20);
+        // No piece of it is larger than 64 KiB.
+        let Node::File(contents) = fs.node(file).unwrap() else {
+            panic!("not a file");
+        };
+        assert!(contents.pieces.iter().all(|piece| piece.len() == PIECE));
+        assert_eq!(contents.pieces.len(), 9 * 16);
+        let mut back = alloc::vec![0u8; part.len()];
+        for index in [0, 1, 255, 256, parts - 1] {
+            assert_eq!(
+                fs.read(file, (index * part.len()) as u64, &mut back),
+                Ok(part.len())
+            );
+            assert!(back == part);
+        }
+        // Past the limit nothing is even tried, and the file is as it
+        // was.
+        assert_eq!(
+            fs.truncate(file, FILE_MAX as u64 + 1),
+            Err(FsError::NoSpace)
+        );
+        assert_eq!(fs.write(file, FILE_MAX as u64, b"x"), Err(FsError::NoSpace));
+        assert_eq!(fs.metadata(file).unwrap().size, 9 << 20);
+        // Cut to nothing, the memory is given back.
+        fs.truncate(file, 0).unwrap();
+        let Node::File(contents) = fs.node(file).unwrap() else {
+            panic!("not a file");
+        };
+        assert!(contents.pieces.is_empty());
+    }
 
     #[test]
     fn create_lookup_remove() {

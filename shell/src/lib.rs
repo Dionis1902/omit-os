@@ -1060,30 +1060,42 @@ impl Shell {
         let [first_arg, second_arg] = args else {
             return Err(Failure("usage: cmp FILE1 FILE2".into()));
         };
-        let first = vfs
-            .read_file(&self.resolve(first_arg)?)
-            .map_err(|e| fs_failure(first_arg, e))?;
-        let second = vfs
-            .read_file(&self.resolve(second_arg)?)
-            .map_err(|e| fs_failure(second_arg, e))?;
-        if let Some(at) = first.iter().zip(&second).position(|(a, b)| a != b) {
-            return Err(Failure(format!(
-                "{first_arg} and {second_arg} differ at byte {}",
-                at + 1
-            )));
+        let (first, second) = (self.resolve(first_arg)?, self.resolve(second_arg)?);
+        // A part of each at a time: the files may be larger than fits
+        // in memory in one piece.
+        const PART: usize = 64 * 1024;
+        let mut parts = (alloc::vec![0u8; PART], alloc::vec![0u8; PART]);
+        let mut offset = 0u64;
+        loop {
+            let got = (
+                vfs.read_at(&first, offset, &mut parts.0)
+                    .map_err(|e| fs_failure(first_arg, e))?,
+                vfs.read_at(&second, offset, &mut parts.1)
+                    .map_err(|e| fs_failure(second_arg, e))?,
+            );
+            let common = got.0.min(got.1);
+            if let Some(at) = parts.0[..common]
+                .iter()
+                .zip(&parts.1[..common])
+                .position(|(a, b)| a != b)
+            {
+                return Err(Failure(format!(
+                    "{first_arg} and {second_arg} differ at byte {}",
+                    offset + at as u64 + 1
+                )));
+            }
+            if got.0 != got.1 {
+                let shorter = if got.0 < got.1 { first_arg } else { second_arg };
+                return Err(Failure(format!(
+                    "{shorter} ends after byte {}, the other file continues",
+                    offset + common as u64
+                )));
+            }
+            if common == 0 {
+                return Ok(());
+            }
+            offset += common as u64;
         }
-        if first.len() != second.len() {
-            let shorter = if first.len() < second.len() {
-                first_arg
-            } else {
-                second_arg
-            };
-            return Err(Failure(format!(
-                "{shorter} ends after byte {}, the other file continues",
-                first.len().min(second.len())
-            )));
-        }
-        Ok(())
     }
 
     fn mv(&self, args: &[String], vfs: &mut Vfs) -> CommandResult {
