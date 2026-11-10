@@ -10,21 +10,26 @@
 //! (see [`ping`]) looks continuously while it waits.
 //!
 //! What exists so far is the foundation — an address by DHCP, ARP,
-//! answering and sending echo requests. There are no sockets yet, so
-//! programs cannot use the network.
+//! answering and sending echo requests — and UDP sockets for programs
+//! ([`UdpSocket`]). There is no TCP.
 
 use alloc::boxed::Box;
+use alloc::collections::VecDeque;
 use alloc::format;
 use alloc::string::String;
+use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::fmt;
+use core::sync::atomic::{AtomicU16, Ordering};
 
+use omit_abi::net::{INFO_CONFIGURED, INFO_NAME_SERVER, INFO_PRESENT, INFO_ROUTER, NetInfo};
 use omit_net::ethernet::MAX_FRAME_LEN;
-use omit_net::stack::{DhcpState, Link, SendError, Stack};
-use omit_net::{Ipv4Addr, MacAddr};
+use omit_net::stack::{DhcpState, Link, SendError, Stack, UdpSink};
+use omit_net::{Ipv4Addr, MacAddr, dhcp};
 
-use crate::sync::Mutex;
-use crate::{info, sched, time, warn};
+use crate::sched::WaitQueue;
+use crate::sync::{Mutex, SpinLock};
+use crate::{info, poll, sched, time, warn};
 
 /// Why a frame could not be sent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,7 +103,8 @@ impl Interface {
             errors: &mut self.transmit_errors,
         };
         while let Some(length) = link.device.receive(&mut self.buffer[..]) {
-            self.stack.receive(&self.buffer[..length], now, &mut link);
+            self.stack
+                .receive(&self.buffer[..length], now, &mut link, &mut Sockets);
         }
         self.stack.tick(now, &mut link);
 
@@ -334,4 +340,264 @@ pub fn ping(destination: Ipv4Addr, sequence: u16) -> Result<PingReply, PingError
         }
         sched::yield_now();
     }
+}
+
+// ---------------------------------------------------------------------
+// UDP sockets
+
+/// Datagrams a socket keeps for its owner; further ones are dropped.
+const SOCKET_QUEUE_MAX: usize = 32;
+/// Ports handed out when the program does not ask for a particular one.
+const EPHEMERAL_PORTS: core::ops::RangeInclusive<u16> = 49152..=65535;
+/// How long a receiver looks for frames itself before it goes to sleep
+/// and leaves that to the receive thread. Answers to something just sent
+/// usually arrive within this time, and are then not delayed by up to a
+/// timer tick.
+const EAGER_RECEIVE_NS: u64 = 20_000_000;
+
+/// A received datagram.
+pub struct Received {
+    /// The sender's address.
+    pub from: Ipv4Addr,
+    /// The sender's port.
+    pub from_port: u16,
+    /// The data.
+    pub data: Vec<u8>,
+}
+
+/// A UDP socket: a local port and the datagrams received on it.
+pub struct UdpSocket {
+    port: u16,
+    queue: SpinLock<VecDeque<Received>>,
+    readers: WaitQueue,
+}
+
+/// Every open socket. Entries whose socket is gone are removed when the
+/// socket is dropped.
+static SOCKETS: SpinLock<Vec<Weak<UdpSocket>>> = SpinLock::new(Vec::new());
+static NEXT_EPHEMERAL: AtomicU16 = AtomicU16::new(*EPHEMERAL_PORTS.start());
+
+/// Why a socket operation failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UdpError {
+    /// The port is taken (or no port is free).
+    PortInUse,
+    /// More data than fits one datagram.
+    TooLong,
+    /// No interface, no address, no route, or nobody answers for the
+    /// next hop.
+    Unreachable,
+    /// Nothing arrived in the time allowed.
+    TimedOut,
+    /// The waiting thread's process is being terminated.
+    Killed,
+}
+
+fn socket_on(sockets: &[Weak<UdpSocket>], port: u16) -> Option<Arc<UdpSocket>> {
+    sockets
+        .iter()
+        .filter_map(Weak::upgrade)
+        .find(|socket| socket.port == port)
+}
+
+impl UdpSocket {
+    /// Opens a socket on `port`, or on a free port if `port` is 0.
+    pub fn bind(port: u16) -> Result<Arc<Self>, UdpError> {
+        // Looked up and dropped outside the table's lock: dropping the
+        // last reference to a socket takes that lock.
+        let existing = |port| socket_on(&SOCKETS.lock(), port).is_some();
+        let port = if port == 0 {
+            let mut candidates = (0..EPHEMERAL_PORTS.len()).map(|_| {
+                let next = NEXT_EPHEMERAL.fetch_add(1, Ordering::Relaxed);
+                if next == *EPHEMERAL_PORTS.end() {
+                    NEXT_EPHEMERAL.store(*EPHEMERAL_PORTS.start(), Ordering::Relaxed);
+                }
+                next.max(*EPHEMERAL_PORTS.start())
+            });
+            candidates
+                .find(|&port| !existing(port))
+                .ok_or(UdpError::PortInUse)?
+        } else if port == dhcp::CLIENT_PORT || existing(port) {
+            // The DHCP client's port is the kernel's own.
+            return Err(UdpError::PortInUse);
+        } else {
+            port
+        };
+        let socket = Arc::new(Self {
+            port,
+            queue: SpinLock::new(VecDeque::new()),
+            readers: WaitQueue::new(),
+        });
+        let mut sockets = SOCKETS.lock();
+        // Two threads may have chosen the same port at the same moment.
+        let taken = sockets
+            .iter()
+            .any(|entry| entry.upgrade().is_some_and(|other| other.port == port));
+        if taken {
+            drop(sockets);
+            return Err(UdpError::PortInUse);
+        }
+        sockets.push(Arc::downgrade(&socket));
+        Ok(socket)
+    }
+
+    /// Whether a datagram is waiting.
+    pub fn ready(&self) -> bool {
+        !self.queue.lock().is_empty()
+    }
+
+    /// Sends `data` to `to`, port `to_port`. Waits up to a second for
+    /// the next hop's hardware address if it is not known yet.
+    pub fn send(&self, to: Ipv4Addr, to_port: u16, data: &[u8]) -> Result<(), UdpError> {
+        let started = time::monotonic_ns();
+        let mut next_attempt = started;
+        loop {
+            let now = time::monotonic_ns();
+            {
+                let mut guard = INTERFACE.lock();
+                let interface = guard.as_mut().ok_or(UdpError::Unreachable)?;
+                interface.poll();
+                if now >= next_attempt {
+                    next_attempt = now + RESOLVE_RETRY_NS;
+                    let Interface {
+                        device,
+                        stack,
+                        transmit_errors,
+                        ..
+                    } = interface;
+                    let mut link = DeviceLink {
+                        device: &mut **device,
+                        errors: transmit_errors,
+                    };
+                    match stack.send_udp(to, self.port, to_port, data, &mut link) {
+                        Ok(()) => return Ok(()),
+                        // An ARP request is on its way; try again shortly.
+                        Err(SendError::Unresolved) => {}
+                        Err(SendError::TooLong) => return Err(UdpError::TooLong),
+                        Err(SendError::NotConfigured | SendError::NoRoute) => {
+                            return Err(UdpError::Unreachable);
+                        }
+                    }
+                }
+            }
+            if now - started > PING_TIMEOUT_NS {
+                return Err(UdpError::Unreachable);
+            }
+            if sched::current_killed() {
+                return Err(UdpError::Killed);
+            }
+            sched::yield_now();
+        }
+    }
+
+    /// Takes the next received datagram, waiting up to `timeout_ticks`
+    /// timer ticks (`None`: for ever).
+    pub fn receive(&self, timeout_ticks: Option<u64>) -> Result<Received, UdpError> {
+        let take = || self.queue.lock().pop_front();
+        if let Some(received) = take() {
+            return Ok(received);
+        }
+        if timeout_ticks == Some(0) {
+            // One look at the card, so that a caller that only ever
+            // asks without waiting still sees what has arrived.
+            if let Some(interface) = INTERFACE.lock().as_mut() {
+                interface.poll();
+            }
+            return take().ok_or(UdpError::TimedOut);
+        }
+        let started = time::monotonic_ns();
+        let deadline = timeout_ticks.map(|ticks| time::ticks() + ticks);
+        let expired = || deadline.is_some_and(|deadline| time::ticks() >= deadline);
+        while time::monotonic_ns() - started < EAGER_RECEIVE_NS {
+            if let Some(interface) = INTERFACE.lock().as_mut() {
+                interface.poll();
+            }
+            if let Some(received) = take() {
+                return Ok(received);
+            }
+            if sched::current_killed() {
+                return Err(UdpError::Killed);
+            }
+            if expired() {
+                return Err(UdpError::TimedOut);
+            }
+            sched::yield_now();
+        }
+        loop {
+            // From here on the receive thread brings the datagrams.
+            let remaining = deadline.map_or(u64::MAX / 2, |deadline| {
+                deadline.saturating_sub(time::ticks())
+            });
+            self.readers
+                .wait_until_or_timeout(|| self.ready() || sched::current_killed(), remaining);
+            if let Some(received) = take() {
+                return Ok(received);
+            }
+            if sched::current_killed() {
+                return Err(UdpError::Killed);
+            }
+            if expired() {
+                return Err(UdpError::TimedOut);
+            }
+        }
+    }
+}
+
+impl Drop for UdpSocket {
+    fn drop(&mut self) {
+        // This socket's own entry can no longer be upgraded.
+        SOCKETS.lock().retain(|entry| entry.strong_count() > 0);
+    }
+}
+
+/// Hands received datagrams to the sockets.
+struct Sockets;
+
+impl UdpSink for Sockets {
+    fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
+        let Some(socket) = socket_on(&SOCKETS.lock(), port) else {
+            return false;
+        };
+        let mut copy = Vec::new();
+        if copy.try_reserve_exact(data.len()).is_ok() {
+            copy.extend_from_slice(data);
+            let mut queue = socket.queue.lock();
+            if queue.len() < SOCKET_QUEUE_MAX {
+                queue.push_back(Received {
+                    from,
+                    from_port,
+                    data: copy,
+                });
+            }
+        }
+        socket.readers.wake_all();
+        poll::notify();
+        // `socket` is dropped here, after the table's lock was released.
+        true
+    }
+}
+
+/// The interface as programs are told about it.
+pub fn info() -> NetInfo {
+    let mut info = NetInfo::default();
+    let guard = INTERFACE.lock();
+    let Some(interface) = guard.as_ref() else {
+        return info;
+    };
+    info.flags = INFO_PRESENT;
+    info.mac = interface.stack.mac().0;
+    if let Some(config) = interface.stack.config() {
+        info.flags |= INFO_CONFIGURED;
+        info.address = config.address.0;
+        info.mask = config.mask.0;
+        if let Some(router) = config.router {
+            info.flags |= INFO_ROUTER;
+            info.router = router.0;
+        }
+        if let Some(dns) = config.dns {
+            info.flags |= INFO_NAME_SERVER;
+            info.name_server = dns.0;
+        }
+    }
+    info
 }

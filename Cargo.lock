@@ -110,6 +110,10 @@ name = "omit-hwdb"
 version = "0.1.2"
 
 [[package]]
+name = "omit-inet"
+version = "0.1.2"
+
+[[package]]
 name = "omit-kernel"
 version = "0.1.2"
 dependencies = [
@@ -168,6 +172,7 @@ name = "omit-user-programs"
 version = "0.1.2"
 dependencies = [
  "omit-gfx",
+ "omit-inet",
  "omit-pe",
  "omit-rt",
  "omit-win32",

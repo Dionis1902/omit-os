@@ -40,6 +40,7 @@ COMPONENTS = {
     "compat/windows/win32/": GPL3,
     "userspace/rt/": PERMISSIVE,
     "libs/gfx/": PERMISSIVE,
+    "libs/inet/": PERMISSIVE,
     "libs/mm/": PERMISSIVE,
     "libs/window/": PERMISSIVE,
     "compat/windows/samples/": PERMISSIVE,

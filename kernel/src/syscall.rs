@@ -11,6 +11,7 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use omit_abi::net::{NO_TIMEOUT, NetInfo, RECEIVE_TIMEOUT_MAX, SocketAddr, UDP_PAYLOAD_MAX};
 use omit_abi::{
     ARGS_MAX, Blit, CHANNEL_NAME_MAX, Errno, FUTEX_NO_TIMEOUT, INPUT_READ_MAX, INPUT_TIMEOUT_MAX,
     InputEvent, KIND_DIRECTORY, KIND_FILE, PATH_MAX, POLL_INPUT, POLL_INPUT_READY, POLL_MAX,
@@ -22,6 +23,7 @@ use omit_vfs::{FileType, FsError, WriteMode, path};
 
 use crate::console::{self, Writer};
 use crate::futex::WaitResult;
+use crate::net::{UdpError, UdpSocket};
 use crate::pipe::{self, PipeError};
 use crate::process::{self, Descriptor, OpenFile};
 use crate::sync::Mutex;
@@ -132,6 +134,10 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         nr::CHANNEL_ACCEPT => channel_accept(a0, a1),
         nr::CHANNEL_CONNECT => channel_connect(a0, a1),
         nr::POLL => poll_descriptors(a0, a1, a2, a3),
+        nr::UDP_BIND => udp_bind(a0),
+        nr::UDP_SEND => udp_send(a0, a1, a2, a3),
+        nr::UDP_RECEIVE => udp_receive(a0, a1, a2, a3, a4),
+        nr::NET_INFO => net_info(a0),
         nr::THREAD_CREATE => {
             // The addresses are the program's own business — a wrong one
             // faults in user mode — but they must at least be user
@@ -422,6 +428,95 @@ fn channel_connect(name_address: u64, name_length: u64) -> SysResult {
     process::install(Descriptor::Channel(reader, writer)).map_err(|_| Errno::TooManyOpenFiles)
 }
 
+fn udp_error(error: UdpError) -> Errno {
+    match error {
+        UdpError::PortInUse => Errno::Busy,
+        UdpError::TooLong => Errno::InvalidArgument,
+        UdpError::Unreachable => Errno::Unreachable,
+        // `Killed` does not get as far as the program.
+        UdpError::TimedOut | UdpError::Killed => Errno::TimedOut,
+    }
+}
+
+fn udp_bind(port: u64) -> SysResult {
+    let port = u16::try_from(port).map_err(|_| Errno::InvalidArgument)?;
+    let socket = UdpSocket::bind(port).map_err(udp_error)?;
+    process::install(Descriptor::Udp(socket)).map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn udp_socket(fd: u64) -> Result<alloc::sync::Arc<UdpSocket>, Errno> {
+    match process::descriptor(fd) {
+        Some(Descriptor::Udp(socket)) => Ok(socket),
+        _ => Err(Errno::BadFileDescriptor),
+    }
+}
+
+fn udp_send(fd: u64, to: u64, address: u64, length: u64) -> SysResult {
+    let socket = udp_socket(fd)?;
+    if length > UDP_PAYLOAD_MAX {
+        return Err(Errno::InvalidArgument);
+    }
+    // The layout of `omit_abi::net::SocketAddr`: four address octets,
+    // then the port, little-endian.
+    let to = copy_in(to, size_of::<SocketAddr>())?;
+    let destination = omit_net::Ipv4Addr([to[0], to[1], to[2], to[3]]);
+    let port = u16::from_le_bytes([to[4], to[5]]);
+    let data = copy_in(address, length as usize)?;
+    match socket.send(destination, port, &data) {
+        Ok(()) => Ok(length),
+        Err(UdpError::Killed) => {
+            // `exit` does not return, so let go of the socket first.
+            drop(socket);
+            process::exit_if_killed();
+            Err(Errno::TimedOut)
+        }
+        Err(error) => Err(udp_error(error)),
+    }
+}
+
+fn udp_receive(fd: u64, buffer: u64, length: u64, from: u64, timeout_ms: u64) -> SysResult {
+    let socket = udp_socket(fd)?;
+    let tick_ms = 1000 / u64::from(time::TICK_HZ);
+    let timeout = match timeout_ms {
+        NO_TIMEOUT => None,
+        0..=RECEIVE_TIMEOUT_MAX => Some(timeout_ms.div_ceil(tick_ms)),
+        _ => return Err(Errno::InvalidArgument),
+    };
+    let received = match socket.receive(timeout) {
+        Ok(received) => received,
+        Err(UdpError::Killed) => {
+            drop(socket);
+            process::exit_if_killed();
+            return Err(Errno::TimedOut);
+        }
+        Err(UdpError::TimedOut) if timeout_ms == 0 => return Err(Errno::WouldBlock),
+        Err(error) => return Err(udp_error(error)),
+    };
+    let count = received.data.len().min(length as usize);
+    copy_out(buffer, &received.data[..count])?;
+    if from != 0 {
+        let mut bytes = [0u8; size_of::<SocketAddr>()];
+        bytes[..4].copy_from_slice(&received.from.0);
+        bytes[4..6].copy_from_slice(&received.from_port.to_le_bytes());
+        copy_out(from, &bytes)?;
+    }
+    Ok(count as u64)
+}
+
+fn net_info(out: u64) -> SysResult {
+    let info = crate::net::info();
+    // The layout of `omit_abi::net::NetInfo`.
+    let mut bytes = [0u8; size_of::<NetInfo>()];
+    bytes[..4].copy_from_slice(&info.flags.to_le_bytes());
+    bytes[4..8].copy_from_slice(&info.address);
+    bytes[8..12].copy_from_slice(&info.mask);
+    bytes[12..16].copy_from_slice(&info.router);
+    bytes[16..20].copy_from_slice(&info.name_server);
+    bytes[20..26].copy_from_slice(&info.mac);
+    copy_out(out, &bytes)?;
+    Ok(0)
+}
+
 fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> SysResult {
     if count > POLL_MAX || timeout_ms > POLL_TIMEOUT_MAX || flags & !POLL_INPUT != 0 {
         return Err(Errno::InvalidArgument);
@@ -441,7 +536,8 @@ fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> Sy
             Some(
                 descriptor @ (Descriptor::PipeRead(_)
                 | Descriptor::Channel(..)
-                | Descriptor::Listener(_)),
+                | Descriptor::Listener(_)
+                | Descriptor::Udp(_)),
             ) => watched.push(descriptor),
             // Files can always be read; anything else cannot be polled.
             Some(Descriptor::File(file)) if file.readable => watched.push(Descriptor::File(file)),
@@ -454,6 +550,7 @@ fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> Sy
             let is_ready = match descriptor {
                 Descriptor::PipeRead(reader) | Descriptor::Channel(reader, _) => reader.ready(),
                 Descriptor::Listener(listener) => listener.ready(),
+                Descriptor::Udp(socket) => socket.ready(),
                 _ => true,
             };
             if is_ready {

@@ -185,6 +185,27 @@ pub mod nr {
     /// Fails with `InvalidArgument` for a position before the start and
     /// `BadFileDescriptor` for anything but a file.
     pub const SEEK: u64 = 39;
+    /// `udp_bind(port) -> fd`: opens a UDP socket on local port `port`,
+    /// or on a free port chosen by the kernel if `port` is 0. Fails with
+    /// `Busy` if the port is taken.
+    pub const UDP_BIND: u64 = 40;
+    /// `udp_send(fd, to, data, length) -> length`: sends one datagram of
+    /// at most [`crate::net::UDP_PAYLOAD_MAX`] bytes to the address and
+    /// port in the [`crate::net::SocketAddr`] at `to`. May wait up to a
+    /// second for the next hop's hardware address to be found; fails
+    /// with `Unreachable` if it is not, or if there is no network.
+    pub const UDP_SEND: u64 = 41;
+    /// `udp_receive(fd, buffer, length, from, timeout_ms) -> length`:
+    /// takes the next datagram received on the socket, waiting up to
+    /// `timeout_ms` milliseconds ([`crate::net::NO_TIMEOUT`]: for ever;
+    /// 0: not at all) and failing with `TimedOut` (or `WouldBlock` for
+    /// 0) if none arrives. A datagram longer than the buffer is cut
+    /// short. If `from` is not 0 the sender is written there as a
+    /// [`crate::net::SocketAddr`].
+    pub const UDP_RECEIVE: u64 = 42;
+    /// `net_info(out) -> 0`: writes a [`crate::net::NetInfo`] describing
+    /// the network interface.
+    pub const NET_INFO: u64 = 43;
 }
 
 /// Largest shared memory segment, in bytes.
@@ -452,6 +473,9 @@ pub enum Errno {
     WouldBlock = 11,
     /// The time allowed for the operation has passed.
     TimedOut = 110,
+    /// The destination cannot be reached: no network, no route, or
+    /// nobody answers for the address.
+    Unreachable = 101,
 }
 
 impl core::fmt::Display for Errno {
@@ -476,6 +500,7 @@ impl core::fmt::Display for Errno {
             Self::BrokenPipe => "Broken pipe",
             Self::WouldBlock => "Resource temporarily unavailable",
             Self::TimedOut => "Timed out",
+            Self::Unreachable => "Network is unreachable",
         })
     }
 }
@@ -510,9 +535,65 @@ impl Errno {
             32 => Some(Self::BrokenPipe),
             11 => Some(Self::WouldBlock),
             110 => Some(Self::TimedOut),
+            101 => Some(Self::Unreachable),
             _ => None,
         }
     }
+}
+
+/// Networking structures and limits.
+pub mod net {
+    /// Longest UDP datagram payload: what fits one Ethernet frame.
+    pub const UDP_PAYLOAD_MAX: u64 = 1472;
+    /// `timeout_ms` value of `udp_receive` that means "wait for ever".
+    pub const NO_TIMEOUT: u64 = u64::MAX;
+    /// Longest wait `udp_receive` accepts otherwise, in milliseconds.
+    pub const RECEIVE_TIMEOUT_MAX: u64 = 3_600_000;
+
+    /// An IPv4 address and a UDP port.
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct SocketAddr {
+        /// The address, most significant octet first.
+        pub address: [u8; 4],
+        /// The port.
+        pub port: u16,
+        /// Zero.
+        pub reserved: u16,
+    }
+
+    /// [`NetInfo::flags`]: the machine has a network interface.
+    pub const INFO_PRESENT: u32 = 1 << 0;
+    /// [`NetInfo::flags`]: the interface has an address.
+    pub const INFO_CONFIGURED: u32 = 1 << 1;
+    /// [`NetInfo::flags`]: a router is known.
+    pub const INFO_ROUTER: u32 = 1 << 2;
+    /// [`NetInfo::flags`]: a name server is known.
+    pub const INFO_NAME_SERVER: u32 = 1 << 3;
+
+    /// The network interface, as `net_info` describes it. Fields whose
+    /// flag is not set are zero.
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct NetInfo {
+        /// `INFO_*` bits.
+        pub flags: u32,
+        /// The interface's address.
+        pub address: [u8; 4],
+        /// The network mask.
+        pub mask: [u8; 4],
+        /// The router for other networks.
+        pub router: [u8; 4],
+        /// The name server.
+        pub name_server: [u8; 4],
+        /// The hardware address.
+        pub mac: [u8; 6],
+        /// Zero.
+        pub reserved: [u8; 2],
+    }
+
+    const _: () = assert!(size_of::<SocketAddr>() == 8);
+    const _: () = assert!(size_of::<NetInfo>() == 28);
 }
 
 /// Exit status reported for a process killed by a CPU exception

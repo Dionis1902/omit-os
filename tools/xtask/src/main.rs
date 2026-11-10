@@ -178,6 +178,7 @@ const USER_PROGRAMS: &[&str] = &[
     "echo",
     "fileops",
     "hello",
+    "host",
     "ipctest",
     "ls",
     "memtest",
@@ -189,6 +190,7 @@ const USER_PROGRAMS: &[&str] = &[
     "spin",
     "syscheck",
     "tee",
+    "tftp",
     "threadtest",
     "winrun",
 ];
@@ -665,6 +667,10 @@ struct BootTest {
     /// the console to appear on the screen, types `exit` on the keyboard
     /// and expects the kernel to report success. Requires `display`.
     no_serial: bool,
+    /// Attach a VirtIO network card on QEMU's built-in user-mode network,
+    /// with a TFTP server (see [`prepare_tftp_files`]) and, on the host,
+    /// a name server for the test to ask (see [`start_test_name_server`]).
+    network: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -702,6 +708,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "shell-session",
@@ -886,6 +893,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -907,6 +915,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // The clocks measured against the ACPI power-management timer, as on
     // a machine whose legacy timer is switched off; here that timer
@@ -937,6 +946,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // A machine without a serial port, like most current ones: the
     // kernel must come up on screen and keyboard alone. With no serial
@@ -958,6 +968,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: true,
+        network: false,
     },
     // The same with a USB keyboard on an xHCI controller, and the PS/2
     // devices switched off, so the typed line can only have come by USB.
@@ -986,6 +997,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // The same keyboard behind a hub, and a mouse behind a second hub
     // plugged into the first.
@@ -1022,6 +1034,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // And the whole desktop scenario — pointer movement, clicks, drags,
     // typing — with USB mouse and keyboard only.
@@ -1045,6 +1058,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "desktop",
@@ -1066,6 +1080,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "disk-persistence",
@@ -1127,6 +1142,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // The installer: the system writes itself to the VirtIO disk, the
     // machine is restarted without the boot medium, and must come up from
@@ -1191,6 +1207,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // The same on an NVMe disk, the kind most current machines have: the
     // native NVMe driver, installation, and booting from the result with
@@ -1242,6 +1259,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: true,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // And on a SATA disk, the kind virtual machines offer by default.
     // (When the test boots from a disk image, that image is a SATA disk
@@ -1294,6 +1312,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: true,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "windows-programs",
@@ -1404,6 +1423,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1489,6 +1509,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1517,6 +1538,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1580,6 +1602,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     // A VirtIO network card on QEMU's built-in user-mode network, which
     // has a DHCP server and a gateway at 10.0.2.2 that answers echo
@@ -1626,21 +1649,71 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             // The disk on the other VirtIO device still works.
             ("lsblk", "\nvda"),
+            // UDP sockets, from a program: files fetched from QEMU's
+            // TFTP server. One of 300 bytes (a single short block), one
+            // of exactly two blocks (which ends with an empty third),
+            // and a program of several hundred blocks, compared with
+            // the copy the system was started with.
+            (
+                "tftp 10.0.2.2 short.txt /short",
+                "\nshort.txt: 300 bytes from 10.0.2.2, stored as /short\n",
+            ),
+            (
+                "tftp 10.0.2.2 exact.bin",
+                "\nexact.bin: 1024 bytes from 10.0.2.2, stored as exact.bin\n",
+            ),
+            (
+                "tftp 10.0.2.2 desktop /desktop.copy",
+                " bytes from 10.0.2.2, stored as /desktop.copy\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.copy",
+                "cmp /bin/desktop /desktop.copy\nomit:/# ",
+            ),
+            (
+                "tftp 10.0.2.2 hello /hello.copy",
+                " bytes from 10.0.2.2, stored as /hello.copy\n",
+            ),
+            ("/hello.copy", "\nHello from user mode! I am process "),
+            // A file the server does not have: its refusal is shown and
+            // nothing is left behind.
+            (
+                "tftp 10.0.2.2 missing.txt /missing",
+                "\ntftp: missing.txt: the server says: ",
+            ),
+            ("cat /missing", "No such file or directory"),
+            // A server that is not there.
+            (
+                "tftp 10.0.2.99 short.txt /unreachable",
+                "\ntftp: short.txt: the server cannot be reached\n",
+            ),
+            // Names, asked of a name server run by the test on the host
+            // (the gateway address leads to the host's own loopback).
+            (
+                "host test.omit.example 10.0.2.2:15353",
+                "\ntest.omit.example has address 192.0.2.7\n",
+            ),
+            (
+                "host missing.omit.example 10.0.2.2:15353",
+                "\nhost: missing.omit.example: no such name\n",
+            ),
+            // Nobody listens on that port: three questions, no answer.
+            (
+                "host test.omit.example 10.0.2.2:15354",
+                "\nhost: test.omit.example: no answer from 10.0.2.2\n",
+            ),
+            ("host 10.0.2.2", "\n10.0.2.2 is an address already\n"),
         ],
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
         desktop: false,
-        qemu_args: &[
-            "-netdev",
-            "user,id=net0",
-            "-device",
-            "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56",
-        ],
+        qemu_args: &[],
         boot_installed: false,
         nvme: false,
         sata: false,
         no_serial: false,
+        network: true,
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1667,6 +1740,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1690,6 +1764,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1711,6 +1786,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1732,6 +1808,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1752,6 +1829,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
+        network: false,
     },
 ];
 
@@ -2760,6 +2838,70 @@ fn run_qemu_captured(
     })
 }
 
+/// Fills a directory with the files QEMU's TFTP server offers to the
+/// `network` test and returns it.
+fn prepare_tftp_files(dir: &Path, options: &Options) -> Result<PathBuf> {
+    let files = dir.join("tftp");
+    fs::create_dir_all(&files)?;
+    let pattern = |length: usize| -> Vec<u8> { (0..length).map(|i| (i % 251) as u8).collect() };
+    fs::write(files.join("short.txt"), pattern(300))?;
+    fs::write(files.join("exact.bin"), pattern(1024))?;
+    let programs = workspace_root()
+        .join("target")
+        .join("x86_64-unknown-none")
+        .join(options.profile_dir());
+    for program in ["desktop", "hello"] {
+        fs::copy(programs.join(program), files.join(program))?;
+    }
+    let _ = fs::remove_file(files.join("missing.txt"));
+    Ok(files)
+}
+
+/// UDP port, on the host's loopback address, of the name server the
+/// `network` test asks.
+const TEST_NAME_SERVER_PORT: u16 = 15353;
+
+/// Starts, once, a name server that knows one name: `test.omit.example`
+/// is 192.0.2.7; any other name does not exist. It runs until xtask
+/// exits.
+fn start_test_name_server() -> Result<()> {
+    use std::net::UdpSocket;
+    use std::sync::OnceLock;
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.get().is_some() {
+        return Ok(());
+    }
+    let socket = UdpSocket::bind(("127.0.0.1", TEST_NAME_SERVER_PORT)).map_err(|error| {
+        format!("cannot listen on UDP port {TEST_NAME_SERVER_PORT} for the network test: {error}")
+    })?;
+    let _ = STARTED.set(());
+    std::thread::spawn(move || {
+        // "test.omit.example" as a question sees it.
+        const KNOWN: &[u8] = b"\x04test\x04omit\x07example\x00";
+        let mut query = [0u8; 512];
+        while let Ok((length, from)) = socket.recv_from(&mut query) {
+            // A header, a name, type and class.
+            if length < 12 + 1 + 4 {
+                continue;
+            }
+            let mut answer = query[..length].to_vec();
+            if query[12..length - 4].eq_ignore_ascii_case(KNOWN) {
+                // Response, recursion available, no error; one answer:
+                // the name (a pointer to the question), A, IN, 60 s.
+                answer[2..4].copy_from_slice(&[0x81, 0x80]);
+                answer[6..8].copy_from_slice(&[0, 1]);
+                answer.extend_from_slice(&[0xC0, 12, 0, 1, 0, 1, 0, 0, 0, 60, 0, 4]);
+                answer.extend_from_slice(&[192, 0, 2, 7]);
+            } else {
+                // Name error.
+                answer[2..4].copy_from_slice(&[0x81, 0x83]);
+            }
+            let _ = socket.send_to(&answer, from);
+        }
+    });
+    Ok(())
+}
+
 /// Runs one boot test; returns the list of failed expectations.
 fn run_boot_test(
     test: &BootTest,
@@ -2792,6 +2934,16 @@ fn run_boot_test(
             format!("if=none,id=sata,format=raw,file={}", sata_disk.display()),
             "-device".into(),
             "ide-hd,drive=sata,bus=ide.2".into(),
+        ]);
+    }
+    if test.network {
+        let files = prepare_tftp_files(&dir, options)?;
+        start_test_name_server()?;
+        qemu_args.extend([
+            "-netdev".into(),
+            format!("user,id=net0,tftp={}", files.display()),
+            "-device".into(),
+            "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56".into(),
         ]);
     }
     let qemu_args: Vec<&str> = qemu_args.iter().map(String::as_str).collect();

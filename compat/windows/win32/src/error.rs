@@ -65,6 +65,9 @@ pub const ERROR_BAD_EXE_FORMAT: u32 = 193;
 /// This function is not supported on this system.
 pub const ERROR_CALL_NOT_IMPLEMENTED: u32 = 120;
 
+/// The network location cannot be reached.
+pub const ERROR_NETWORK_UNREACHABLE: u32 = 1231;
+
 /// The Win32 error code for a failed Omit OS system call.
 pub fn from_errno(errno: Errno) -> u32 {
     match errno {
@@ -87,6 +90,7 @@ pub fn from_errno(errno: Errno) -> u32 {
         Errno::BrokenPipe => ERROR_BROKEN_PIPE,
         Errno::WouldBlock => ERROR_BUSY,
         Errno::TimedOut => WAIT_TIMEOUT,
+        Errno::Unreachable => ERROR_NETWORK_UNREACHABLE,
     }
 }
 

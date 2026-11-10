@@ -1,8 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! The state of one network interface and what it does with each frame:
-//! an ARP cache, a DHCP client, answers to echo requests, and the
-//! sending side of `ping`.
+//! an ARP cache, a DHCP client, answers to echo requests, the sending
+//! side of `ping`, and UDP datagrams to and from local ports.
 //!
 //! The stack does no I/O and reads no clock: frames come in through
 //! [`Stack::receive`], go out through a [`Link`], and time is whatever
@@ -29,6 +29,25 @@ pub trait Link {
     /// a frame that was lost.
     fn send(&mut self, frame: &[u8]);
 }
+
+/// Where received UDP datagrams go.
+pub trait UdpSink {
+    /// A datagram has arrived for local port `port`. Returns whether
+    /// anybody is listening there; if not, the datagram is dropped.
+    fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool;
+}
+
+/// A sink for interfaces on which nobody listens to anything.
+pub struct NoSockets;
+
+impl UdpSink for NoSockets {
+    fn deliver(&mut self, _: Ipv4Addr, _: u16, _: u16, _: &[u8]) -> bool {
+        false
+    }
+}
+
+/// Longest UDP payload that fits one frame.
+pub const MAX_UDP_PAYLOAD: usize = MAX_IP_PAYLOAD - udp::HEADER_LEN;
 
 /// The addresses an interface works with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,6 +426,47 @@ impl Stack {
         Ok(())
     }
 
+    /// Sends a UDP datagram from local port `source_port`.
+    pub fn send_udp(
+        &mut self,
+        destination: Ipv4Addr,
+        source_port: u16,
+        destination_port: u16,
+        payload: &[u8],
+        link: &mut dyn Link,
+    ) -> Result<(), SendError> {
+        let config = self.config.ok_or(SendError::NotConfigured)?;
+        if payload.len() > MAX_UDP_PAYLOAD {
+            return Err(SendError::TooLong);
+        }
+        let to = self.resolve(destination, link)?;
+        let datagram = &mut self.frame[ethernet::HEADER_LEN + ipv4::HEADER_LEN..];
+        datagram[udp::HEADER_LEN..udp::HEADER_LEN + payload.len()].copy_from_slice(payload);
+        let length = udp::finish(
+            datagram,
+            config.address,
+            source_port,
+            destination,
+            destination_port,
+            payload.len(),
+        )
+        .ok_or(SendError::TooLong)?;
+        self.send_ip(to, PROTOCOL_UDP, config.address, destination, length, link);
+        Ok(())
+    }
+
+    /// Whether `address` is one this interface receives for: its own,
+    /// or a broadcast address of its network.
+    fn is_ours(&self, address: Ipv4Addr) -> bool {
+        self.config.is_some_and(|config| {
+            address == config.address
+                || address == Ipv4Addr::BROADCAST
+                || (config.mask != Ipv4Addr::BROADCAST
+                    && address.same_network(config.address, config.mask)
+                    && address.to_u32() | config.mask.to_u32() == u32::MAX)
+        })
+    }
+
     /// Removes and returns the reply from `from` to the echo request
     /// with this identifier and sequence number, if it has arrived.
     pub fn take_echo_reply(
@@ -428,15 +488,27 @@ impl Stack {
     }
 
     /// Takes in one received frame, at time `now_ms`.
-    pub fn receive(&mut self, data: &[u8], now_ms: u64, link: &mut dyn Link) {
+    pub fn receive(
+        &mut self,
+        data: &[u8],
+        now_ms: u64,
+        link: &mut dyn Link,
+        sockets: &mut dyn UdpSink,
+    ) {
         self.stats.received += 1;
-        if !self.handle(data, now_ms, link) {
+        if !self.handle(data, now_ms, link, sockets) {
             self.stats.ignored += 1;
         }
     }
 
     /// Returns whether the frame was for us and understood.
-    fn handle(&mut self, data: &[u8], now_ms: u64, link: &mut dyn Link) -> bool {
+    fn handle(
+        &mut self,
+        data: &[u8],
+        now_ms: u64,
+        link: &mut dyn Link,
+        sockets: &mut dyn UdpSink,
+    ) -> bool {
         let Some(frame) = Frame::parse(data) else {
             return false;
         };
@@ -445,7 +517,7 @@ impl Stack {
         }
         match frame.ethertype {
             ethernet::TYPE_ARP => self.handle_arp(frame.payload, link),
-            ethernet::TYPE_IPV4 => self.handle_ipv4(&frame, now_ms, link),
+            ethernet::TYPE_IPV4 => self.handle_ipv4(&frame, now_ms, link, sockets),
             _ => false,
         }
     }
@@ -466,25 +538,37 @@ impl Stack {
         ours
     }
 
-    fn handle_ipv4(&mut self, frame: &Frame<'_>, now_ms: u64, link: &mut dyn Link) -> bool {
+    fn handle_ipv4(
+        &mut self,
+        frame: &Frame<'_>,
+        now_ms: u64,
+        link: &mut dyn Link,
+        sockets: &mut dyn UdpSink,
+    ) -> bool {
         let Some(packet) = ipv4::Packet::parse(frame.payload) else {
             return false;
         };
         match packet.protocol {
             PROTOCOL_UDP => {
-                // Until there is an address, the only thing listened for
-                // is the DHCP server, whatever address it writes to.
                 let Some(datagram) =
                     Datagram::parse(packet.payload, packet.source, packet.destination)
                 else {
                     return false;
                 };
-                if datagram.destination_port != dhcp::CLIENT_PORT
-                    || datagram.source_port != dhcp::SERVER_PORT
-                {
-                    return false;
+                // The DHCP server is listened for whatever address it
+                // writes to: until there is an address, it is the only
+                // thing that can be heard at all.
+                if datagram.destination_port == dhcp::CLIENT_PORT {
+                    return datagram.source_port == dhcp::SERVER_PORT
+                        && self.handle_dhcp(datagram.payload, now_ms, link);
                 }
-                self.handle_dhcp(datagram.payload, now_ms, link)
+                self.is_ours(packet.destination)
+                    && sockets.deliver(
+                        packet.source,
+                        datagram.source_port,
+                        datagram.destination_port,
+                        datagram.payload,
+                    )
             }
             PROTOCOL_ICMP => {
                 let Some(config) = self.config else {
@@ -693,7 +777,12 @@ mod tests {
                 target_ip: address,
             }
         );
-        stack.receive(&arp_frame(MAC, packet.reply_from(mac)), 0, wire);
+        stack.receive(
+            &arp_frame(MAC, packet.reply_from(mac)),
+            0,
+            wire,
+            &mut NoSockets,
+        );
         assert!(wire.take().is_empty(), "a reply is not answered");
     }
 
@@ -749,6 +838,7 @@ mod tests {
             &ip_frame(MAC, PEER_MAC, PROTOCOL_ICMP, PEER, US, &reply),
             0,
             &mut wire,
+            &mut NoSockets,
         );
         // Only the matching request finds it, and only once.
         assert_eq!(stack.take_echo_reply(PEER, 0x4F4D, 2), None);
@@ -846,7 +936,12 @@ mod tests {
             target_mac: MacAddr::ZERO,
             target_ip: US,
         };
-        stack.receive(&arp_frame(MacAddr::BROADCAST, request), 0, &mut wire);
+        stack.receive(
+            &arp_frame(MacAddr::BROADCAST, request),
+            0,
+            &mut wire,
+            &mut NoSockets,
+        );
         let sent = wire.one();
         let frame = Frame::parse(&sent).unwrap();
         assert_eq!((frame.destination, frame.source), (PEER_MAC, MAC));
@@ -876,7 +971,12 @@ mod tests {
             target_mac: MacAddr::ZERO,
             target_ip: ROUTER,
         };
-        stack.receive(&arp_frame(MacAddr::BROADCAST, request), 0, &mut wire);
+        stack.receive(
+            &arp_frame(MacAddr::BROADCAST, request),
+            0,
+            &mut wire,
+            &mut NoSockets,
+        );
         assert!(wire.take().is_empty());
         assert_eq!(stack.neighbours().count(), 0);
         assert_eq!(stack.stats().ignored, 1);
@@ -889,7 +989,12 @@ mod tests {
             sender_mac: moved,
             ..request
         };
-        stack.receive(&arp_frame(MacAddr::BROADCAST, announcement), 0, &mut wire);
+        stack.receive(
+            &arp_frame(MacAddr::BROADCAST, announcement),
+            0,
+            &mut wire,
+            &mut NoSockets,
+        );
         assert_eq!(stack.resolve(PEER, &mut wire), Ok(moved));
         assert_eq!(stack.neighbours().count(), 1);
     }
@@ -907,7 +1012,12 @@ mod tests {
                 target_mac: MacAddr::ZERO,
                 target_ip: US,
             };
-            stack.receive(&arp_frame(MacAddr::BROADCAST, request), 0, &mut wire);
+            stack.receive(
+                &arp_frame(MacAddr::BROADCAST, request),
+                0,
+                &mut wire,
+                &mut NoSockets,
+            );
             wire.take();
             assert_eq!(
                 stack.resolve(address, &mut wire),
@@ -927,6 +1037,7 @@ mod tests {
             &ip_frame(MAC, ROUTER_MAC, PROTOCOL_ICMP, FAR, US, &request),
             0,
             &mut wire,
+            &mut NoSockets,
         );
         let sent = wire.one();
         let frame = Frame::parse(&sent).unwrap();
@@ -968,12 +1079,12 @@ mod tests {
             std::vec![0u8; 10],
         ];
         for frame in &frames {
-            stack.receive(frame, 0, &mut wire);
+            stack.receive(frame, 0, &mut wire, &mut NoSockets);
         }
         // A damaged copy of a good frame.
         let mut damaged = ip_frame(MAC, PEER_MAC, PROTOCOL_ICMP, PEER, US, &request);
         damaged[40] ^= 1;
-        stack.receive(&damaged, 0, &mut wire);
+        stack.receive(&damaged, 0, &mut wire, &mut NoSockets);
         assert!(wire.take().is_empty());
         assert_eq!(
             stack.stats(),
@@ -1062,7 +1173,7 @@ mod tests {
         assert_eq!(message_type(&discover), 1);
         let xid = transaction(&discover);
 
-        stack.receive(&server_reply(2, xid, true), 120, &mut wire);
+        stack.receive(&server_reply(2, xid, true), 120, &mut wire, &mut NoSockets);
         assert_eq!(stack.dhcp_state(), DhcpState::Requesting);
         let request = dhcp_message(&wire.one());
         assert_eq!(message_type(&request), 3);
@@ -1071,7 +1182,7 @@ mod tests {
         assert_eq!(request[243..255], [50, 4, 10, 0, 2, 15, 54, 4, 10, 0, 2, 2]);
         assert_eq!(stack.config(), None, "an offer is not yet an address");
 
-        stack.receive(&server_reply(5, xid, true), 140, &mut wire);
+        stack.receive(&server_reply(5, xid, true), 140, &mut wire, &mut NoSockets);
         assert_eq!(stack.dhcp_state(), DhcpState::Bound);
         assert_eq!(
             stack.config(),
@@ -1120,8 +1231,13 @@ mod tests {
         stack.tick(0, &mut wire);
         let xid = transaction(&dhcp_message(&wire.one()));
         // Another transaction; an acknowledgement nobody asked for yet.
-        stack.receive(&server_reply(2, xid ^ 1, true), 10, &mut wire);
-        stack.receive(&server_reply(5, xid, true), 10, &mut wire);
+        stack.receive(
+            &server_reply(2, xid ^ 1, true),
+            10,
+            &mut wire,
+            &mut NoSockets,
+        );
+        stack.receive(&server_reply(5, xid, true), 10, &mut wire, &mut NoSockets);
         assert_eq!(stack.dhcp_state(), DhcpState::Discovering);
         assert_eq!(stack.config(), None);
         assert!(wire.take().is_empty());
@@ -1135,9 +1251,14 @@ mod tests {
         stack.start_dhcp();
         stack.tick(0, &mut wire);
         let first = transaction(&dhcp_message(&wire.one()));
-        stack.receive(&server_reply(2, first, true), 10, &mut wire);
+        stack.receive(&server_reply(2, first, true), 10, &mut wire, &mut NoSockets);
         wire.take();
-        stack.receive(&server_reply(6, first, false), 20, &mut wire);
+        stack.receive(
+            &server_reply(6, first, false),
+            20,
+            &mut wire,
+            &mut NoSockets,
+        );
         assert_eq!(stack.dhcp_state(), DhcpState::Discovering);
         stack.tick(20, &mut wire);
         let again = dhcp_message(&wire.one());
@@ -1152,7 +1273,7 @@ mod tests {
         stack.start_dhcp();
         stack.tick(0, &mut wire);
         let xid = transaction(&dhcp_message(&wire.one()));
-        stack.receive(&server_reply(2, xid, true), 0, &mut wire);
+        stack.receive(&server_reply(2, xid, true), 0, &mut wire, &mut NoSockets);
         let mut kinds = Vec::new();
         kinds.push(message_type(&dhcp_message(&wire.one())));
         for now in (0..20_000).step_by(10) {
@@ -1173,14 +1294,136 @@ mod tests {
         stack.start_dhcp();
         stack.tick(0, &mut wire);
         let xid = transaction(&dhcp_message(&wire.one()));
-        stack.receive(&server_reply(2, xid, false), 0, &mut wire);
+        stack.receive(&server_reply(2, xid, false), 0, &mut wire, &mut NoSockets);
         wire.take();
-        stack.receive(&server_reply(5, xid, false), 0, &mut wire);
+        stack.receive(&server_reply(5, xid, false), 0, &mut wire, &mut NoSockets);
         let config = stack.config().unwrap();
         assert_eq!(config.mask, Ipv4Addr::BROADCAST);
         assert_eq!(config.router, None);
         assert_eq!(stack.resolve(PEER, &mut wire), Err(SendError::NoRoute));
         // And its own address is not mistaken for a broadcast address.
         assert_eq!(stack.resolve(US, &mut wire), Err(SendError::Unresolved));
+    }
+
+    // --- UDP for local ports ---
+
+    /// Listens on port 4000 and records what arrives.
+    #[derive(Default)]
+    struct Listener(Vec<(Ipv4Addr, u16, u16, Vec<u8>)>);
+
+    impl UdpSink for Listener {
+        fn deliver(&mut self, from: Ipv4Addr, from_port: u16, port: u16, data: &[u8]) -> bool {
+            if port != 4000 {
+                return false;
+            }
+            self.0.push((from, from_port, port, data.to_vec()));
+            true
+        }
+    }
+
+    fn udp_frame(to: MacAddr, source: Ipv4Addr, destination: Ipv4Addr, port: u16) -> Vec<u8> {
+        let mut datagram = [0u8; 13];
+        datagram[8..].copy_from_slice(b"hello");
+        udp::finish(&mut datagram, source, 1234, destination, port, 5).unwrap();
+        ip_frame(to, PEER_MAC, PROTOCOL_UDP, source, destination, &datagram)
+    }
+
+    #[test]
+    fn udp_is_sent_with_addresses_ports_and_checksum() {
+        let mut stack = configured();
+        let mut wire = Wire::default();
+        assert_eq!(
+            stack.send_udp(PEER, 4000, 69, b"request", &mut wire),
+            Err(SendError::Unresolved)
+        );
+        answer_arp(&mut stack, &mut wire, PEER, PEER_MAC);
+        assert_eq!(
+            stack.send_udp(PEER, 4000, 69, b"request", &mut wire),
+            Ok(())
+        );
+        let sent = wire.one();
+        let frame = Frame::parse(&sent).unwrap();
+        assert_eq!(frame.destination, PEER_MAC);
+        let packet = ipv4::Packet::parse(frame.payload).unwrap();
+        assert_eq!((packet.source, packet.destination), (US, PEER));
+        // Parsing verifies the checksum, which covers the addresses.
+        let datagram = Datagram::parse(packet.payload, US, PEER).unwrap();
+        assert_eq!(
+            (datagram.source_port, datagram.destination_port),
+            (4000, 69)
+        );
+        assert_eq!(datagram.payload, b"request");
+        assert_ne!(packet.payload[6..8], [0, 0], "a checksum is always sent");
+    }
+
+    #[test]
+    fn udp_limits() {
+        let mut stack = configured();
+        let mut wire = Wire::default();
+        answer_arp_after(&mut stack, &mut wire);
+        let big = [7u8; MAX_UDP_PAYLOAD + 1];
+        assert_eq!(MAX_UDP_PAYLOAD, 1472);
+        assert_eq!(
+            stack.send_udp(PEER, 1, 2, &big, &mut wire),
+            Err(SendError::TooLong)
+        );
+        assert_eq!(stack.send_udp(PEER, 1, 2, &big[..1472], &mut wire), Ok(()));
+        assert_eq!(wire.one().len(), 1514);
+        assert_eq!(stack.send_udp(PEER, 1, 2, b"", &mut wire), Ok(()));
+        assert_eq!(
+            wire.one().len(),
+            60,
+            "an empty datagram is padded to a full frame"
+        );
+        let mut bare = Stack::new(MAC, 1);
+        assert_eq!(
+            bare.send_udp(PEER, 1, 2, b"x", &mut wire),
+            Err(SendError::NotConfigured)
+        );
+    }
+
+    #[test]
+    fn udp_reaches_the_listener_on_its_port_only() {
+        let mut stack = configured();
+        let mut wire = Wire::default();
+        let mut listener = Listener::default();
+        // To our address, to the network's broadcast address, to everyone.
+        for destination in [US, Ipv4Addr([10, 0, 2, 255]), Ipv4Addr::BROADCAST] {
+            let frame = udp_frame(MacAddr::BROADCAST, PEER, destination, 4000);
+            stack.receive(&frame, 0, &mut wire, &mut listener);
+        }
+        assert_eq!(listener.0.len(), 3);
+        assert_eq!(listener.0[0], (PEER, 1234, 4000, b"hello".to_vec()));
+        assert_eq!(stack.stats().ignored, 0);
+
+        // Another port; another host's address; a damaged datagram.
+        stack.receive(&udp_frame(MAC, PEER, US, 4001), 0, &mut wire, &mut listener);
+        stack.receive(
+            &udp_frame(MAC, PEER, ROUTER, 4000),
+            0,
+            &mut wire,
+            &mut listener,
+        );
+        let mut damaged = udp_frame(MAC, PEER, US, 4000);
+        damaged[14 + 20 + 9] ^= 1;
+        stack.receive(&damaged, 0, &mut wire, &mut listener);
+        assert_eq!(listener.0.len(), 3);
+        assert_eq!(stack.stats().ignored, 3);
+        assert!(wire.take().is_empty(), "nothing is sent in answer");
+    }
+
+    #[test]
+    fn without_an_address_only_dhcp_is_heard() {
+        let mut stack = Stack::new(MAC, 1);
+        let mut wire = Wire::default();
+        let mut listener = Listener::default();
+        let frame = udp_frame(MacAddr::BROADCAST, PEER, Ipv4Addr::BROADCAST, 4000);
+        stack.receive(&frame, 0, &mut wire, &mut listener);
+        assert!(listener.0.is_empty());
+        // And a listener cannot take the DHCP client's port.
+        let mut stack = configured();
+        let frame = udp_frame(MAC, PEER, US, 68);
+        stack.receive(&frame, 0, &mut wire, &mut listener);
+        assert!(listener.0.is_empty());
     }
 }

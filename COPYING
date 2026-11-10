@@ -39,6 +39,7 @@ Which licence applies where
       userspace/rt/           the runtime of every user program
       libs/window/            the window protocol
       libs/gfx/               drawing and text
+      libs/inet/              protocols programs speak over sockets (DNS, TFTP)
       libs/mm/                the memory allocator (also used by the
                               kernel, under MIT)
 

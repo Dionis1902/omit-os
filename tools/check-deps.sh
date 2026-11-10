@@ -22,4 +22,4 @@ check deny.toml kernel boot shell \
 check tools/deny-userspace.toml userspace/programs compat/windows/pe compat/windows/win32 \
     compat/windows/samples compat/windows/samples/dll compat/windows/samples/plugin tools/xtask
 # The SDK: permissive all the way down (the system call interface aside).
-check tools/deny-sdk.toml userspace/rt libs/window libs/gfx libs/mm
+check tools/deny-sdk.toml userspace/rt libs/window libs/gfx libs/inet libs/mm

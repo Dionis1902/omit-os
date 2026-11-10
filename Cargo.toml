@@ -17,6 +17,7 @@ members = [
     "libs/gfx",
     "libs/gpt",
     "libs/hwdb",
+    "libs/inet",
     "libs/mm",
     "libs/net",
     "libs/term",
@@ -41,6 +42,7 @@ default-members = [
     "libs/gfx",
     "libs/gpt",
     "libs/hwdb",
+    "libs/inet",
     "libs/mm",
     "libs/net",
     "libs/term",
@@ -61,6 +63,7 @@ omit-abi = { path = "libs/abi" }
 omit-fat = { path = "libs/fat" }
 omit-gfx = { path = "libs/gfx" }
 omit-gpt = { path = "libs/gpt" }
+omit-inet = { path = "libs/inet" }
 omit-net = { path = "libs/net" }
 omit-pe = { path = "compat/windows/pe" }
 omit-window = { path = "libs/window" }

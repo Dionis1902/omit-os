@@ -93,6 +93,8 @@ pub enum Descriptor {
     Channel(pipe::Reader, pipe::Writer),
     /// A channel name being listened on.
     Listener(Arc<channel::Handle>),
+    /// A UDP socket.
+    Udp(Arc<crate::net::UdpSocket>),
 }
 
 /// The standard streams of a new process: input, output, error. `None`
