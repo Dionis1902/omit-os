@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft "PE Format" specification (Microsoft Learn). These are the
+//   behaviour tests of lib.rs, on images built here field by field.
 //! Tests against images assembled here byte by byte, so that each field
 //! can be corrupted individually.
 

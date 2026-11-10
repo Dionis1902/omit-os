@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Sources: an original test program; Microsoft Learn reference pages of the
+//   functions it calls. It is part of the behaviour tests of the Windows
+//   compatibility layer (QEMU tests windows-programs and desktop).
 //! Support code shared by the Windows test programs.
 //!
 //! These are real Windows programs: PE32+ console executables for the

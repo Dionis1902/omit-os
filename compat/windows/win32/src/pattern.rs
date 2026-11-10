@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft Learn "FindFirstFileA" (wildcards); the matching algorithm is
+//   our own. Behaviour tests: the unit tests below; wintest.exe.
 //! File name patterns, as `FindFirstFile` takes them.
 //!
 //! `*` stands for any run of characters, including none; `?` for exactly

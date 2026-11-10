@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft Learn "System Error Codes". Behaviour tests: the unit tests
+//   below; wintest.exe checks the codes programs see.
 //! Win32 error codes (the values `GetLastError` returns).
 
 use omit_abi::Errno;

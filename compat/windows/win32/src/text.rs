@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: The Unicode Standard (UTF-8, UTF-16); Microsoft Learn "Code Page
+//   Identifiers". Behaviour tests: the unit tests below; wintest.exe.
 //! Text conversion.
 //!
 //! Windows has two versions of every function that takes text: `...W`

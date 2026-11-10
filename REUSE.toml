@@ -9,7 +9,7 @@ version = 1
 
 # Documentation, including the top-level documents and the screenshots.
 [[annotations]]
-path = ["README.md", "COPYING", "CONTRIBUTING.md", "TRADEMARKS.md", "docs/**", "drivers/linux/README.md", "compat/linux-kpi/README.md"]
+path = ["README.md", "COPYING", "CONTRIBUTING.md", "TRADEMARKS.md", "IP_POLICY.md", "PROVENANCE.md", "docs/**", "drivers/linux/README.md", "compat/linux-kpi/README.md"]
 SPDX-FileCopyrightText = "2026 Omit OS contributors"
 SPDX-License-Identifier = "CC-BY-SA-4.0"
 

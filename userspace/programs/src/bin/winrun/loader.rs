@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft "PE Format" specification; Microsoft Learn "DllMain entry
+//   point" and "Dynamic-link library search order". Behaviour tests: windll.exe,
+//   winmissing.exe and the refusals in the QEMU test windows-programs.
 //! Loading Windows images — the program and the libraries (DLLs) it uses —
 //! into this process.
 //!

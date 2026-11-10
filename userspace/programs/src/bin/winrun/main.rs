@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft Learn "x64 calling convention" and "x64 ABI conventions";
+//   Microsoft "PE Format" specification. Behaviour tests: compat/windows/samples
+//   (QEMU tests windows-programs and desktop).
 //! `winrun` — runs a 64-bit Windows program.
 //!
 //! ```text

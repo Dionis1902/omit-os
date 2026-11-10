@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: MIT OR Apache-2.0
+// Sources: an original test program; Microsoft Learn reference pages of the
+//   functions it calls. It is part of the behaviour tests of the Windows
+//   compatibility layer (QEMU tests windows-programs and desktop).
 //! `winplugin.dll` — a Windows library that is not imported by any
 //! program but loaded on request with `LoadLibrary`, and that itself
 //! imports from another library, `winsample.dll`.

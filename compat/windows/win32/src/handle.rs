@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: original design; handle values are opaque to programs (Microsoft Learn
+//   "Handles and Objects"). Behaviour tests: the unit tests below.
 //! The handle table.
 //!
 //! Windows programs refer to open objects by `HANDLE` values. As on

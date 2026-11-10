@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft Learn "Naming Files, Paths, and Namespaces".
+//   Behaviour tests: the unit tests below; wintest.exe.
 //! Translation of Windows paths.
 //!
 //! Omit OS has a single directory tree, which Windows programs see as

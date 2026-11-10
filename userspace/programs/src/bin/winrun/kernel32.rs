@@ -1,5 +1,11 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: the Microsoft Learn reference page of each function implemented (named
+//   in its comment); "TEB structure", "PEB structure" and NT_TIB as published
+//   in the Windows SDK documentation. Four thread and process block fields
+//   (process and thread ID, last error, image base) are not on those pages;
+//   their offsets are layout facts of the x64 ABI — see IP_POLICY.md.
+//   Behaviour tests: wintest.exe, winthread.exe, windll.exe, winfloat.exe.
 //! The Windows API functions available to programs: a part of
 //! `KERNEL32.dll`.
 //!

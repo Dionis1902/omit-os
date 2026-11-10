@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft "PE Format" specification (Microsoft Learn).
+//   Behaviour tests: tests.rs in this crate (synthetic images, including damaged ones);
+//   compat/windows/samples (real executables; QEMU test windows-programs).
 //! PE32+ executables: the file format of 64-bit Windows programs.
 //!
 //! This crate reads an executable from a byte slice, validates it, and

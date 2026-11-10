@@ -47,7 +47,8 @@ Which licence applies where
       Cargo.toml files, Cargo.lock and other build configuration
 
   Documentation — CC-BY-SA-4.0
-      README.md, docs/, this file, CONTRIBUTING.md, TRADEMARKS.md
+      README.md, docs/, this file, CONTRIBUTING.md, TRADEMARKS.md,
+      IP_POLICY.md, PROVENANCE.md
 
   Third-party material keeps its own licence. The console and desktop
   font is Noto Sans Mono (SIL Open Font License 1.1), which comes in

@@ -1,5 +1,7 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: Microsoft Learn "CommandLineToArgvW" and "Parsing C++ command-line
+//   arguments". Behaviour tests: the unit tests below; wintest.exe.
 //! Windows command lines.
 //!
 //! A Windows program receives one string and splits it into arguments

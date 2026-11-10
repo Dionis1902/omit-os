@@ -3,7 +3,9 @@
 The files below are taken **unmodified** from the Linux kernel and compiled
 against the Omit OS LinuxKPI (`compat/linux-kpi/`). They keep their original
 copyright notices and licences. Do not edit them: fixes belong upstream or
-in the compatibility layer.
+in the compatibility layer. The project's manifest of imported code is
+[`PROVENANCE.md`](../../PROVENANCE.md); every file here must be listed
+there (CI checks it).
 
 | File | Upstream | Version | Licence | SHA-256 |
 | --- | --- | --- | --- | --- |

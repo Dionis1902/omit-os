@@ -14,6 +14,24 @@ in short, that you wrote the change or otherwise have the right to
 submit it under the licence of the files it touches. CI rejects commits
 without a sign-off that matches the commit's author.
 
+## Keep the code clean
+
+The full rules are in [`IP_POLICY.md`](IP_POLICY.md). In short:
+
+- Windows compatibility is written only from public documentation and
+  the observed behaviour of test programs — never from leaked,
+  shared-source or decompiled Microsoft code, and not by copying Wine or
+  ReactOS.
+- Every source file of the Windows compatibility code starts with a
+  `Sources:` comment, and its behaviour is pinned by tests that run
+  real programs.
+- Imported Linux code stays unmodified in `drivers/linux/`, with its
+  upstream notices, and is listed in [`PROVENANCE.md`](PROVENANCE.md).
+- No large blocks recalled from other codebases; commit messages say
+  what the human maintainer decided or changed.
+- Assets are original or openly licensed; nothing is extracted from
+  other systems, and no proprietary fonts are bundled.
+
 ## One repository, several licences
 
 `COPYING` says which licence applies to which directory. When you add or
@@ -87,6 +105,10 @@ python3 tools/check-licenses.py
 
 ```bash
 sh tools/check-deps.sh
+```
+
+```bash
+python3 tools/check-ip.py
 ```
 
 `reuse` is installed with `pip install reuse`, cargo-deny with

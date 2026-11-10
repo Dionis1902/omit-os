@@ -1,5 +1,8 @@
 // SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-3.0-or-later
+// Sources: the Microsoft Learn reference page of each USER32 and GDI32 function
+//   implemented (named in its comment) and "About Messages and Message
+//   Queues". Behaviour tests: wingui.exe (QEMU test desktop).
 //! Windows for Windows programs: a small part of `USER32.dll` and
 //! `GDI32.dll`.
 //!
