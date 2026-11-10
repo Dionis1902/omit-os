@@ -542,10 +542,10 @@ mod tests {
 
     #[test]
     fn user_layout_is_sane() {
-        assert!(USER_MIN < USER_MAX);
+        const { assert!(USER_MIN < USER_MAX) };
         assert_eq!(USER_STACK_TOP % 16, 0);
         assert_eq!(USER_STACK_SIZE % 4096, 0);
         // Canonical lower-half addresses only.
-        assert!(USER_MAX <= 0x0000_8000_0000_0000);
+        const { assert!(USER_MAX <= 0x0000_8000_0000_0000) };
     }
 }
