@@ -3234,7 +3234,12 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                 .all(|&(x, y)| image.pixel(x as usize, y as usize) == rgb(theme.accent))
             })
         };
-        monitor_command(&check.monitor, "sendkey alt-tab 6000")?;
+        const HELD: Duration = Duration::from_secs(6);
+        let pressed = Instant::now();
+        monitor_command(
+            &check.monitor,
+            &format!("sendkey alt-tab {}", HELD.as_millis()),
+        )?;
         wait_for_screen(check, "the window switcher", patience, |image| {
             outlined(image)
         })?;
@@ -3243,9 +3248,18 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
             &check.screenshot,
             check.screenshot.with_extension("switcher.ppm"),
         );
-        wait_for_screen(check, "the switcher put away", patience, |image| {
-            !outlined(image)
-        })?;
+        // While the keys are held, a keyboard that repeats Tab keeps the
+        // switcher moving from tile to tile, and a screenshot can catch
+        // it between two of them, with none outlined. So that it is put
+        // away is only looked for once the keys have been let go, and
+        // must then stay so.
+        thread::sleep((HELD + Duration::from_millis(500)).saturating_sub(pressed.elapsed()));
+        for _ in 0..2 {
+            wait_for_screen(check, "the switcher put away", patience, |image| {
+                !outlined(image)
+            })?;
+            thread::sleep(Duration::from_millis(400));
+        }
     }
 
     // Notes: a new note, two lines typed, saved with Ctrl+S. (What is
