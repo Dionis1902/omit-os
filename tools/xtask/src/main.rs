@@ -182,6 +182,7 @@ const USER_PROGRAMS: &[&str] = &[
     "ipctest",
     "ls",
     "memtest",
+    "nettest",
     "pipetest",
     "pop",
     "run",
@@ -761,7 +762,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nhost\nipctest\nls\nmemtest\nnettest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\ntftp\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -1703,6 +1704,9 @@ const BOOT_TESTS: &[BootTest] = &[
                 "\nhost: test.omit.example: no answer from 10.0.2.2\n",
             ),
             ("host 10.0.2.2", "\n10.0.2.2 is an address already\n"),
+            // The socket system calls themselves, including what they
+            // must refuse.
+            ("nettest 10.0.2.2 15353", "\nnettest: all checks passed\n"),
         ],
         reboot_script: &[],
         ends_with_reset: false,
