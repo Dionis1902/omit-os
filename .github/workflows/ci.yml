@@ -71,8 +71,10 @@ jobs:
         run: |
           cargo xtask test --release --accel kvm --cpu host
           grep -a "irq:\|time:\|cpu:" target/omit/release/test-boot.serial.log
-      - name: Build release disk image
-        run: cargo xtask image --release
+      - name: Boot tests (release, from ISO)
+        run: cargo xtask test --release --iso
+      - name: Build release artifacts (disk image and ISO)
+        run: cargo xtask dist
       - name: Upload serial logs and disk image
         if: always()
         uses: actions/upload-artifact@v4
@@ -80,5 +82,5 @@ jobs:
           name: omit-os-${{ github.sha }}
           path: |
             target/omit/**/*.serial.log
-            target/omit/release/omit-os.img
+            target/omit/dist/
           if-no-files-found: warn

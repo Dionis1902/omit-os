@@ -6,6 +6,7 @@
 //! host tools other than Cargo and QEMU. Run `cargo xtask help` for usage.
 
 mod gpt;
+mod iso;
 
 use std::error::Error;
 use std::fs;
@@ -26,7 +27,8 @@ USAGE:
 
 COMMANDS:
     build    Build the boot loader and the kernel
-    image    Build a bootable UEFI disk image
+    image    Build a bootable UEFI disk image (with --iso: an ISO image)
+    dist     Build the release artifacts (disk image and ISO) in target/omit/dist
     run      Build and boot the image in QEMU (serial console on stdio)
     test     Build and run the QEMU integration tests
     help     Show this message
@@ -37,6 +39,7 @@ OPTIONS:
     --cpu <MODEL>       QEMU CPU model (run, test) [default: max]
     --memory <SIZE>     QEMU guest memory (run, test) [default: 256M]
     --accel <NAME>      QEMU accelerator, e.g. kvm (run, test) [default: tcg]
+    --iso               Use a bootable ISO instead of a disk image (image, run, test)
     --gdb               Start QEMU paused with a GDB server on :1234 (run)
 
 ENVIRONMENT:
@@ -64,6 +67,8 @@ struct Options {
     cpu: Option<String>,
     memory: Option<String>,
     accel: Option<String>,
+    /// Boot from the ISO image instead of the disk image.
+    iso: bool,
 }
 
 impl Options {
@@ -79,6 +84,7 @@ impl Options {
             match arg.as_str() {
                 "--release" => options.release = true,
                 "--gdb" => options.gdb = true,
+                "--iso" => options.iso = true,
                 "--cmdline" => options.cmdline = value("--cmdline")?,
                 "--cpu" => options.cpu = Some(value("--cpu")?),
                 "--memory" => options.memory = Some(value("--memory")?),
@@ -147,52 +153,84 @@ fn build(options: &Options) -> Result<Artifacts> {
     })
 }
 
-/// Builds a GPT disk image whose EFI System Partition contains the loader,
-/// the kernel and (if non-empty) the kernel command line.
-///
-/// The image is reproducible: partition and volume identifiers are fixed and
-/// no timestamps are recorded.
-fn build_image(artifacts: &Artifacts, cmdline: &str, path: &Path) -> Result<()> {
+/// Size of the FAT boot image embedded in the ISO.
+const ISO_BOOT_IMAGE_SIZE: usize = 24 << 20;
+
+/// Text of the `README.TXT` placed on the ISO.
+const ISO_README: &str = "\
+Omit OS live image.
+
+This disc boots on x86-64 machines with UEFI firmware (Secure Boot off).
+It runs entirely from memory: nothing is installed and nothing on the
+machine is modified. See https://github.com/dionis1902/omit-os
+";
+
+/// Formats `volume` as FAT and fills it with the EFI system partition
+/// contents: the loader, the kernel and (if non-empty) the kernel command
+/// line. Volume identifiers are fixed and no timestamps are recorded, so
+/// the result is reproducible.
+fn write_esp(
+    volume: &mut [u8],
+    fat_type: Option<fatfs::FatType>,
+    artifacts: &Artifacts,
+    cmdline: &str,
+) -> Result<()> {
     if !cmdline.is_ascii() || cmdline.len() > 1024 {
         return Err("kernel command line must be ASCII and at most 1024 bytes".into());
     }
+    let mut volume = Cursor::new(volume);
+    let mut format = fatfs::FormatVolumeOptions::new()
+        .volume_id(0x4F4D_4954) // "OMIT"
+        .volume_label(*b"OMIT OS    ");
+    if let Some(fat_type) = fat_type {
+        format = format.fat_type(fat_type);
+    }
+    fatfs::format_volume(&mut volume, format)?;
 
+    let fs = fatfs::FileSystem::new(&mut volume, fatfs::FsOptions::new())?;
+    let root = fs.root_dir();
+    let efi = root.create_dir("EFI")?;
+    let boot = efi.create_dir("BOOT")?;
+    let omit = efi.create_dir("OMIT")?;
+
+    let put = |dir: &fatfs::Dir<'_, _>, name: &str, data: &[u8]| -> Result<()> {
+        let mut file = dir.create_file(name)?;
+        file.truncate()?;
+        file.write_all(data)?;
+        Ok(())
+    };
+    // The removable-media default path: firmware boots it with no
+    // boot-manager configuration.
+    put(&boot, "BOOTX64.EFI", &fs::read(&artifacts.loader)?)?;
+    put(&omit, "KERNEL.ELF", &fs::read(&artifacts.kernel)?)?;
+    if !cmdline.is_empty() {
+        put(&omit, "CMDLINE", cmdline.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Builds a GPT disk image with a FAT32 EFI System Partition. This is the
+/// image to write to a USB stick or attach as a hard disk.
+fn build_image(artifacts: &Artifacts, cmdline: &str, path: &Path) -> Result<()> {
     let mut disk = vec![0u8; IMAGE_SIZE as usize];
     gpt::write_partition_table(&mut disk);
     let esp = gpt::esp_extent(IMAGE_SIZE);
-    let esp_bytes = &mut disk[esp.offset as usize..(esp.offset + esp.size) as usize];
-
-    let mut volume = Cursor::new(esp_bytes);
-    fatfs::format_volume(
-        &mut volume,
-        fatfs::FormatVolumeOptions::new()
-            .fat_type(fatfs::FatType::Fat32)
-            .volume_id(0x4F4D_4954) // "OMIT"
-            .volume_label(*b"OMIT OS    "),
+    write_esp(
+        &mut disk[esp.offset as usize..(esp.offset + esp.size) as usize],
+        Some(fatfs::FatType::Fat32),
+        artifacts,
+        cmdline,
     )?;
-    {
-        let fs = fatfs::FileSystem::new(&mut volume, fatfs::FsOptions::new())?;
-        let root = fs.root_dir();
-        let efi = root.create_dir("EFI")?;
-        let boot = efi.create_dir("BOOT")?;
-        let omit = efi.create_dir("OMIT")?;
-
-        let put = |dir: &fatfs::Dir<'_, _>, name: &str, data: &[u8]| -> Result<()> {
-            let mut file = dir.create_file(name)?;
-            file.truncate()?;
-            file.write_all(data)?;
-            Ok(())
-        };
-        // The removable-media default path: firmware boots it with no
-        // boot-manager configuration.
-        put(&boot, "BOOTX64.EFI", &fs::read(&artifacts.loader)?)?;
-        put(&omit, "KERNEL.ELF", &fs::read(&artifacts.kernel)?)?;
-        if !cmdline.is_empty() {
-            put(&omit, "CMDLINE", cmdline.as_bytes())?;
-        }
-    }
-
     fs::write(path, &disk)?;
+    Ok(())
+}
+
+/// Builds a UEFI-bootable ISO 9660 image (El Torito, EFI platform) for
+/// optical media and virtual machines.
+fn build_iso(artifacts: &Artifacts, cmdline: &str, path: &Path) -> Result<()> {
+    let mut boot_image = vec![0u8; ISO_BOOT_IMAGE_SIZE];
+    write_esp(&mut boot_image, None, artifacts, cmdline)?;
+    fs::write(path, iso::build(&boot_image, "OMIT_OS", ISO_README))?;
     Ok(())
 }
 
@@ -250,6 +288,14 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
 ///
 /// `vars` is a private, writable copy of the firmware variable store.
 fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command> {
+    let media = if options.iso {
+        format!(
+            "format=raw,media=cdrom,readonly=on,file={}",
+            image.display()
+        )
+    } else {
+        format!("format=raw,file={}", image.display())
+    };
     let (code, vars_template) = find_ovmf()?;
     fs::copy(vars_template, vars)?;
 
@@ -271,7 +317,7 @@ fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command>
             vars.display()
         ))
         .arg("-drive")
-        .arg(format!("format=raw,file={}", image.display()))
+        .arg(media)
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
@@ -281,11 +327,47 @@ fn qemu_command(image: &Path, vars: &Path, options: &Options) -> Result<Command>
     Ok(command)
 }
 
+/// Builds the boot medium selected by `options` (disk image, or ISO with
+/// `--iso`) at `path`.
+fn build_media(artifacts: &Artifacts, cmdline: &str, path: &Path, options: &Options) -> Result<()> {
+    if options.iso {
+        build_iso(artifacts, cmdline, path)
+    } else {
+        build_image(artifacts, cmdline, path)
+    }
+}
+
 fn cmd_image(options: &Options) -> Result<PathBuf> {
     let artifacts = build(options)?;
-    let image = out_dir(options)?.join("omit-os.img");
-    build_image(&artifacts, &options.cmdline, &image)?;
+    let name = if options.iso {
+        "omit-os.iso"
+    } else {
+        "omit-os.img"
+    };
+    let image = out_dir(options)?.join(name);
+    build_media(&artifacts, &options.cmdline, &image, options)?;
     Ok(image)
+}
+
+/// Builds the release artifacts: disk image and ISO, named after the
+/// version and architecture, in `target/omit/dist/`.
+fn cmd_dist(options: &Options) -> Result<()> {
+    let options = Options {
+        release: true,
+        cmdline: options.cmdline.clone(),
+        ..Options::default()
+    };
+    let artifacts = build(&options)?;
+    let dir = workspace_root().join("target/omit/dist");
+    fs::create_dir_all(&dir)?;
+    let stem = format!("omit-os-{}-x86_64", env!("CARGO_PKG_VERSION"));
+    let image = dir.join(format!("{stem}.img"));
+    let iso = dir.join(format!("{stem}.iso"));
+    build_image(&artifacts, &options.cmdline, &image)?;
+    build_iso(&artifacts, &options.cmdline, &iso)?;
+    println!("{}", image.display());
+    println!("{}", iso.display());
+    Ok(())
 }
 
 fn cmd_run(options: &Options) -> Result<ExitCode> {
@@ -598,7 +680,7 @@ fn run_boot_test(
         ""
     };
     let cmdline = format!("qemu-exit {shell}{}", test.cmdline);
-    build_image(artifacts, cmdline.trim(), &image)?;
+    build_media(artifacts, cmdline.trim(), &image, options)?;
     let mut failures = Vec::new();
     let run = run_qemu_captured(
         qemu_command(&image, &vars, options)?,
@@ -700,6 +782,7 @@ fn main() -> ExitCode {
             println!("{}", image.display());
             ExitCode::SUCCESS
         }),
+        "dist" => cmd_dist(&options).map(|()| ExitCode::SUCCESS),
         "run" => cmd_run(&options),
         "test" => cmd_test(&options),
         "help" | "--help" | "-h" => {

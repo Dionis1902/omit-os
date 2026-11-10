@@ -1,0 +1,78 @@
+name: Release
+
+# Publishes a GitHub release with a bootable disk image and ISO.
+#
+# Triggered by pushing a tag `vX.Y.Z` that matches the workspace version in
+# Cargo.toml, or manually (which builds the artifacts without publishing).
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Build, test and publish
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install QEMU and OVMF
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+
+      - name: Determine version
+        id: version
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "omit-kernel"))')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_REF_TYPE" = "tag" ] && [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo version $version"
+            exit 1
+          fi
+
+      # A release is only published if the exact binaries being shipped pass
+      # the test suite, booted from both kinds of media.
+      - name: Host unit tests
+        run: cargo test --locked
+      - name: Boot tests (release, disk image)
+        run: cargo xtask test --release
+      - name: Boot tests (release, ISO)
+        run: cargo xtask test --release --iso
+
+      - name: Build release artifacts
+        run: |
+          cargo xtask dist
+          cd target/omit/dist
+          sha256sum omit-os-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: omit-os-${{ steps.version.outputs.version }}
+          path: target/omit/dist/
+          if-no-files-found: error
+
+      - name: Publish GitHub release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --title "Omit OS $VERSION" \
+            --notes-file docs/RELEASE_NOTES.md \
+            --prerelease \
+            target/omit/dist/omit-os-"$VERSION"-x86_64.img \
+            target/omit/dist/omit-os-"$VERSION"-x86_64.iso \
+            target/omit/dist/SHA256SUMS
