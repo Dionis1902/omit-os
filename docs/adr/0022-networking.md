@@ -30,6 +30,11 @@ covers the first step and says where it stops.
   VirtIO block driver — finding the register blocks, feature
   negotiation, split virtqueues — moved into
   `kernel/src/drivers/virtio.rs`, and the block driver now uses them.
+  A second driver came later: Intel's 82540EM and 82545EM ("e1000",
+  `kernel/src/drivers/e1000.rs`), written from Intel's software
+  developer's manual for the 8254x family, because it is the card
+  other virtual machines offer by default and QEMU can emulate it. It
+  is used when there is no VirtIO card.
 - **Polling, like every other driver so far.** A kernel thread looks
   for received frames at every timer tick (100 Hz); a thread waiting
   for an answer looks continuously while it waits, which is why `ping`
@@ -154,5 +159,7 @@ covers the first step and says where it stops.
   guest no requests. Neither `host` nor `fetch` has been run against a
   real server on the internet from here: the build environment has no
   outside network. TCP has only ever talked to QEMU's built-in network
-  and, in host tests, to itself. Real network cards (Intel, Realtek, wireless) have
-  no driver.
+  and, in host tests, to itself. The Intel driver, too, has met only
+  QEMU's emulation of the card — not a real card, and not the cards
+  VirtualBox and VMware emulate under the same name. Other network
+  cards (newer Intel, Realtek, wireless) have no driver.

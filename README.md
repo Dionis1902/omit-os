@@ -36,7 +36,7 @@ use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
 It can install itself onto a SATA, NVMe or VirtIO disk — tested only in
-virtual machines so far. With a VirtIO network card it gets an address by
+virtual machines so far. With a VirtIO or Intel e1000 network card it gets an address by
 DHCP, can `ping`, and programs can use UDP and TCP (there are a name
 lookup tool and TFTP and HTTP download tools, the latter also over TLS — with unaudited cryptography, see ADR 0025). See [Status](#status) for exactly what exists, how
 narrow each of those is, and what has been tested.
@@ -299,7 +299,7 @@ machine.
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
 | AHCI driver for SATA disks (first controller, ATA disks with 48-bit addressing and 512-byte sectors, polling, one 4 KiB command at a time; disks named by port: `sda` is port 0) | Working against QEMU's emulated controller; **never run on real hardware**. No CD/DVD drives. See ADR 0020 |
 | NVMe driver (first controller, namespace 1, 512-byte sectors, polling, one 4 KiB command at a time) | Working against QEMU's emulated controller; **never run on a real NVMe disk**. See ADR 0017 |
-| Networking, first steps: VirtIO network card driver (polling), ARP, IPv4, an address by DHCP, answering and sending echo requests (`ifconfig`, `ping`) | Working in QEMU: the test gets an address from QEMU's DHCP server and pings the gateway; protocol logic host-tested. No driver for a real network card. See ADR 0022 |
+| Networking, first steps: drivers for the VirtIO network card and for Intel's 82540EM/82545EM ("e1000", written from Intel's manual), both polling; ARP, IPv4, an address by DHCP, answering and sending echo requests (`ifconfig`, `ping`) | Working in QEMU: the test gets an address from QEMU's DHCP server and pings the gateway; protocol logic host-tested. No driver for a real network card. See ADR 0022 |
 | TCP for programs (`tcp_connect`, `tcp_listen`, `tcp_accept`; connections are read, written and polled like files); `fetch` downloads over HTTP, `echod` is an echo server | Working in QEMU: downloads from a web server run by the test are compared byte for byte, and the host exchanges 20 000 bytes with a server in the guest. The protocol is host-tested against a simulated network that loses, duplicates and reorders. **A small, slow TCP: no congestion control, no window scaling** |
 | TLS 1.3 for programs (`omit-tls`: rustls with the pure-Rust RustCrypto provider; Mozilla's list of authorities, or one's own with `fetch --trust FILE`); `fetch` takes `https://` addresses; kernel random numbers (`random`) | Working in QEMU against a TLS server run by the test: downloads compared byte for byte, and refusals of an unknown authority, a cut connection and a server without TLS; the client is host-tested against a real TLS server (wrong name, expired, not yet valid). **The cryptography provider is an early, unaudited release; no revocation checks; no TLS 1.2; never tried against a server on the Internet.** See ADR 0024 and ADR 0025 |
 | UDP sockets for programs (`udp_bind`, `udp_send`, `udp_receive`, `net_info`; usable with `poll`); `tftp` fetches files, `host` looks names up | Working in QEMU: files fetched from QEMU's TFTP server and compared, names asked of a name server run by the test, and `/bin/nettest` checks the system calls and their refusals. IPv4 only; name lookup is a separate program, so other commands take addresses only |
@@ -381,8 +381,10 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   under emulation.
 - Keyboards (US layout) and mice: PS/2, or USB on an xHCI controller;
   USB is untested outside QEMU.
-- Networking works on a VirtIO network card only — there is no driver
-  for any real network card. Programs have UDP and a small TCP (no
+- Networking works on a VirtIO network card and on two Intel cards
+  (82540EM, 82545EM) — and both drivers have met only QEMU's emulation
+  of those cards, never a real one, nor VirtualBox's or VMware's
+  versions of them. Programs have UDP and a small TCP (no
   congestion control, so unsuited to anything but a local network),
   and TLS 1.3 for `https://` addresses in `fetch`, on a cryptography
   library that has **not been audited**, compiled without vector
@@ -554,7 +556,8 @@ checks both QEMU's exit status and the serial log:
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
 | `install-to-sata` | The same on a SATA disk, with the native AHCI driver |
 | `install-to-nvme` | The native NVMe driver: install onto an emulated NVMe disk, write files (including one large enough to span many commands), restart from the NVMe disk alone, compare the files; the disk is then verified on the host like the VirtIO one |
-| `network` | A VirtIO network card on QEMU's built-in network: an address, router and name server by DHCP; `ping` to the gateway (found by ARP) gets its replies; an address nobody has is reported unreachable. Programs then use UDP sockets: `tftp` fetches files from QEMU's TFTP server (one is compared with the system's copy, one is run), `host` asks a name server run by the test; `fetch` downloads over TCP from a web server run by the test; the host sends data through `echod` in the guest and gets it back; `nettest` checks the socket system calls |
+| `network` | A VirtIO network card on QEMU's built-in network: an address, router and name server by DHCP; `ping` to the gateway (found by ARP) gets its replies; an address nobody has is reported unreachable. Programs then use UDP sockets: `tftp` fetches files from QEMU's TFTP server (one is compared with the system's copy, one is run), `host` asks a name server run by the test; `fetch` downloads over TCP from a web server run by the test; the host sends data through `echod` in the guest and gets it back; `nettest` checks the socket system calls; the same web server again behind TLS, with a megabyte and a 6 MiB file fetched and compared, and four kinds of refusal |
+| `network-e1000`, `network-e1000-82545em` | The same network through the Intel driver, on each of the two card models it claims: address by DHCP, `ping`, a megabyte fetched over TFTP, HTTP and TLS and compared, the echo server |
 | `linux-driver-watchdog-expiry` | The same driver, started and never pinged: the emulated hardware must reset the machine |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |

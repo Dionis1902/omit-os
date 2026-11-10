@@ -4,6 +4,7 @@
 
 pub mod ahci;
 pub mod block;
+pub mod e1000;
 pub mod nvme;
 pub mod registry;
 pub mod virtio;

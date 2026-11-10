@@ -96,7 +96,7 @@ winrun --list        the Windows functions that are implemented
 ls /bin | tee /list  a pipeline (programs only; see `help`)
 lspci                hardware, with driver status
 lsblk                disks and partitions
-ifconfig             the network interface (VirtIO network cards only)
+ifconfig             the network interface (VirtIO or Intel e1000 card)
 ping 10.0.2.2        echo requests to an IPv4 address
 host example.org     look a name up (needs a network that reaches a name
                      server)
@@ -125,7 +125,9 @@ for it; existing Windows software does not run.
 
 Networking is a first step too: with a VirtIO network card (QEMU:
 `-netdev user,id=n -device virtio-net-pci,netdev=n`; VirtualBox: adapter
-type "Paravirtualized Network (virtio-net)") the system gets an address by
+type "Paravirtualized Network (virtio-net)") or an Intel 82540EM or
+82545EM ("e1000": QEMU's `-device e1000`; the default adapter of
+VirtualBox and of VMware, where it has not been tried) the system gets an address by
 DHCP; `ifconfig` and `ping` work, and programs can use UDP: `host` looks
 names up and `tftp` fetches files (QEMU has a TFTP server built in:
 `-netdev user,id=n,tftp=DIRECTORY`), and TCP: `fetch` downloads from
@@ -134,7 +136,8 @@ the rustls library with a cryptography provider that has **not been
 audited**; it does not learn of revoked certificates, and it has been
 tested only against a test server, never one on the Internet — treat it
 as a way to reach today's web, not as protection for anything that
-matters. No other network card has a driver. Only QEMU has been tried.
+matters. No other network card has a driver, and neither driver has
+met anything but QEMU's emulation of its card.
 
 On a real computer: the keyboard must be PS/2 (as built into many
 laptops) or USB. A serial port is not needed.

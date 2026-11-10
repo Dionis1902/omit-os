@@ -47,6 +47,10 @@ OPTIONS:
 ENVIRONMENT:
     QEMU                 QEMU binary [default: qemu-system-x86_64]
     OVMF_CODE, OVMF_VARS UEFI firmware images (auto-detected if unset)
+    OMIT_TEST_PORT_OFFSET
+                         Added to every port on this machine that the
+                         network tests use, so that two runs do not
+                         collide [default: 0]
     OMIT_TEST_TIMEOUT    Per-test timeout in seconds [default: 120]
                          (the desktop tests get three times as long)
 ";
@@ -672,10 +676,12 @@ struct BootTest {
     /// the console to appear on the screen, types `exit` on the keyboard
     /// and expects the kernel to report success. Requires `display`.
     no_serial: bool,
-    /// Attach a VirtIO network card on QEMU's built-in user-mode network,
-    /// with a TFTP server (see [`prepare_tftp_files`]) and, on the host,
-    /// a name server for the test to ask (see [`start_test_name_server`]).
-    network: bool,
+    /// Attach a network card of this QEMU model on QEMU's built-in
+    /// user-mode network, with a TFTP server (see [`prepare_tftp_files`])
+    /// and, on the host, a name server, two web servers and an echo
+    /// client for the test (see [`start_test_name_server`] and what
+    /// follows it).
+    network: Option<&'static str>,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -713,7 +719,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "shell-session",
@@ -900,7 +906,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -922,7 +928,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // The clocks measured against the ACPI power-management timer, as on
     // a machine whose legacy timer is switched off; here that timer
@@ -953,7 +959,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // A machine without a serial port, like most current ones: the
     // kernel must come up on screen and keyboard alone. With no serial
@@ -975,7 +981,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: true,
-        network: false,
+        network: None,
     },
     // The same with a USB keyboard on an xHCI controller, and the PS/2
     // devices switched off, so the typed line can only have come by USB.
@@ -1004,7 +1010,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // The same keyboard behind a hub, and a mouse behind a second hub
     // plugged into the first.
@@ -1041,7 +1047,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // And the whole desktop scenario — pointer movement, clicks, drags,
     // typing — with USB mouse and keyboard only.
@@ -1065,7 +1071,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "desktop",
@@ -1087,7 +1093,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "disk-persistence",
@@ -1149,7 +1155,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // The installer: the system writes itself to the VirtIO disk, the
     // machine is restarted without the boot medium, and must come up from
@@ -1214,7 +1220,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // The same on an NVMe disk, the kind most current machines have: the
     // native NVMe driver, installation, and booting from the result with
@@ -1266,7 +1272,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: true,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // And on a SATA disk, the kind virtual machines offer by default.
     // (When the test boots from a disk image, that image is a SATA disk
@@ -1319,7 +1325,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: true,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "windows-programs",
@@ -1430,7 +1436,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1516,7 +1522,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1545,7 +1551,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1609,7 +1615,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     // A VirtIO network card on QEMU's built-in user-mode network, which
     // has a DHCP server and a gateway at 10.0.2.2 that answers echo
@@ -1843,7 +1849,123 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: true,
+        network: Some("virtio-net-pci"),
+    },
+    // The same network through the other driver: an Intel card instead
+    // of the VirtIO one. A shorter script: what differs is the driver,
+    // so what matters is frames in both directions, many of them, and
+    // large ones.
+    BootTest {
+        name: "network-e1000",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] e1000: 52:54:00:12:34:56 is eth0",
+            "[INFO ] net: eth0: address 10.0.2.15/24, router 10.0.2.2, name server 10.0.2.3 (DHCP)",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("lsdrv", "native     e1000\n"),
+            (
+                "lspci",
+                " 8086:100e Intel 82540EM Gigabit Ethernet [native driver: e1000]\n",
+            ),
+            (
+                "ifconfig",
+                "\neth0: e1000, hardware address 52:54:00:12:34:56\n    address 10.0.2.15/24, router 10.0.2.2, name server 10.0.2.3\n    frames: ",
+            ),
+            ("ping 10.0.2.2", "\n3 sent, 3 received\n"),
+            (
+                "ping 10.0.2.99 1",
+                "\n1 sent, 0 received\nping: no answer from 10.0.2.99\n",
+            ),
+            // A megabyte in over a thousand frames, several times round
+            // the receive ring; and the same again inside TLS.
+            (
+                "tftp 10.0.2.2 desktop /desktop.copy",
+                " bytes from 10.0.2.2, stored as /desktop.copy\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.copy",
+                "cmp /bin/desktop /desktop.copy\nomit:/# ",
+            ),
+            (
+                "fetch http://10.0.2.2:18080/desktop /desktop.http",
+                " bytes, stored as /desktop.http\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.http",
+                "cmp /bin/desktop /desktop.http\nomit:/# ",
+            ),
+            (
+                "tftp 10.0.2.2 ca.pem /ca.pem",
+                " bytes from 10.0.2.2, stored as /ca.pem\n",
+            ),
+            (
+                "fetch --trust /ca.pem https://10.0.2.2:18443/desktop /desktop.https",
+                " bytes, stored as /desktop.https\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.https",
+                "cmp /bin/desktop /desktop.https\nomit:/# ",
+            ),
+            (
+                "host test.omit.example 10.0.2.2:15353",
+                "\ntest.omit.example has address 192.0.2.7\n",
+            ),
+            // The other direction: the host sends 20 000 bytes through
+            // an echo server in the guest.
+            ("echod 7 1", "\nechod: echoed 20000 bytes for 10.0.2.2\n"),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: false,
+        network: Some("e1000"),
+    },
+    // The driver's other card: the 82545EM.
+    BootTest {
+        name: "network-e1000-82545em",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] e1000: 52:54:00:12:34:56 is eth0",
+            "[INFO ] net: eth0: address 10.0.2.15/24, router 10.0.2.2, name server 10.0.2.3 (DHCP)",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            (
+                "lspci",
+                " 8086:100f Intel 82545EM Gigabit Ethernet [native driver: e1000]\n",
+            ),
+            ("ping 10.0.2.2", "\n3 sent, 3 received\n"),
+            (
+                "fetch http://10.0.2.2:18080/desktop /desktop.http",
+                " bytes, stored as /desktop.http\n",
+            ),
+            (
+                "cmp /bin/desktop /desktop.http",
+                "cmp /bin/desktop /desktop.http\nomit:/# ",
+            ),
+            ("echod 7 1", "\nechod: echoed 20000 bytes for 10.0.2.2\n"),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: false,
+        network: Some("e1000-82545em"),
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1870,7 +1992,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1894,7 +2016,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1916,7 +2038,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1938,7 +2060,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1959,7 +2081,7 @@ const BOOT_TESTS: &[BootTest] = &[
         nvme: false,
         sata: false,
         no_serial: false,
-        network: false,
+        network: None,
     },
 ];
 
@@ -3605,6 +3727,47 @@ fn prepare_tftp_files(dir: &Path, options: &Options) -> Result<PathBuf> {
 /// `network` test asks.
 const TEST_NAME_SERVER_PORT: u16 = 15353;
 
+/// Every port on the host that the `network` tests use or name, as the
+/// tests are written. Each can be moved by the same amount with the
+/// environment variable `OMIT_TEST_PORT_OFFSET`, so that two runs on
+/// one machine do not take each other's ports.
+const TEST_PORTS: [u16; 6] = [
+    TEST_NAME_SERVER_PORT,
+    // Where the tests expect nobody: a name server and a web server
+    // that are not there.
+    TEST_NAME_SERVER_PORT + 1,
+    TEST_WEB_SERVER_PORT,
+    TEST_WEB_SERVER_PORT + 1,
+    TEST_SECURE_WEB_SERVER_PORT,
+    TEST_ECHO_HOST_PORT,
+];
+
+/// The amount by which this run's ports are moved.
+fn test_port_offset() -> u16 {
+    std::env::var("OMIT_TEST_PORT_OFFSET")
+        .ok()
+        .and_then(|text| text.parse().ok())
+        .unwrap_or(0)
+}
+
+/// The port this run uses for `port` of the tests as written.
+fn test_port(port: u16) -> u16 {
+    port + test_port_offset()
+}
+
+/// `text` (a command of a test, or what it expects) with the tests'
+/// port numbers replaced by this run's.
+fn with_test_ports(text: &str) -> String {
+    let offset = test_port_offset();
+    let mut text = text.to_string();
+    if offset != 0 {
+        for port in TEST_PORTS {
+            text = text.replace(&port.to_string(), &(port + offset).to_string());
+        }
+    }
+    text
+}
+
 /// Starts, once, a name server that knows one name: `test.omit.example`
 /// is 192.0.2.7; any other name does not exist. It runs until xtask
 /// exits.
@@ -3615,8 +3778,9 @@ fn start_test_name_server() -> Result<()> {
     if STARTED.get().is_some() {
         return Ok(());
     }
-    let socket = UdpSocket::bind(("127.0.0.1", TEST_NAME_SERVER_PORT)).map_err(|error| {
-        format!("cannot listen on UDP port {TEST_NAME_SERVER_PORT} for the network test: {error}")
+    let port = test_port(TEST_NAME_SERVER_PORT);
+    let socket = UdpSocket::bind(("127.0.0.1", port)).map_err(|error| {
+        format!("cannot listen on UDP port {port} for the network test: {error}")
     })?;
     let _ = STARTED.set(());
     std::thread::spawn(move || {
@@ -3672,8 +3836,9 @@ fn start_test_web_server(files: &Path) -> Result<()> {
     if STARTED.get().is_some() {
         return Ok(());
     }
-    let listener = TcpListener::bind(("127.0.0.1", TEST_WEB_SERVER_PORT)).map_err(|error| {
-        format!("cannot listen on TCP port {TEST_WEB_SERVER_PORT} for the network test: {error}")
+    let port = test_port(TEST_WEB_SERVER_PORT);
+    let listener = TcpListener::bind(("127.0.0.1", port)).map_err(|error| {
+        format!("cannot listen on TCP port {port} for the network test: {error}")
     })?;
     let _ = STARTED.set(());
     thread::spawn(move || {
@@ -3741,7 +3906,7 @@ fn answer_web_request(stream: &mut (impl Read + Write)) -> Option<String> {
                     "/short" => {
                         b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nonly this".to_vec()
                     }
-                    "/moved" => b"HTTP/1.1 301 Moved Permanently\r\nLocation: http://10.0.2.2:18080/hello.txt\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                    "/moved" => with_test_ports("HTTP/1.1 301 Moved Permanently\r\nLocation: http://10.0.2.2:18080/hello.txt\r\nContent-Length: 0\r\n\r\n").into_bytes(),
                     _ => with_length("404 Not Found", b"not here\n"),
                 };
                 let _ = stream.write_all(&response);
@@ -3886,10 +4051,11 @@ fn start_test_secure_web_server(papers: &Path) -> Result<()> {
     if STARTED.get().is_some() {
         return Ok(());
     }
-    let listener =
-        TcpListener::bind(("127.0.0.1", TEST_SECURE_WEB_SERVER_PORT)).map_err(|error| {
+    let listener = TcpListener::bind(("127.0.0.1", test_port(TEST_SECURE_WEB_SERVER_PORT)))
+        .map_err(|error| {
             format!(
-                "cannot listen on TCP port {TEST_SECURE_WEB_SERVER_PORT} for the network test: {error}"
+                "cannot listen on TCP port {} for the network test: {error}",
+                test_port(TEST_SECURE_WEB_SERVER_PORT)
             )
         })?;
     let _ = STARTED.set(());
@@ -3950,7 +4116,8 @@ fn start_test_echo_client() {
         let deadline = Instant::now() + Duration::from_secs(120);
         while Instant::now() < deadline && !ECHO_SUCCEEDED.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(300));
-            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", TEST_ECHO_HOST_PORT)) else {
+            let Ok(mut stream) = TcpStream::connect(("127.0.0.1", test_port(TEST_ECHO_HOST_PORT)))
+            else {
                 continue;
             };
             let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
@@ -4008,7 +4175,7 @@ fn run_boot_test(
             "ide-hd,drive=sata,bus=ide.2".into(),
         ]);
     }
-    if test.network {
+    if let Some(card) = test.network {
         let files = prepare_tftp_files(&dir, options)?;
         start_test_name_server()?;
         start_test_web_server(&files)?;
@@ -4017,11 +4184,12 @@ fn run_boot_test(
         qemu_args.extend([
             "-netdev".into(),
             format!(
-                "user,id=net0,tftp={},hostfwd=tcp:127.0.0.1:{TEST_ECHO_HOST_PORT}-:7",
-                files.display()
+                "user,id=net0,tftp={},hostfwd=tcp:127.0.0.1:{}-:7",
+                files.display(),
+                test_port(TEST_ECHO_HOST_PORT)
             ),
             "-device".into(),
-            "virtio-net-pci,netdev=net0,mac=52:54:00:12:34:56".into(),
+            format!("{card},netdev=net0,mac=52:54:00:12:34:56"),
         ]);
     }
     let qemu_args: Vec<&str> = qemu_args.iter().map(String::as_str).collect();
@@ -4056,13 +4224,23 @@ fn run_boot_test(
         &qemu_args,
         options,
     )?;
+    // The script, with this run's ports where it names any.
+    let script: Vec<(String, String)> = test
+        .script
+        .iter()
+        .map(|(command, expected)| (with_test_ports(command), with_test_ports(expected)))
+        .collect();
+    let script: Vec<(&str, &str)> = script
+        .iter()
+        .map(|(command, expected)| (command.as_str(), expected.as_str()))
+        .collect();
     let run = match &display {
         Some(display) if test.no_serial => {
             run_without_serial(command, display, timeout, &mut failures)?
         }
         _ => run_qemu_captured(
             command,
-            test.script,
+            &script,
             test.ends_with_reset,
             display.as_ref(),
             timeout,
@@ -4073,7 +4251,7 @@ fn run_boot_test(
         let _ = fs::remove_file(&display.monitor);
     }
     let mut run = run;
-    if test.network && !ECHO_SUCCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
+    if test.network.is_some() && !ECHO_SUCCEEDED.load(std::sync::atomic::Ordering::SeqCst) {
         failures.push(
             "the host did not get its data back unchanged from the guest's echo server".into(),
         );

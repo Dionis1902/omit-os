@@ -173,8 +173,15 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x8086,
         0x100E,
         "Intel 82540EM Gigabit Ethernet",
-        Support::Unsupported,
-        Validation::None,
+        Support::Native { driver: "e1000" },
+        Validation::Emulation,
+    ),
+    entry(
+        0x8086,
+        0x100F,
+        "Intel 82545EM Gigabit Ethernet",
+        Support::Native { driver: "e1000" },
+        Validation::Emulation,
     ),
     entry(
         0x8086,

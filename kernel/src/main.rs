@@ -540,7 +540,15 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
             // background.
             net::wait_for_address(2 * u64::from(time::TICK_HZ));
         }
-        Ok(None) => info!("virtio-net: no device"),
+        // No VirtIO card: an Intel one, perhaps.
+        Ok(None) => match drivers::e1000::init() {
+            Ok(Some(mac)) => {
+                info!("e1000: {mac} is eth0");
+                net::wait_for_address(2 * u64::from(time::TICK_HZ));
+            }
+            Ok(None) => info!("net: no network card with a driver"),
+            Err(error) => warn!("e1000: cannot start the card: {error}"),
+        },
         Err(error) => warn!("virtio-net: cannot initialise device: {error}"),
     }
     match drivers::xhci::init() {
