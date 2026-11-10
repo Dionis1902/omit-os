@@ -226,14 +226,14 @@ system library; a desktop that is a single program.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read` | Working, tested |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe` | Working, tested |
 | Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
 | Output redirection (`>`, `>>`) for programs | Working, tested |
 | Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
 | Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
@@ -247,7 +247,9 @@ system library; a desktop that is a single program.
 | LinuxKPI: unmodified Linux `pvpanic` driver (a second subsystem: notifier chains, lists, spinlocks, device attributes) | Working **in QEMU only**: probe, attributes via `devattr`, unbind, kernel panic reported to the hypervisor |
 | PCI: assignment of memory BARs that firmware left unassigned | Working for the one case that needs it (QEMU pvpanic under OVMF); a simple placement rule, bus 0 only |
 | Loadable drivers, driver packages, automatic driver installation | Not started |
-| Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
+| Pipes between processes; standard input, output and error connectable to pipes or files at `spawn`; non-waiting reads | Working; self-tested at every boot and by `/bin/pipetest` (300 KB through a filter) |
+| Shell pipelines (`a \| b \| c`) and input redirection (`< file`) | Working; host-tested and run in QEMU, including Windows programs in pipelines |
+| Environment variables, signals, multi-threaded processes, shared memory | Not started |
 | Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
 | SMP | Not started |
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
@@ -301,8 +303,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   present, and stops silently without one.
 - Graphics are limited to the firmware's framebuffer at its boot
   resolution. The desktop is a single program; other programs cannot open
-  windows, and its Run window is not a terminal (see ADR 0012). Debug
-  builds draw noticeably slowly under emulation.
+  windows, and its Run window is a line-mode terminal without escape
+  sequences (see ADRs 0012 and 0014). Debug builds draw noticeably slowly
+  under emulation.
 - Only PS/2 keyboards (US layout) and PS/2 mice. No USB.
 - There is no installer: the system always boots from the live image into
   a RAM filesystem. A disk filesystem has to be mounted by hand.
@@ -330,10 +333,10 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - The filesystem lives in RAM and is empty at every boot. It has no
   permissions, timestamps, links or mount points, and is owned by the shell
   rather than being a kernel-wide object (see ADR 0006).
-- Built-in shell commands cannot be interrupted, there are no pipes,
-  variables or globs, and `cp` does not copy directories.
-- There are no pipes, no input redirection and no environment variables.
-  Open files are tracked by path, so renaming a file that is open confuses
+- Built-in shell commands cannot be interrupted or used in pipelines,
+  there are no variables or globs, and `cp` does not copy directories.
+- There are no environment variables and no shared memory. Open files
+  are tracked by path, so renaming a file that is open confuses
   its descriptor. Memory a program maps is never shared and address space
   in the map area is not reused. The system call ABI is unstable.
 - The shell's own file commands (`ls`, `cat`, ...) are still built in and
@@ -427,6 +430,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0011 — Running Windows executables natively](docs/adr/0011-windows-executables.md)
 - [ADR 0012 — Graphics for programs, mouse input and a first desktop](docs/adr/0012-display-input-and-desktop.md)
 - [ADR 0013 — Advanced compatibility: what was investigated, what was built](docs/adr/0013-advanced-compatibility-investigation.md)
+- [ADR 0014 — Pipes, standard streams and pipelines](docs/adr/0014-pipes.md)
 
 ## Testing
 
@@ -457,10 +461,11 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next step:** inter-process communication (pipes and shared memory). It
-is what the desktop needs to become a display server with a real terminal,
-what the shell needs to leave the kernel, and what pipelines need. Still
-open from earlier milestones: interrupts for device drivers (MSI-X), an
+**Next step:** the rest of inter-process communication — shared memory
+and a way to wait on several things at once — and threads within a
+process. Pipes exist (ADR 0014); those are what the desktop still needs
+to become a display server and what Windows programs with a C runtime
+need. Still open from earlier milestones: interrupts for device drivers (MSI-X), an
 installer, loadable drivers and packages, a Rust `std` port for coreutils,
 threads, and the Windows functions the C runtime needs.
 

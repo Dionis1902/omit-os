@@ -10,12 +10,12 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use omit_shell::{Host, LineEditor, MemoryInfo, Outcome, Shell, SystemInfo, TaskInfo};
+use omit_shell::{Host, LineEditor, MemoryInfo, Outcome, Shell, Stage, SystemInfo, TaskInfo};
 use omit_vfs::FileSystem;
 
 use crate::console::{self, Writer};
-use crate::process::OpenFile;
-use crate::{arch, fs, info, kprintln, mm, process, sched, time, warn};
+use crate::process::{Descriptor, OpenFile};
+use crate::{arch, fs, info, kprintln, mm, pipe, process, sched, time, warn};
 
 /// Connects the shell's process commands to the kernel.
 struct KernelHost;
@@ -29,13 +29,74 @@ impl Host for KernelHost {
         cwd: &str,
         stdout: Option<(&str, bool)>,
     ) -> Result<u64, String> {
-        let stdout = stdout.map(|(path, append)| OpenFile {
-            path: path.into(),
-            offset: 0,
-            writable: true,
-            append,
+        let stdout = stdout.map(|(path, append)| {
+            Descriptor::File(OpenFile {
+                path: path.into(),
+                offset: 0,
+                writable: true,
+                append,
+            })
         });
-        process::spawn(name, image, args, cwd, stdout).map_err(|error| format!("{error}"))
+        process::spawn(name, image, args, cwd, [None, stdout, None])
+            .map_err(|error| format!("{error}"))
+    }
+
+    fn spawn_pipeline(
+        &mut self,
+        stages: &[Stage<'_>],
+        cwd: &str,
+        stdin: Option<&str>,
+        stdout: Option<(&str, bool)>,
+    ) -> Result<Vec<u64>, String> {
+        let mut pids = Vec::with_capacity(stages.len());
+        // What the next program reads from: the input file for the first,
+        // then the reading end of the pipe from the program before.
+        let mut input = stdin.map(|path| {
+            Descriptor::File(OpenFile {
+                path: path.into(),
+                offset: 0,
+                writable: false,
+                append: false,
+            })
+        });
+        for (index, stage) in stages.iter().enumerate() {
+            let last = index + 1 == stages.len();
+            let (output, next_input) = if last {
+                let file = stdout.map(|(path, append)| {
+                    Descriptor::File(OpenFile {
+                        path: path.into(),
+                        offset: 0,
+                        writable: true,
+                        append,
+                    })
+                });
+                (file, None)
+            } else {
+                let (reader, writer) = pipe::new();
+                (
+                    Some(Descriptor::PipeWrite(writer)),
+                    Some(Descriptor::PipeRead(reader)),
+                )
+            };
+            // The descriptors move into the new process; the shell keeps
+            // no copy, so each program sees the end of its input when the
+            // one before it is done.
+            let stdio = [input.take(), output, None];
+            match process::spawn(stage.name, stage.image, stage.args, cwd, stdio) {
+                Ok(pid) => pids.push(pid),
+                Err(error) => {
+                    // Stop what was already started. Their pipe ends are
+                    // gone with them, and they are reaped like background
+                    // jobs.
+                    for &pid in &pids {
+                        sched::kill(pid);
+                    }
+                    return Err(format!("{}: {error}", stage.name));
+                }
+            }
+            input = next_input;
+        }
+        Ok(pids)
     }
 
     fn pci_devices(&mut self) -> Vec<String> {

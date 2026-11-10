@@ -105,3 +105,6 @@ The next step towards a real desktop is inter-process communication
 (pipes or message passing, and shared memory), which would turn *Run*
 into a terminal, let programs own windows, and allow the shell to move
 out of the kernel.
+
+*Update:* pipes now exist and *Run* is a line-mode terminal (ADR 0014).
+Programs owning windows still needs shared memory or message passing.

@@ -23,6 +23,7 @@ use crate::arch::paging::MapError;
 use crate::arch::syscall::enter_user;
 use crate::arch::uspace::{self, AddressSpace};
 use crate::mm::{self, PAGE_SIZE, frame};
+use crate::pipe;
 use crate::sched::{self, SpawnError, ThreadId};
 use crate::sync::SpinLock;
 
@@ -73,16 +74,32 @@ pub struct OpenFile {
     pub append: bool,
 }
 
+/// What a descriptor refers to.
+#[derive(Clone)]
+pub enum Descriptor {
+    /// A file in the filesystem.
+    File(OpenFile),
+    /// The reading end of a pipe.
+    PipeRead(pipe::Reader),
+    /// The writing end of a pipe.
+    PipeWrite(pipe::Writer),
+}
+
+/// The standard streams of a new process: input, output, error. `None`
+/// means the console.
+pub type Stdio = [Option<Descriptor>; 3];
+
 struct Record {
     thread: ThreadId,
     /// Set when the process ends.
     exit_status: Option<i32>,
     /// Working directory: a normalised absolute path.
     cwd: String,
-    /// Open files, indexed by descriptor minus 3 (0-2 are the console).
-    files: Vec<Option<OpenFile>>,
-    /// Where standard output goes instead of the console, if redirected.
-    stdout: Option<OpenFile>,
+    /// Open descriptors, indexed by descriptor minus 3.
+    files: Vec<Option<Descriptor>>,
+    /// Descriptors 0-2: where standard input, output and error are
+    /// connected instead of the console.
+    stdio: Stdio,
     /// Next unused address in the `map` area.
     map_next: u64,
 }
@@ -252,14 +269,14 @@ fn enter(start: usize) {
 /// arguments `args` and working directory `cwd` (a normalised absolute
 /// path).
 ///
-/// With `stdout`, the program's standard output is written to that file
-/// (which must exist) instead of the console.
+/// `stdio` connects the program's standard streams to files or pipes
+/// instead of the console.
 pub fn spawn(
     name: &str,
     image: &[u8],
     args: &[String],
     cwd: &str,
-    stdout: Option<OpenFile>,
+    stdio: Stdio,
 ) -> Result<Pid, ExecError> {
     let (space, start) = load(image, args)?;
     let start = Box::into_raw(Box::new(start));
@@ -276,7 +293,7 @@ pub fn spawn(
                     exit_status: None,
                     cwd: cwd.into(),
                     files: Vec::new(),
-                    stdout,
+                    stdio,
                     map_next: USER_MAP_BASE,
                 },
             );
@@ -298,13 +315,18 @@ pub fn exit(status: i32) -> ! {
         // If it owned the screen, the text console takes over again.
         crate::display::release(pid);
     }
-    if let Some(pid) = sched::current_pid()
-        && let Some(record) = TABLE.lock().processes.get_mut(&pid)
-    {
+    // Closing descriptors can wake other threads (the other end of a
+    // pipe), so they are taken out under the lock and dropped after it.
+    let closed = sched::current_pid().and_then(|pid| {
+        let mut table = TABLE.lock();
+        let record = table.processes.get_mut(&pid)?;
         record.exit_status = Some(status);
-        // Open files hold no resources beyond their table entries.
-        record.files.clear();
-    }
+        Some((
+            core::mem::take(&mut record.files),
+            core::mem::take(&mut record.stdio),
+        ))
+    });
+    drop(closed);
     sched::exit()
 }
 
@@ -373,10 +395,11 @@ pub fn current_dir() -> Option<String> {
     with_current(|record| record.cwd.clone())
 }
 
-/// Adds `file` to the calling process's open files and returns its
-/// descriptor, or `None` if the table is full.
-pub fn install_file(file: OpenFile) -> Option<u64> {
-    with_current(|record| {
+/// Adds `descriptor` to the calling process's descriptor table and
+/// returns its number, or gives it back if the table is full.
+pub fn install(descriptor: Descriptor) -> Result<u64, Descriptor> {
+    let mut descriptor = Some(descriptor);
+    let number = with_current(|record| {
         let slot = match record.files.iter().position(Option::is_none) {
             Some(slot) => slot,
             None if record.files.len() + (FIRST_FILE_FD as usize) < MAX_OPEN_FILES => {
@@ -385,59 +408,62 @@ pub fn install_file(file: OpenFile) -> Option<u64> {
             }
             None => return None,
         };
-        record.files[slot] = Some(file);
+        record.files[slot] = descriptor.take();
         Some(slot as u64 + FIRST_FILE_FD)
+    })
+    .flatten();
+    match (number, descriptor) {
+        (Some(number), _) => Ok(number),
+        (None, Some(descriptor)) => Err(descriptor),
+        // Not reachable: the descriptor is only taken when a slot exists.
+        (None, None) => Ok(0),
+    }
+}
+
+/// A copy of what the calling process's descriptor `fd` refers to. For
+/// descriptors 0-2, `None` means the console.
+pub fn descriptor(fd: u64) -> Option<Descriptor> {
+    with_current(|record| match fd.checked_sub(FIRST_FILE_FD) {
+        None => record.stdio[fd as usize].clone(),
+        Some(slot) => record.files.get(usize::try_from(slot).ok()?)?.clone(),
     })
     .flatten()
 }
 
-/// A copy of the calling process's open file `fd`.
-pub fn file(fd: u64) -> Option<OpenFile> {
-    let slot = usize::try_from(fd.checked_sub(FIRST_FILE_FD)?).ok()?;
-    with_current(|record| record.files.get(slot).cloned().flatten()).flatten()
-}
-
-/// Sets the position of the calling process's open file `fd`.
-pub fn set_file_offset(fd: u64, offset: u64) {
-    let Some(slot) = fd
-        .checked_sub(FIRST_FILE_FD)
-        .and_then(|slot| usize::try_from(slot).ok())
-    else {
-        return;
-    };
+/// Sets the position of the calling process's descriptor `fd`, if it
+/// refers to a file.
+pub fn set_offset(fd: u64, offset: u64) {
     with_current(|record| {
-        if let Some(Some(file)) = record.files.get_mut(slot) {
+        let entry = match fd.checked_sub(FIRST_FILE_FD) {
+            None => record.stdio.get_mut(fd as usize),
+            Some(slot) => usize::try_from(slot)
+                .ok()
+                .and_then(|slot| record.files.get_mut(slot)),
+        };
+        if let Some(Some(Descriptor::File(file))) = entry {
             file.offset = offset;
         }
     });
 }
 
-/// Closes the calling process's descriptor `fd`; `false` if it was not
-/// open.
-pub fn close_file(fd: u64) -> bool {
+/// Closes the calling process's descriptor `fd` (3 or higher); `false` if
+/// it was not open.
+pub fn close(fd: u64) -> bool {
     let Some(slot) = fd
         .checked_sub(FIRST_FILE_FD)
         .and_then(|slot| usize::try_from(slot).ok())
     else {
         return false;
     };
-    with_current(|record| record.files.get_mut(slot).and_then(Option::take).is_some())
-        .unwrap_or(false)
+    // Dropped after the process table lock is released: closing a pipe
+    // end wakes the threads waiting on the other end.
+    let closed = with_current(|record| record.files.get_mut(slot).and_then(Option::take)).flatten();
+    closed.is_some()
 }
 
-/// The calling process's standard output redirection, if any.
-pub fn stdout_file() -> Option<OpenFile> {
-    with_current(|record| record.stdout.clone()).flatten()
-}
-
-/// Records the new end position of the calling process's redirected
-/// standard output.
-pub fn set_stdout_offset(offset: u64) {
-    with_current(|record| {
-        if let Some(file) = &mut record.stdout {
-            file.offset = offset;
-        }
-    });
+/// The standard streams of the calling process, for a program it starts.
+pub fn stdio() -> Stdio {
+    with_current(|record| record.stdio.clone()).unwrap_or_default()
 }
 
 /// Number of pages mapped or unmapped per acquisition of the scheduler

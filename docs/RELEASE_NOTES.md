@@ -48,6 +48,7 @@ hello                a native program
 winhello.exe         a Windows console program, run natively
 wintest.exe          a Windows program that tests the Windows API layer
 winrun --list        the Windows functions that are implemented
+ls /bin | tee /list  a pipeline (programs only; see `help`)
 lspci                hardware, with driver status
 desktop              a graphical desktop (needs a PS/2 mouse, as virtual
                      machines provide); Exit or F12 returns to the console

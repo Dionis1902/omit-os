@@ -66,13 +66,11 @@ pub mod nr {
     pub const REMOVE: u64 = 14;
     /// `rename(from, from_len, to, to_len)`.
     pub const RENAME: u64 = 15;
-    /// `spawn(path, path_len, args, args_len, stdout) -> pid` — starts the
+    /// `spawn(path, path_len, args, args_len, stdio) -> pid` — starts the
     /// program at `path`. `args` is the argument list as NUL-terminated
     /// strings, one after another. The child inherits the working
-    /// directory of the caller. If `stdout` is zero it also inherits the
-    /// caller's standard output; otherwise `stdout` is one more than a
-    /// descriptor the caller has open for writing, and the child's
-    /// standard output is appended to that file.
+    /// directory of the caller, and its standard input, output and error
+    /// streams unless `stdio` (see [`super::spawn_stdio`]) says otherwise.
     pub const SPAWN: u64 = 16;
     /// `wait(pid, flags) -> exit status` — blocks until the process ends.
     /// With [`super::WAIT_NO_HANG`] in `flags` it fails with `Busy`
@@ -110,7 +108,35 @@ pub mod nr {
     /// `clock() -> microseconds` — time since the system started, with
     /// microsecond resolution.
     pub const CLOCK: u64 = 26;
+    /// `pipe(ends)` — creates a pipe and stores two descriptors in the
+    /// array of two `u64` at `ends`: the reading end, then the writing
+    /// end. Reading returns 0 once the pipe is empty and every writing
+    /// end is closed; writing fails with `BrokenPipe` once every reading
+    /// end is closed.
+    pub const PIPE: u64 = 27;
 }
+
+/// Packs the standard streams for the `spawn` system call's fifth
+/// argument. Each is `None` to give the new program the caller's own
+/// stream, or a descriptor the caller has open: a pipe end, or a file
+/// (for output: one open for writing, to which the output is appended;
+/// for input: one open for reading, read from its start).
+pub const fn spawn_stdio(stdin: Option<u64>, stdout: Option<u64>, stderr: Option<u64>) -> u64 {
+    const fn field(descriptor: Option<u64>) -> u64 {
+        match descriptor {
+            // Descriptors are small numbers; 0 means "inherit".
+            Some(fd) => (fd + 1) & 0xFFFF,
+            None => 0,
+        }
+    }
+    field(stdout) | (field(stdin) << 16) | (field(stderr) << 32)
+}
+
+/// Flag for the `read` system call (fourth argument): if the descriptor
+/// is a pipe with nothing in it, fail with `WouldBlock` instead of
+/// waiting. Files never make a reader wait; the console cannot be read
+/// this way.
+pub const READ_NO_WAIT: u64 = 1;
 
 /// Flag for the `wait` system call: do not block.
 pub const WAIT_NO_HANG: u64 = 1;
@@ -312,6 +338,10 @@ pub enum Errno {
     NotExecutable = 8,
     /// Unknown system call number.
     NoSuchSyscall = 38,
+    /// Writing to a pipe that nobody reads from any more.
+    BrokenPipe = 32,
+    /// Nothing is available right now, and the caller asked not to wait.
+    WouldBlock = 11,
 }
 
 impl core::fmt::Display for Errno {
@@ -333,6 +363,8 @@ impl core::fmt::Display for Errno {
             Self::CrossDevice => "Invalid cross-device link",
             Self::NotExecutable => "Exec format error",
             Self::NoSuchSyscall => "Function not implemented",
+            Self::BrokenPipe => "Broken pipe",
+            Self::WouldBlock => "Resource temporarily unavailable",
         })
     }
 }
@@ -362,6 +394,8 @@ impl Errno {
             18 => Some(Self::CrossDevice),
             8 => Some(Self::NotExecutable),
             38 => Some(Self::NoSuchSyscall),
+            32 => Some(Self::BrokenPipe),
+            11 => Some(Self::WouldBlock),
             _ => None,
         }
     }

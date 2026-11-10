@@ -130,8 +130,8 @@ struct Artifacts {
 
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
-    "cat", "crash", "desktop", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper",
-    "spin", "syscheck", "tee", "winrun",
+    "cat", "crash", "desktop", "echo", "fileops", "hello", "ls", "memtest", "pipetest", "run",
+    "sleeper", "spin", "syscheck", "tee", "winrun",
 ];
 
 /// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
@@ -645,7 +645,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\nsyscheck\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -719,6 +719,42 @@ const BOOT_TESTS: &[BootTest] = &[
             // expects (segment selectors, flags, preserved registers),
             // including after being interrupted there.
             ("syscheck", "\nsyscheck: all checks passed\n"),
+            // Pipes between processes: within one program, from another
+            // program, and through a filter with more data than a pipe
+            // holds.
+            ("pipetest", "\npipetest: all checks passed\n"),
+            // Pipelines and input redirection in the shell. `cat`, `ls`
+            // and `echo` here are the programs in /bin: built-in commands
+            // do not take part in pipelines.
+            ("echo one two three > /words", ""),
+            ("cat < /words", "\none two three\n"),
+            ("echo piped text | cat", "\npiped text\n"),
+            (
+                "cat /words | tee /copy1 | tee /copy2 | cat",
+                "\none two three\n",
+            ),
+            ("cat /copy1 /copy2", "\none two three\none two three\n"),
+            ("ls /bin | tee /listing > /dev-null", ""),
+            ("cat < /listing | cat | cat > /listing2", ""),
+            ("cat /listing2", "\nwinrun\nwinsample.dll\nwintest.exe\n"),
+            // A Windows program at the end of a pipeline and at its start.
+            (
+                "echo to windows | winhello.exe",
+                "\nHello from a Windows executable!\r\n",
+            ),
+            (
+                "winhello.exe | cat",
+                "\nHello from a Windows executable!\r\n",
+            ),
+            // The status of a pipeline is that of its last command, and a
+            // command that cannot be found stops the whole line.
+            ("cat /words | sleeper", "sleeper: exited with status 7\n"),
+            ("cat /words | nosuch", "\nnosuch: command not found\n"),
+            ("cat < /nosuch", "\n/nosuch: No such file or directory\n"),
+            (
+                "pwd | cat",
+                "\npwd: this built-in command cannot be used with '|' or '<'\n",
+            ),
         ],
         reboot_script: &[],
         ends_with_reset: false,
@@ -1395,7 +1431,9 @@ const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Exit"];
 /// 2. a click on the task bar opens the Run window, which takes the
 ///    keyboard focus (the About window's title bar turns grey);
 /// 3. commands typed on the emulated keyboard run a native program and a
-///    Windows program, and their output appears in the window;
+///    Windows program, and their output appears in the window; error
+///    output appears too; a program that reads its input receives a typed
+///    line and the end of input;
 /// 4. dragging the title bar moves the window, contents included;
 /// 5. the Exit button ends the desktop.
 fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
@@ -1450,10 +1488,46 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
             "w", "i", "n", "h", "e", "l", "l", "o", "dot", "e", "x", "e", "ret",
         ],
     )?;
-    let before = wait_for_screen(check, "the output of `winhello.exe`", patience, |image| {
+    wait_for_screen(check, "the output of `winhello.exe`", patience, |image| {
         screen_shows(image, "Hello from a Windows executable!")
             // The prompt is back: the program has been reaped.
             && screen_shows(image, "> _")
+    })?;
+
+    // What a program writes to standard error is shown too.
+    type_on_keyboard(
+        &check.monitor,
+        &[
+            "l", "s", "spc", "slash", "n", "o", "s", "u", "c", "h", "ret",
+        ],
+    )?;
+    wait_for_screen(check, "an error message from `ls`", patience, |image| {
+        screen_shows(image, "ls: /nosuch: No such file or directory") && screen_shows(image, "> _")
+    })?;
+    // A program that reads its input: `tee` gets the typed line through
+    // a pipe, shows it and writes it to a file (checked by the caller
+    // after the desktop has closed); Ctrl+D ends its input.
+    type_on_keyboard(
+        &check.monitor,
+        &[
+            "t", "e", "e", "spc", "slash", "t", "y", "p", "e", "d", "ret",
+        ],
+    )?;
+    wait_for_screen(check, "tee waiting for input", patience, |image| {
+        screen_shows(image, "tee< _")
+    })?;
+    type_on_keyboard(
+        &check.monitor,
+        &[
+            "k", "e", "y", "b", "o", "a", "r", "d", "spc", "i", "n", "p", "u", "t", "ret",
+        ],
+    )?;
+    wait_for_screen(check, "the line echoed by tee", patience, |image| {
+        screen_shows(image, "keyboard input") && screen_shows(image, "tee< _")
+    })?;
+    type_on_keyboard(&check.monitor, &["ctrl-d"])?;
+    let before = wait_for_screen(check, "the prompt after tee ended", patience, |image| {
+        screen_shows(image, "> _")
     })?;
 
     // The Run window is the second one opened; drag it by its title bar
@@ -1685,8 +1759,21 @@ fn run_qemu_captured(
                 if let Err(error) = desktop_scenario(check) {
                     failures.push(format!("desktop: {error}"));
                 }
-                if wait_for_prompt(from).is_none() {
+                let after_desktop = wait_for_prompt(from);
+                if after_desktop.is_none() {
                     failures.push("desktop: no prompt after closing the desktop".into());
+                }
+                // What was typed into `tee` inside the desktop reached
+                // the file through the program's standard input.
+                if let Some(from) = after_desktop {
+                    let _ = stdin.write_all(b"cat /typed\r");
+                    let shown = wait_for_prompt(from).map(|to| {
+                        String::from_utf8_lossy(&output.lock().expect("output lock")[from..to])
+                            .replace("\r\n", "\n")
+                    });
+                    if !shown.is_some_and(|text| text.contains("\nkeyboard input\n")) {
+                        failures.push("desktop: the line typed into tee is not in its file".into());
+                    }
                 }
                 // The text console must be back on the screen.
                 match take_screenshot(&check.monitor, &check.screenshot) {

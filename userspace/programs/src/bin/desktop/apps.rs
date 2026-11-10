@@ -9,7 +9,7 @@ use alloc::vec::Vec;
 use omit_gfx::desktop::{App, Context, theme};
 use omit_gfx::geometry::Rect;
 use omit_gfx::surface::{CHAR_WIDTH, Canvas, TEXT_HEIGHT};
-use omit_rt::abi::{Errno, key, open};
+use omit_rt::abi::{Errno, key};
 
 const MARGIN: i32 = 8;
 const LINE: i32 = TEXT_HEIGHT + 2;
@@ -349,19 +349,24 @@ impl App for Viewer {
 struct Child {
     pid: u64,
     name: String,
-    output_path: String,
-    /// Bytes of the output file already shown.
-    shown: usize,
+    /// Reading end of the pipe the program's output and errors arrive on.
+    output: u64,
+    /// Writing end of the pipe to the program's standard input; `None`
+    /// once the input has been ended with Ctrl+D.
+    input: Option<u64>,
 }
 
-/// Runs programs and shows what they print.
+/// A line-mode terminal: runs programs, shows what they print, and passes
+/// typed lines to them.
 ///
 /// A command is a program name (looked up in `/bin` unless it contains a
 /// `/`) followed by arguments separated by spaces. The program's standard
-/// output is collected in a temporary file and shown here as it grows.
-/// This is not a terminal: the program cannot read from the keyboard, and
-/// what it writes to standard error goes to the text console. Ctrl+C
-/// stops the running program.
+/// output and standard error arrive through a pipe and are shown as they
+/// are produced. While a program runs, a typed line is sent to its
+/// standard input when Enter is pressed; Ctrl+D ends its input and Ctrl+C
+/// stops it. There are no escape sequences, no cursor addressing and no
+/// shell syntax (pipes, redirection, built-in commands): for those there
+/// is the text console.
 pub struct Run {
     lines: Vec<String>,
     /// Whether the last line is still open (output did not end in a
@@ -369,7 +374,6 @@ pub struct Run {
     open_line: bool,
     input: String,
     child: Option<Child>,
-    commands: u32,
 }
 
 impl Run {
@@ -381,11 +385,11 @@ impl Run {
             open_line: false,
             input: String::new(),
             child: None,
-            commands: 0,
         };
         run.line("Type a program name and press Enter, for example:");
         run.line("  hello      ls /bin      winhello.exe      echo some text");
-        run.line("Ctrl+C stops a running program.");
+        run.line("While a program runs, lines you type go to it;");
+        run.line("Ctrl+D ends its input, Ctrl+C stops it.");
         run
     }
 
@@ -429,51 +433,75 @@ impl Run {
         } else {
             format!("/bin/{name}")
         };
-        self.commands += 1;
-        let output_path = format!("/tmp/desktop-{}-{}.out", omit_rt::getpid(), self.commands);
         let started = (|| {
-            match omit_rt::mkdir("/tmp") {
-                Ok(()) | Err(Errno::Exists) => {}
-                Err(error) => return Err(error),
-            }
-            let fd = omit_rt::open(&output_path, open::WRITE | open::CREATE | open::TRUNCATE)?;
-            let pid = omit_rt::spawn_with_output(&path, &words, Some(fd));
-            // The new program writes to the file by name; this descriptor
-            // was only needed to say which file.
-            let _ = omit_rt::close(fd);
-            pid
-        })();
-        match started {
-            Ok(pid) => {
-                self.child = Some(Child {
+            let (output, output_write) = omit_rt::pipe()?;
+            let (input_read, input) = match omit_rt::pipe() {
+                Ok(ends) => ends,
+                Err(error) => {
+                    let _ = omit_rt::close(output);
+                    let _ = omit_rt::close(output_write);
+                    return Err(error);
+                }
+            };
+            let pid = omit_rt::spawn_with_stdio(
+                &path,
+                &words,
+                Some(input_read),
+                Some(output_write),
+                Some(output_write),
+            );
+            // The program has its own copies of its ends. Keeping ours
+            // would mean never seeing the end of its output.
+            let _ = omit_rt::close(input_read);
+            let _ = omit_rt::close(output_write);
+            match pid {
+                Ok(pid) => Ok(Child {
                     pid,
                     name: name.into(),
-                    output_path,
-                    shown: 0,
-                });
+                    output,
+                    input: Some(input),
+                }),
+                Err(error) => {
+                    let _ = omit_rt::close(output);
+                    let _ = omit_rt::close(input);
+                    Err(error)
+                }
             }
+        })();
+        match started {
+            Ok(child) => self.child = Some(child),
             Err(Errno::NotFound) => self.line(&format!("{name}: program not found")),
             Err(error) => self.line(&format!("{name}: {error}")),
         }
     }
 
-    /// Shows output the program has produced since the last call.
+    /// Shows output the program has produced since the last call, without
+    /// waiting for more. Returns whether anything arrived.
     fn collect_output(&mut self) -> bool {
-        let Some(child) = &self.child else {
+        let Some(output) = self.child.as_ref().map(|child| child.output) else {
             return false;
         };
-        let Ok(data) = omit_rt::read_file(&child.output_path) else {
-            return false;
-        };
-        let shown = child.shown.min(data.len());
-        if shown == data.len() {
-            return false;
+        let mut chunk = [0u8; 4096];
+        let mut changed = false;
+        // Bounded, so that a program printing without pause cannot keep
+        // the desktop from handling input.
+        for _ in 0..16 {
+            match omit_rt::read_no_wait(output, &mut chunk) {
+                Ok(Some(count)) if count > 0 => {
+                    self.output(&chunk[..count]);
+                    changed = true;
+                }
+                // Nothing right now, end of output, or an error.
+                _ => break,
+            }
         }
-        if let Some(child) = &mut self.child {
-            child.shown = data.len();
+        changed
+    }
+
+    fn end_input(&mut self) {
+        if let Some(input) = self.child.as_mut().and_then(|child| child.input.take()) {
+            let _ = omit_rt::close(input);
         }
-        self.output(&data[shown..]);
-        true
     }
 }
 
@@ -486,23 +514,20 @@ impl App for Run {
         let columns = columns(width);
         let prompt_y = height - MARGIN - LINE;
         canvas.fill(Rect::new(MARGIN, prompt_y - 4, width - 2 * MARGIN, 1), DIM);
-        match &self.child {
-            Some(child) => {
-                let status = format!("{} is running (Ctrl+C stops it)", child.name);
-                canvas.text(MARGIN, prompt_y, &status, DIM);
-            }
-            None => {
-                // Show the end of a command that is too long to fit.
-                let visible: String = {
-                    let count = self.input.chars().count();
-                    self.input
-                        .chars()
-                        .skip(count.saturating_sub(columns - 3))
-                        .collect()
-                };
-                canvas.text(MARGIN, prompt_y, &format!("> {visible}_"), theme::TEXT);
-            }
-        }
+        // Show the end of a line that is too long to fit.
+        let visible: String = {
+            let count = self.input.chars().count();
+            self.input
+                .chars()
+                .skip(count.saturating_sub(columns.saturating_sub(12)))
+                .collect()
+        };
+        let prompt = match &self.child {
+            Some(child) if child.input.is_some() => format!("{}< {visible}_", child.name),
+            Some(child) => format!("{} (input ended)", child.name),
+            None => format!("> {visible}_"),
+        };
+        canvas.text(MARGIN, prompt_y, &prompt, theme::TEXT);
 
         // Wrap the lines to the window and show the last ones that fit.
         let available = ((prompt_y - 4 - MARGIN) / LINE).max(1) as usize;
@@ -535,17 +560,32 @@ impl App for Run {
     }
 
     fn key(&mut self, code: i32, _: &mut Context) {
-        if let Some(child) = &self.child {
-            if code == CONTROL_C {
-                let _ = omit_rt::kill(child.pid);
-            }
-            return;
-        }
+        const CONTROL_D: i32 = 4;
         match code {
+            CONTROL_C => {
+                if let Some(child) = &self.child {
+                    let _ = omit_rt::kill(child.pid);
+                }
+            }
+            CONTROL_D => self.end_input(),
             ENTER => {
-                let command = core::mem::take(&mut self.input);
-                self.line(&format!("> {command}"));
-                self.start(&command);
+                let mut text = core::mem::take(&mut self.input);
+                match self.child.as_ref().map(|child| child.input) {
+                    // A program is running: the line is its input.
+                    Some(Some(input)) => {
+                        self.line(&text);
+                        text.push('\n');
+                        if omit_rt::write_all(input, text.as_bytes()).is_err() {
+                            // It no longer reads its input.
+                            self.end_input();
+                        }
+                    }
+                    Some(None) => {}
+                    None => {
+                        self.line(&format!("> {text}"));
+                        self.start(&text);
+                    }
+                }
             }
             BACKSPACE => {
                 self.input.pop();
@@ -556,18 +596,18 @@ impl App for Run {
     }
 
     fn tick(&mut self, _: &mut Context) -> bool {
-        let Some(child) = &self.child else {
+        let Some(pid) = self.child.as_ref().map(|child| child.pid) else {
             return false;
         };
-        let pid = child.pid;
         let mut changed = self.collect_output();
         match omit_rt::try_wait(pid) {
             Ok(None) => {}
             finished => {
-                // Whatever it wrote between the read above and its end.
-                self.collect_output();
+                // Whatever it wrote before it ended.
+                while self.collect_output() {}
+                self.end_input();
                 if let Some(child) = self.child.take() {
-                    let _ = omit_rt::remove(&child.output_path);
+                    let _ = omit_rt::close(child.output);
                     match finished {
                         Ok(Some(0)) => {}
                         Ok(Some(status)) => {
@@ -576,6 +616,7 @@ impl App for Run {
                         _ => self.line(&format!("[{}: lost track of the program]", child.name)),
                     }
                 }
+                self.input.clear();
                 changed = true;
             }
         }

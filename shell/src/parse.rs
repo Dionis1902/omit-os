@@ -3,8 +3,10 @@
 //!
 //! Supported syntax: words separated by whitespace; single quotes (literal)
 //! and double quotes (with `\"` and `\\` escapes); backslash escapes outside
-//! quotes; and one output redirection, `> file` or `>> file`. There are no
-//! variables, globs, pipes or command sequences.
+//! quotes; one output redirection, `> file` or `>> file`; one input
+//! redirection, `< file`; and pipelines, `first | second | ...`, in which
+//! each program's output is the next one's input. There are no variables,
+//! globs or command sequences.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -22,8 +24,14 @@ pub struct Redirect {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CommandLine {
     /// The command name followed by its arguments. Empty for a blank line.
+    /// In a pipeline, the first command.
     pub words: Vec<String>,
-    /// Output redirection, if any.
+    /// The further commands of a pipeline, each as name and arguments.
+    pub rest: Vec<Vec<String>>,
+    /// Input redirection (`< file`), if any: the file the first command
+    /// reads its standard input from.
+    pub input: Option<String>,
+    /// Output redirection, if any; in a pipeline, of the last command.
     pub redirect: Option<Redirect>,
     /// The line ended with `&`: do not wait for the program to finish.
     pub background: bool,
@@ -42,6 +50,12 @@ pub enum ParseError {
     TrailingBackslash,
     /// `&` appears somewhere other than at the end of the line.
     MisplacedBackground,
+    /// `<` is not followed by a file name.
+    MissingInputSource,
+    /// More than one input redirection was given.
+    DuplicateInput,
+    /// `|` is not between two commands.
+    MissingPipelineCommand,
 }
 
 impl core::fmt::Display for ParseError {
@@ -52,6 +66,9 @@ impl core::fmt::Display for ParseError {
             Self::DuplicateRedirect => "more than one output redirection",
             Self::TrailingBackslash => "trailing backslash",
             Self::MisplacedBackground => "'&' is only allowed at the end of a command",
+            Self::MissingInputSource => "missing file name after '<'",
+            Self::DuplicateInput => "more than one input redirection",
+            Self::MissingPipelineCommand => "missing command before or after '|'",
         })
     }
 }
@@ -59,6 +76,8 @@ impl core::fmt::Display for ParseError {
 enum Token {
     Word(String),
     Redirect { append: bool },
+    Input,
+    Pipe,
     Background,
 }
 
@@ -82,11 +101,15 @@ fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
                 let append = chars.next_if_eq(&'>').is_some();
                 tokens.push(Token::Redirect { append });
             }
-            '&' => {
+            '&' | '<' | '|' => {
                 if let Some(done) = word.take() {
                     tokens.push(Token::Word(done));
                 }
-                tokens.push(Token::Background);
+                tokens.push(match c {
+                    '&' => Token::Background,
+                    '<' => Token::Input,
+                    _ => Token::Pipe,
+                });
             }
             '\'' => {
                 let current = word.get_or_insert_with(String::new);
@@ -133,18 +156,43 @@ fn tokenize(line: &str) -> Result<Vec<Token>, ParseError> {
 pub fn parse(line: &str) -> Result<CommandLine, ParseError> {
     let mut command = CommandLine::default();
     let mut tokens = tokenize(line)?.into_iter();
+    // The command currently being collected: `command.words` first, then
+    // one entry of `command.rest` per `|`.
+    let mut current: Vec<String> = Vec::new();
+    let mut piped = false;
     while let Some(token) = tokens.next() {
         if command.background {
             return Err(ParseError::MisplacedBackground);
         }
         match token {
             Token::Background => {
-                if command.words.is_empty() {
+                if current.is_empty() {
                     return Err(ParseError::MisplacedBackground);
                 }
                 command.background = true;
             }
-            Token::Word(word) => command.words.push(word),
+            Token::Word(word) => current.push(word),
+            Token::Pipe => {
+                if current.is_empty() {
+                    return Err(ParseError::MissingPipelineCommand);
+                }
+                let finished = core::mem::take(&mut current);
+                if piped {
+                    command.rest.push(finished);
+                } else {
+                    command.words = finished;
+                }
+                piped = true;
+            }
+            Token::Input => {
+                let Some(Token::Word(path)) = tokens.next() else {
+                    return Err(ParseError::MissingInputSource);
+                };
+                if command.input.is_some() {
+                    return Err(ParseError::DuplicateInput);
+                }
+                command.input = Some(path);
+            }
             Token::Redirect { append } => {
                 let Some(Token::Word(path)) = tokens.next() else {
                     return Err(ParseError::MissingRedirectTarget);
@@ -155,6 +203,14 @@ pub fn parse(line: &str) -> Result<CommandLine, ParseError> {
                 command.redirect = Some(Redirect { path, append });
             }
         }
+    }
+    if piped {
+        if current.is_empty() {
+            return Err(ParseError::MissingPipelineCommand);
+        }
+        command.rest.push(current);
+    } else {
+        command.words = current;
     }
     Ok(command)
 }
@@ -231,5 +287,52 @@ mod tests {
         assert_eq!(parse("echo > > f"), Err(ParseError::MissingRedirectTarget));
         assert_eq!(parse("echo > a > b"), Err(ParseError::DuplicateRedirect));
         assert_eq!(parse("echo \\"), Err(ParseError::TrailingBackslash));
+    }
+
+    #[test]
+    fn parses_pipelines_and_input_redirection() {
+        let command = parse("cat < in.txt | tee copy | cat > out.txt").unwrap();
+        assert_eq!(command.words, ["cat"]);
+        assert_eq!(command.rest, [list(&["tee", "copy"]), list(&["cat"])]);
+        assert_eq!(command.input.as_deref(), Some("in.txt"));
+        assert_eq!(
+            command.redirect,
+            Some(Redirect {
+                path: "out.txt".into(),
+                append: false
+            })
+        );
+        assert!(!command.background);
+
+        // No spaces needed; quotes hide the special characters.
+        let command = parse("a|b 'x|y' \"<\"&").unwrap();
+        assert_eq!(command.words, ["a"]);
+        assert_eq!(command.rest, [list(&["b", "x|y", "<"])]);
+        assert!(command.background);
+
+        let command = parse("sort <data").unwrap();
+        assert_eq!(command.words, ["sort"]);
+        assert!(command.rest.is_empty());
+        assert_eq!(command.input.as_deref(), Some("data"));
+    }
+
+    #[test]
+    fn rejects_malformed_pipelines() {
+        for line in ["| a", "a |", "a | | b", "a | & ", "|"] {
+            assert!(
+                matches!(
+                    parse(line),
+                    Err(ParseError::MissingPipelineCommand | ParseError::MisplacedBackground)
+                ),
+                "{line}"
+            );
+        }
+        assert_eq!(parse("a <"), Err(ParseError::MissingInputSource));
+        assert_eq!(parse("a < | b"), Err(ParseError::MissingInputSource));
+        assert_eq!(parse("a < x < y"), Err(ParseError::DuplicateInput));
+    }
+
+    fn list(items: &[&str]) -> Vec<String> {
+        items.iter().map(|&item| String::from(item)).collect()
     }
 }

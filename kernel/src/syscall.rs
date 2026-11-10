@@ -12,14 +12,15 @@ use alloc::vec::Vec;
 
 use omit_abi::{
     ARGS_MAX, Blit, Errno, INPUT_READ_MAX, INPUT_TIMEOUT_MAX, InputEvent, KIND_DIRECTORY,
-    KIND_FILE, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG, WRITE_MAX, nr, open,
-    protect,
+    KIND_FILE, PATH_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG,
+    WRITE_MAX, nr, open, protect,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
 
 use crate::console::{self, Writer};
-use crate::process::{self, OpenFile};
+use crate::pipe::{self, PipeError};
+use crate::process::{self, Descriptor, OpenFile};
 use crate::sync::Mutex;
 use crate::{display, fs, input, kprint, sched, time};
 
@@ -32,10 +33,10 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
     let result: SysResult = match number {
         nr::EXIT => process::exit(a0 as i32),
         nr::WRITE => write(a0, a1, a2),
-        nr::READ => read(a0, a1, a2),
+        nr::READ => read(a0, a1, a2, a3),
         nr::OPEN => open_file(a0, a1, a2),
         nr::CLOSE => {
-            if process::close_file(a0) {
+            if process::close(a0) {
                 Ok(0)
             } else {
                 Err(Errno::BadFileDescriptor)
@@ -119,6 +120,7 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
             .map(|status| status as u32 as u64)
             .ok_or(Errno::NoSuchProcess),
         nr::CLOCK => Ok(time::monotonic_ns() / 1000),
+        nr::PIPE => create_pipe(a0),
         nr::KILL => {
             if sched::kill(a0) {
                 Ok(0)
@@ -230,13 +232,13 @@ fn open_file(path_address: u64, path_length: u64, flags: u64) -> SysResult {
         }
     }
 
-    process::install_file(OpenFile {
+    process::install(Descriptor::File(OpenFile {
         path,
         offset: 0,
         writable,
         append: flags & open::APPEND != 0,
-    })
-    .ok_or(Errno::TooManyOpenFiles)
+    }))
+    .map_err(|_| Errno::TooManyOpenFiles)
 }
 
 fn stat(path_address: u64, path_length: u64, out: u64) -> SysResult {
@@ -279,6 +281,28 @@ fn read_dir(path_address: u64, path_length: u64, buffer: u64, buffer_length: u64
         copy_out(buffer, &records)?;
     }
     Ok(records.len() as u64)
+}
+
+fn create_pipe(address: u64) -> SysResult {
+    let (reader, writer) = pipe::new();
+    let read_fd =
+        process::install(Descriptor::PipeRead(reader)).map_err(|_| Errno::TooManyOpenFiles)?;
+    let write_fd = match process::install(Descriptor::PipeWrite(writer)) {
+        Ok(fd) => fd,
+        Err(_) => {
+            process::close(read_fd);
+            return Err(Errno::TooManyOpenFiles);
+        }
+    };
+    let mut ends = [0u8; 16];
+    ends[..8].copy_from_slice(&read_fd.to_le_bytes());
+    ends[8..].copy_from_slice(&write_fd.to_le_bytes());
+    if let Err(error) = copy_out(address, &ends) {
+        process::close(read_fd);
+        process::close(write_fd);
+        return Err(error);
+    }
+    Ok(0)
 }
 
 fn current_pid() -> Result<u64, Errno> {
@@ -350,7 +374,7 @@ fn spawn(
     path_length: u64,
     args_address: u64,
     args_length: u64,
-    stdout: u64,
+    stdio_request: u64,
 ) -> SysResult {
     let path = path_argument(path_address, path_length)?;
     if args_length > ARGS_MAX as u64 {
@@ -384,48 +408,84 @@ fn spawn(
     }
     let cwd = process::current_dir().ok_or(Errno::InvalidArgument)?;
     let name = path::file_name(&path).unwrap_or("program");
-    let stdout = match stdout.checked_sub(1) {
-        None => process::stdout_file(),
-        Some(fd) => {
-            let file = process::file(fd).ok_or(Errno::BadFileDescriptor)?;
-            if !file.writable {
-                return Err(Errno::BadFileDescriptor);
+    // Each stream: the descriptor named by the caller, or the caller's own
+    // stream of the same kind.
+    let mut stdio = process::stdio();
+    for (index, shift) in [(0usize, 16u32), (1, 0), (2, 32)] {
+        let Some(fd) = ((stdio_request >> shift) & 0xFFFF).checked_sub(1) else {
+            continue;
+        };
+        let input = index == 0;
+        stdio[index] = Some(match process::descriptor(fd) {
+            Some(Descriptor::File(file)) if file.writable != input => {
+                Descriptor::File(OpenFile {
+                    path: file.path,
+                    offset: 0,
+                    writable: !input,
+                    // Output is added to what the file holds: several
+                    // programs can share a log this way.
+                    append: !input,
+                })
             }
-            Some(OpenFile {
-                path: file.path,
-                offset: 0,
-                writable: true,
-                append: true,
-            })
-        }
-    };
-    process::spawn(name, &image, &args, &cwd, stdout).map_err(|error| match error {
+            Some(pipe @ Descriptor::PipeRead(_)) if input => pipe,
+            Some(pipe @ Descriptor::PipeWrite(_)) if !input => pipe,
+            _ => return Err(Errno::BadFileDescriptor),
+        });
+    }
+    process::spawn(name, &image, &args, &cwd, stdio).map_err(|error| match error {
         process::ExecError::Elf(_) | process::ExecError::Unsupported(_) => Errno::NotExecutable,
         process::ExecError::ArgumentsTooLong => Errno::InvalidArgument,
         process::ExecError::Map(_) | process::ExecError::Spawn(_) => Errno::NoSpace,
     })
 }
 
-fn read(fd: u64, address: u64, length: u64) -> SysResult {
+fn read(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
+    if flags & !READ_NO_WAIT != 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    let no_wait = flags & READ_NO_WAIT != 0;
     let length = length.min(READ_MAX) as usize;
-    if fd == STDIN {
-        return read_console(address, length);
-    }
-    let file = process::file(fd).ok_or(Errno::BadFileDescriptor)?;
-    if file.writable {
-        return Err(Errno::BadFileDescriptor);
-    }
     let mut buffer = Vec::new();
-    buffer
-        .try_reserve_exact(length)
-        .map_err(|_| Errno::NoSpace)?;
-    buffer.resize(length, 0);
-    let count = fs::root()
-        .ok_or(Errno::NotFound)?
-        .read_at(&file.path, file.offset, &mut buffer)
-        .map_err(errno)?;
+    let count = match process::descriptor(fd) {
+        // The console's line editing has no way to report "nothing yet".
+        None if fd == STDIN && no_wait => return Err(Errno::InvalidArgument),
+        None if fd == STDIN => return read_console(address, length),
+        Some(Descriptor::File(file)) if !file.writable => {
+            buffer
+                .try_reserve_exact(length)
+                .map_err(|_| Errno::NoSpace)?;
+            buffer.resize(length, 0);
+            let count = fs::root()
+                .ok_or(Errno::NotFound)?
+                .read_at(&file.path, file.offset, &mut buffer)
+                .map_err(errno)?;
+            process::set_offset(fd, file.offset + count as u64);
+            count
+        }
+        Some(Descriptor::PipeRead(pipe)) => {
+            buffer
+                .try_reserve_exact(length)
+                .map_err(|_| Errno::NoSpace)?;
+            buffer.resize(length, 0);
+            if no_wait {
+                let count = pipe.try_read(&mut buffer).ok_or(Errno::WouldBlock)?;
+                copy_out(address, &buffer[..count])?;
+                return Ok(count as u64);
+            }
+            match pipe.read(&mut buffer) {
+                Ok(count) => count,
+                Err(_) => {
+                    // Killed while waiting. Let go of the pipe end first:
+                    // `exit` does not return.
+                    drop(pipe);
+                    process::exit_if_killed();
+                    0
+                }
+            }
+        }
+        _ => return Err(Errno::BadFileDescriptor),
+    };
     copy_out(address, &buffer[..count])?;
-    process::set_file_offset(fd, file.offset + count as u64);
     Ok(count as u64)
 }
 
@@ -472,36 +532,34 @@ fn write(fd: u64, address: u64, length: u64) -> SysResult {
     if length > WRITE_MAX {
         return Err(Errno::InvalidArgument);
     }
-    if fd == STDERR {
-        return write_console(address, length);
+    match process::descriptor(fd) {
+        // Standard output and error go to the console unless the process
+        // was started with them connected elsewhere.
+        None if fd == STDOUT || fd == STDERR => write_console(address, length),
+        Some(Descriptor::File(file)) if file.writable => {
+            let data = copy_in(address, length as usize)?;
+            let offset = (!file.append).then_some(file.offset);
+            let end = fs::root()
+                .ok_or(Errno::NotFound)?
+                .write_at(&file.path, offset, &data)
+                .map_err(errno)?;
+            process::set_offset(fd, end);
+            Ok(length)
+        }
+        Some(Descriptor::PipeWrite(pipe)) => {
+            let data = copy_in(address, length as usize)?;
+            match pipe.write(&data) {
+                Ok(()) => Ok(length),
+                Err(PipeError::NoReaders) => Err(Errno::BrokenPipe),
+                Err(PipeError::Killed) => {
+                    drop(pipe);
+                    process::exit_if_killed();
+                    Err(Errno::BrokenPipe)
+                }
+            }
+        }
+        _ => Err(Errno::BadFileDescriptor),
     }
-    if fd == STDOUT {
-        // Standard output may have been redirected to a file when the
-        // process was started.
-        let Some(file) = process::stdout_file() else {
-            return write_console(address, length);
-        };
-        let data = copy_in(address, length as usize)?;
-        let offset = (!file.append).then_some(file.offset);
-        let end = fs::root()
-            .ok_or(Errno::NotFound)?
-            .write_at(&file.path, offset, &data)
-            .map_err(errno)?;
-        process::set_stdout_offset(end);
-        return Ok(length);
-    }
-    let file = process::file(fd).ok_or(Errno::BadFileDescriptor)?;
-    if !file.writable {
-        return Err(Errno::BadFileDescriptor);
-    }
-    let data = copy_in(address, length as usize)?;
-    let offset = (!file.append).then_some(file.offset);
-    let end = fs::root()
-        .ok_or(Errno::NotFound)?
-        .write_at(&file.path, offset, &data)
-        .map_err(errno)?;
-    process::set_file_offset(fd, end);
-    Ok(length)
 }
 
 fn write_console(address: u64, length: u64) -> SysResult {

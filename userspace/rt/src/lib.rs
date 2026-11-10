@@ -211,6 +211,26 @@ pub fn read(fd: u64, buffer: &mut [u8]) -> Result<usize, Errno> {
     .map(|count| count as usize)
 }
 
+/// Like [`read`], but if `fd` is a pipe with nothing in it, returns
+/// `Ok(None)` instead of waiting. `Ok(Some(0))` is the end of the input.
+pub fn read_no_wait(fd: u64, buffer: &mut [u8]) -> Result<Option<usize>, Errno> {
+    // SAFETY: the pointer and length describe a live, writable slice.
+    let outcome = result(unsafe {
+        syscall4(
+            nr::READ,
+            fd,
+            buffer.as_mut_ptr() as u64,
+            buffer.len() as u64,
+            abi::READ_NO_WAIT,
+        )
+    });
+    match outcome {
+        Ok(count) => Ok(Some(count as usize)),
+        Err(Errno::WouldBlock) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 /// Closes file descriptor `fd`.
 pub fn close(fd: u64) -> Result<(), Errno> {
     // SAFETY: plain integer argument.
@@ -448,6 +468,32 @@ pub fn spawn_with_output(
     arguments: &[&str],
     output: Option<u64>,
 ) -> Result<u64, Errno> {
+    spawn_with_stdio(path, arguments, None, output, None)
+}
+
+/// Creates a pipe; returns the descriptors of its reading and writing
+/// ends. What is written to one can be read from the other, by this
+/// program or by programs started with [`spawn_with_stdio`]. Reading
+/// returns 0 once the pipe is empty and every writing end is closed — so
+/// a program that hands the writing end to another must close its own
+/// copy to ever see the end.
+pub fn pipe() -> Result<(u64, u64), Errno> {
+    let mut ends = [0u64; 2];
+    // SAFETY: `ends` is a live, writable array of two `u64`.
+    result(unsafe { syscall(nr::PIPE, ends.as_mut_ptr() as u64, 0, 0) })?;
+    Ok((ends[0], ends[1]))
+}
+
+/// Like [`spawn`], connecting the new program's standard input, output
+/// and error streams to the given descriptors (pipe ends or files);
+/// `None` gives it this program's own stream.
+pub fn spawn_with_stdio(
+    path: &str,
+    arguments: &[&str],
+    stdin: Option<u64>,
+    stdout: Option<u64>,
+    stderr: Option<u64>,
+) -> Result<u64, Errno> {
     let mut block = Vec::new();
     for argument in arguments {
         block.extend_from_slice(argument.as_bytes());
@@ -461,7 +507,7 @@ pub fn spawn_with_output(
             path.len() as u64,
             block.as_ptr() as u64,
             block.len() as u64,
-            output.map_or(0, |fd| fd + 1),
+            abi::spawn_stdio(stdin, stdout, stderr),
         )
     })
 }

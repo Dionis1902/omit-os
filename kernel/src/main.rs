@@ -21,6 +21,7 @@ mod log;
 mod mm;
 mod panic;
 mod pci;
+mod pipe;
 mod process;
 mod sched;
 mod shell;
@@ -80,6 +81,8 @@ enum InitError {
     InputInterrupt(RegisterError),
     Scheduler(sched::SpawnError),
     SchedulerSelfTest(&'static str),
+    /// The pipe self-test failed.
+    PipeSelfTest(&'static str),
 }
 
 impl fmt::Display for InitError {
@@ -106,6 +109,7 @@ impl fmt::Display for InitError {
             Self::InputInterrupt(e) => write!(f, "input interrupt: {e:?}"),
             Self::Scheduler(e) => write!(f, "scheduler: {e:?}"),
             Self::SchedulerSelfTest(e) => write!(f, "scheduler self-test: {e}"),
+            Self::PipeSelfTest(e) => write!(f, "pipe self-test: {e}"),
         }
     }
 }
@@ -387,6 +391,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     // Threads and the scheduler. From here on the boot context is thread 1.
     sched::init().map_err(InitError::Scheduler)?;
     sched::self_test().map_err(InitError::SchedulerSelfTest)?;
+    pipe::self_test().map_err(InitError::PipeSelfTest)?;
     info!("sched: round-robin scheduler started; preemption self-test passed");
     sched::spawn("status-bar", ui::status_thread, 0).map_err(InitError::Scheduler)?;
     arch::syscall::init();

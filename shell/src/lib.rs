@@ -76,6 +76,20 @@ pub trait Host {
         stdout: Option<(&str, bool)>,
     ) -> Result<u64, String>;
 
+    /// Starts the programs in `stages` as a pipeline: each one's standard
+    /// output is the next one's standard input. With `stdin`, the first
+    /// reads from that existing file (a normalised absolute path);
+    /// `stdout` redirects the last as for [`Host::spawn`]. Returns the
+    /// process IDs in order. If any program cannot be started, none is
+    /// left running.
+    fn spawn_pipeline(
+        &mut self,
+        stages: &[Stage<'_>],
+        cwd: &str,
+        stdin: Option<&str>,
+        stdout: Option<(&str, bool)>,
+    ) -> Result<Vec<u64>, String>;
+
     /// Requests termination of process `pid`; `false` if it does not exist.
     fn kill(&mut self, pid: u64) -> bool;
 
@@ -165,6 +179,24 @@ const BUILTINS: &[&str] = &[
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
+/// A program found and read by the shell.
+struct Program {
+    display_name: String,
+    image: Vec<u8>,
+    argv: Vec<String>,
+}
+
+/// One program of a pipeline, ready to start.
+#[derive(Debug, Clone, Copy)]
+pub struct Stage<'a> {
+    /// Name to show for the process.
+    pub name: &'a str,
+    /// The executable file's contents.
+    pub image: &'a [u8],
+    /// Arguments, starting with the name the program was invoked by.
+    pub args: &'a [String],
+}
+
 /// How a Windows (or DOS) executable starts.
 pub const WINDOWS_MAGIC: &[u8] = b"MZ";
 /// The program that runs Windows executables.
@@ -208,7 +240,8 @@ Built-in commands:
   exit                 leave the shell
 Anything else is run as a program from /bin (or by path); end the line with
 '&' to run it in the background. Output of any command can be redirected
-with '> FILE' or '>> FILE'.
+with '> FILE' or '>> FILE'. Programs can read from a file with '< FILE'
+and be connected with '|': the output of one is the input of the next.
 ";
 
 /// Shell state: the current directory and the last exit status.
@@ -281,6 +314,20 @@ impl Shell {
         };
         if name == "exit" {
             return Outcome::Exit;
+        }
+
+        if !command.rest.is_empty() || command.input.is_some() {
+            self.last_status = match self.run_pipeline(&command, vfs, host, out) {
+                Ok(()) => 0,
+                Err(Failure(message)) => {
+                    let _ = writeln!(out, "{message}");
+                    1
+                }
+            };
+            return match self.pending_wait.take() {
+                Some(pid) => Outcome::Wait { pid },
+                None => Outcome::Continue,
+            };
         }
 
         // With a redirection, standard output is collected and written to
@@ -481,19 +528,14 @@ impl Shell {
         }
     }
 
-    /// Runs `name` as a program: `/bin/<name>`, or the path itself if it
-    /// contains a slash.
-    #[allow(clippy::too_many_arguments)]
-    fn run_program(
-        &mut self,
+    /// Finds the program `name` (in `/bin` unless it contains a `/`), reads
+    /// it, and builds its argument list.
+    fn prepare_program(
+        &self,
         name: &str,
         args: &[String],
-        redirect: Option<&parse::Redirect>,
-        background: bool,
         vfs: &mut Vfs,
-        host: &mut dyn Host,
-        out: &mut dyn Write,
-    ) -> CommandResult {
+    ) -> Result<Program, Failure> {
         let path = if name.contains('/') {
             self.resolve(name)?
         } else {
@@ -506,24 +548,7 @@ impl Shell {
             }
             Err(error) => return Err(Failure(format!("{error}"))),
         };
-        // Prepare the redirection target: it must exist, and `>` empties
-        // it, before the program starts writing.
-        let target = match redirect {
-            Some(redirect) => {
-                let target = self.resolve(&redirect.path)?;
-                let mode = if redirect.append {
-                    WriteMode::Append
-                } else {
-                    WriteMode::Truncate
-                };
-                vfs.write_file(&target, b"", mode)
-                    .map_err(|e| fs_failure(&redirect.path, e))?;
-                Some((target, redirect.append))
-            }
-            None => None,
-        };
-
-        let display_name = path::file_name(&path).unwrap_or(name);
+        let display_name = path::file_name(&path).unwrap_or(name).into();
         // By convention the first argument is the name the program was
         // invoked by.
         let mut argv = Vec::with_capacity(args.len() + 2);
@@ -542,17 +567,146 @@ impl Shell {
             image
         };
         argv.extend_from_slice(args);
+        Ok(Program {
+            display_name,
+            image,
+            argv,
+        })
+    }
+
+    /// Prepares the target of an output redirection: it must exist, and
+    /// `>` empties it, before a program starts writing. Returns its path
+    /// and whether output is appended.
+    fn prepare_output(
+        &self,
+        redirect: Option<&parse::Redirect>,
+        vfs: &mut Vfs,
+    ) -> Result<Option<(String, bool)>, Failure> {
+        let Some(redirect) = redirect else {
+            return Ok(None);
+        };
+        let target = self.resolve(&redirect.path)?;
+        let mode = if redirect.append {
+            WriteMode::Append
+        } else {
+            WriteMode::Truncate
+        };
+        vfs.write_file(&target, b"", mode)
+            .map_err(|e| fs_failure(&redirect.path, e))?;
+        Ok(Some((target, redirect.append)))
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "one call site; the arguments are the parsed command line"
+    )]
+    fn run_program(
+        &mut self,
+        name: &str,
+        args: &[String],
+        redirect: Option<&parse::Redirect>,
+        background: bool,
+        vfs: &mut Vfs,
+        host: &mut dyn Host,
+        out: &mut dyn Write,
+    ) -> CommandResult {
+        let program = self.prepare_program(name, args, vfs)?;
+        let target = self.prepare_output(redirect, vfs)?;
         let stdout = target
             .as_ref()
             .map(|(path, append)| (path.as_str(), *append));
         let pid = host
-            .spawn(display_name, &image, &argv, &self.cwd, stdout)
+            .spawn(
+                &program.display_name,
+                &program.image,
+                &program.argv,
+                &self.cwd,
+                stdout,
+            )
             .map_err(Failure)?;
         if background {
-            writeln!(out, "[{pid}] {display_name}")?;
+            writeln!(out, "[{pid}] {}", program.display_name)?;
         } else {
-            self.foreground = Some(display_name.into());
+            self.foreground = Some(program.display_name);
             self.pending_wait = Some(pid);
+        }
+        Ok(())
+    }
+
+    /// Runs a pipeline, or a single program with redirected input. Every
+    /// command must be a program: the shell's built-in commands do not
+    /// take part (where a program of the same name exists in `/bin`, as
+    /// for `cat`, `ls` and `echo`, that program is used). Error messages
+    /// name the command they are about.
+    fn run_pipeline(
+        &mut self,
+        command: &parse::CommandLine,
+        vfs: &mut Vfs,
+        host: &mut dyn Host,
+        out: &mut dyn Write,
+    ) -> CommandResult {
+        let mut programs = Vec::with_capacity(1 + command.rest.len());
+        for words in core::iter::once(&command.words).chain(&command.rest) {
+            let Some((name, args)) = words.split_first() else {
+                return Err(Failure("missing command".into()));
+            };
+            let program = self
+                .prepare_program(name, args, vfs)
+                .map_err(|Failure(message)| {
+                    if BUILTINS.contains(&name.as_str()) {
+                        Failure(format!(
+                            "{name}: this built-in command cannot be used with '|' or '<'"
+                        ))
+                    } else {
+                        Failure(format!("{name}: {message}"))
+                    }
+                })?;
+            programs.push(program);
+        }
+        let stdin = match &command.input {
+            Some(input) => {
+                let source = self
+                    .resolve(input)
+                    .map_err(|Failure(message)| Failure(format!("{input}: {message}")))?;
+                match vfs.metadata(&source) {
+                    Ok(metadata) if metadata.file_type == FileType::Directory => {
+                        return Err(Failure(format!("{input}: is a directory")));
+                    }
+                    Ok(_) => {}
+                    Err(error) => return Err(fs_failure(input, error)),
+                }
+                Some(source)
+            }
+            None => None,
+        };
+        let target = self
+            .prepare_output(command.redirect.as_ref(), vfs)
+            .map_err(|Failure(message)| Failure(format!("omsh: {message}")))?;
+        let stdout = target
+            .as_ref()
+            .map(|(path, append)| (path.as_str(), *append));
+
+        let stages: Vec<Stage<'_>> = programs
+            .iter()
+            .map(|program| Stage {
+                name: &program.display_name,
+                image: &program.image,
+                args: &program.argv,
+            })
+            .collect();
+        let pids = host
+            .spawn_pipeline(&stages, &self.cwd, stdin.as_deref(), stdout)
+            .map_err(|message| Failure(format!("omsh: {message}")))?;
+        // The pipeline's result is that of its last command; the others
+        // are not waited for and are cleaned up when they end.
+        let (Some(&last_pid), Some(last)) = (pids.last(), programs.pop()) else {
+            return Err(Failure("omsh: no program was started".into()));
+        };
+        if command.background {
+            writeln!(out, "[{last_pid}] {}", last.display_name)?;
+        } else {
+            self.foreground = Some(last.display_name);
+            self.pending_wait = Some(last_pid);
         }
         Ok(())
     }
@@ -867,6 +1021,8 @@ mod tests {
         last_args: Vec<String>,
         last_cwd: String,
         last_stdout: Option<(String, bool)>,
+        last_stdin: Option<String>,
+        last_pipeline: Vec<(String, Vec<String>)>,
         formatted: u32,
     }
 
@@ -887,6 +1043,31 @@ mod tests {
             self.last_args = args.to_vec();
             self.last_cwd = cwd.into();
             Ok(self.spawned.len() as u64)
+        }
+
+        fn spawn_pipeline(
+            &mut self,
+            stages: &[Stage<'_>],
+            cwd: &str,
+            stdin: Option<&str>,
+            stdout: Option<(&str, bool)>,
+        ) -> Result<Vec<u64>, String> {
+            if stages.iter().any(|stage| stage.image.starts_with(b"bad")) {
+                return Err("not an executable".into());
+            }
+            self.last_stdout = stdout.map(|(path, append)| (path.into(), append));
+            self.last_stdin = stdin.map(String::from);
+            self.last_cwd = cwd.into();
+            self.last_pipeline = stages
+                .iter()
+                .map(|stage| (stage.name.into(), stage.args.to_vec()))
+                .collect();
+            let mut pids = Vec::new();
+            for stage in stages {
+                self.spawned.push((stage.name.into(), stage.image.to_vec()));
+                pids.push(self.spawned.len() as u64);
+            }
+            Ok(pids)
         }
 
         fn kill(&mut self, pid: u64) -> bool {
@@ -1224,6 +1405,78 @@ mod tests {
 
         s.ok("echo -n bad-image > /bin/broken");
         assert_eq!(s.err("broken"), "broken: not an executable\n");
+    }
+
+    #[test]
+    fn pipelines_and_input_redirection() {
+        let mut s = Session::new();
+        s.ok("mkdir /bin /data");
+        for program in ["cat", "tee", "sort"] {
+            s.ok(&format!("echo -n image-of-{program} > /bin/{program}"));
+        }
+        s.ok("echo words > /data/in.txt");
+        s.ok("cd /data");
+
+        s.ok("cat < in.txt | tee copy | sort -r > out.txt");
+        let stage = |name: &str, args: &[&str]| {
+            (
+                String::from(name),
+                args.iter().map(|&a| String::from(a)).collect::<Vec<_>>(),
+            )
+        };
+        assert_eq!(
+            s.host.last_pipeline,
+            [
+                stage("cat", &["cat"]),
+                stage("tee", &["tee", "copy"]),
+                stage("sort", &["sort", "-r"]),
+            ]
+        );
+        assert_eq!(s.host.last_stdin.as_deref(), Some("/data/in.txt"));
+        assert_eq!(s.host.last_stdout, Some(("/data/out.txt".into(), false)));
+        assert_eq!(s.host.last_cwd, "/data");
+        // The output file exists (empty) before the programs run.
+        assert_eq!(s.ok("cat out.txt"), "");
+
+        // A single program reading from a file; the built-in `cat` gives
+        // way to the program of the same name.
+        let before = s.host.spawned.len();
+        s.ok("cat < in.txt");
+        assert_eq!(s.host.spawned.len(), before + 1);
+        assert_eq!(s.host.last_pipeline, [stage("cat", &["cat"])]);
+        assert_eq!(s.host.last_stdout, None);
+
+        // The exit status is that of the last command.
+        s.host.exit_status = 3;
+        assert_eq!(s.err("cat | sort"), "sort: exited with status 3\n");
+        s.host.exit_status = 0;
+
+        // Background pipelines report the last command.
+        let line = s.ok("cat | sort &");
+        assert!(line.ends_with("] sort\n"), "{line}");
+
+        // Errors name the command or file they are about, and nothing is
+        // started.
+        let before = s.host.spawned.len();
+        assert_eq!(s.err("cat | nosuch | sort"), "nosuch: command not found\n");
+        assert_eq!(
+            s.err("cat | pwd"),
+            "pwd: this built-in command cannot be used with '|' or '<'\n"
+        );
+        assert_eq!(
+            s.err("sort < missing.txt"),
+            "missing.txt: No such file or directory\n"
+        );
+        assert_eq!(s.err("sort < /data"), "/data: is a directory\n");
+        assert_eq!(
+            s.err("pwd < in.txt"),
+            "pwd: this built-in command cannot be used with '|' or '<'\n"
+        );
+        assert_eq!(s.host.spawned.len(), before);
+        assert_eq!(
+            s.err("cat |"),
+            "omsh: syntax error: missing command before or after '|'\n"
+        );
     }
 
     #[test]
