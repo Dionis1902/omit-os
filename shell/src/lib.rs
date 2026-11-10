@@ -1060,11 +1060,55 @@ impl Shell {
         if args.is_empty() {
             return Err(Failure("missing file operand".into()));
         }
+        // A part of the file at a time, however large it is. What is
+        // not UTF-8 is shown as the replacement character; a character
+        // cut by the end of a part waits for the next.
+        const PART: usize = 64 * 1024;
+        let mut part = alloc::vec![0u8; PART];
         for arg in args {
-            let data = vfs
-                .read_file(&self.resolve(arg)?)
-                .map_err(|e| fs_failure(arg, e))?;
-            out.write_str(&String::from_utf8_lossy(&data))?;
+            let path = self.resolve(arg)?;
+            let (mut held, mut offset) = (0, 0u64);
+            loop {
+                let count = vfs
+                    .read_at(&path, offset, &mut part[held..])
+                    .map_err(|e| fs_failure(arg, e))?;
+                offset += count as u64;
+                let (end, last) = (held + count, count == 0);
+                let mut rest = &part[..end];
+                while !rest.is_empty() {
+                    match core::str::from_utf8(rest) {
+                        Ok(text) => {
+                            out.write_str(text)?;
+                            rest = &[];
+                        }
+                        Err(error) => {
+                            let (good, bad) = rest.split_at(error.valid_up_to());
+                            out.write_str(core::str::from_utf8(good).unwrap_or(""))?;
+                            match error.error_len() {
+                                Some(length) => {
+                                    out.write_char(char::REPLACEMENT_CHARACTER)?;
+                                    rest = &bad[length..];
+                                }
+                                None if last => {
+                                    out.write_char(char::REPLACEMENT_CHARACTER)?;
+                                    rest = &[];
+                                }
+                                // The beginning of a character: more
+                                // of it may follow.
+                                None => {
+                                    rest = bad;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                held = rest.len();
+                part.copy_within(end - held..end, 0);
+                if last {
+                    break;
+                }
+            }
         }
         Ok(())
     }
@@ -1640,6 +1684,24 @@ mod tests {
         s.ok("echo a > 1");
         s.ok("echo b > 2");
         assert_eq!(s.ok("cat 1 2"), "a\nb\n");
+        // A large file is shown a part at a time: the same text as if
+        // it had been read whole, also where a character of several
+        // bytes straddles two parts, and where bytes are not text.
+        let mut big = Vec::new();
+        while big.len() < 200_000 {
+            big.extend_from_slice("zażółć gęślą jaźń — \u{1F980}\n".as_bytes());
+        }
+        // Not a multiple of the pattern's length in the first part, so
+        // that the boundary falls inside a character.
+        big.insert(1, b'!');
+        big[70_000] = 0xFF;
+        big.extend_from_slice(&[0xE2, 0x82]);
+        s.vfs.write_file("/big", &big, WriteMode::Truncate).unwrap();
+        assert!(s.ok("cat /big") == String::from_utf8_lossy(&big));
+        s.vfs
+            .write_file("/cut", &[b'a', 0xF0, 0x9F], WriteMode::Truncate)
+            .unwrap();
+        assert_eq!(s.ok("cat /cut /1"), "a\u{FFFD}a\n");
         assert_eq!(s.err("cat x"), "cat: x: Is a directory\n");
         assert_eq!(s.err("cat"), "cat: missing file operand\n");
     }
