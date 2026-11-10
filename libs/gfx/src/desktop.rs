@@ -35,6 +35,10 @@ pub const TITLE_HEIGHT: i32 = 24;
 pub const BORDER: i32 = 1;
 /// How much of a window must stay on screen horizontally.
 const KEEP_VISIBLE: i32 = 48;
+/// Side of the square in a window's bottom-right corner that resizes it.
+pub const GRIP: i32 = 12;
+/// Smallest content area a window can be resized to.
+const MIN_CONTENT: (i32, i32) = (120, 60);
 
 /// The colours the desktop draws with.
 pub mod theme {
@@ -60,6 +64,8 @@ pub mod theme {
     pub const WINDOW: Colour = 0xF2_F2_F2;
     /// Text in windows.
     pub const TEXT: Colour = 0x20_20_20;
+    /// The strokes of the resize grip in a window's corner.
+    pub const GRIP: Colour = 0x9A_A0_A8;
     /// Pointer outline.
     pub const POINTER_EDGE: Colour = 0x00_00_00;
     /// Pointer fill.
@@ -150,6 +156,13 @@ pub trait App {
     /// The position can lie outside the content area.
     fn pointer(&mut self, _x: i32, _y: i32, _buttons: u32, _context: &mut Context) {}
 
+    /// Whether the window can be resized and maximised: `draw` must
+    /// then cope with any `width` and `height`. Windows whose contents
+    /// have a fixed size (a picture someone else draws, say) say no.
+    fn resizable(&self) -> bool {
+        true
+    }
+
     /// Called regularly. Returns whether the contents changed and need to
     /// be drawn again.
     fn tick(&mut self, _context: &mut Context) -> bool {
@@ -166,6 +179,8 @@ struct Window {
     /// The whole window, border included.
     frame: Rect,
     app: Box<dyn App>,
+    /// While the window is maximised: the frame to go back to.
+    restore: Option<Rect>,
 }
 
 impl Window {
@@ -182,6 +197,28 @@ impl Window {
         let bar = self.title_bar();
         let size = TITLE_HEIGHT - 8;
         Rect::new(bar.right() - size - 4, bar.y + 4, size, size)
+    }
+
+    /// The button that maximises the window or puts it back; left of
+    /// the close button. Only resizable windows have one.
+    fn maximise_button(&self) -> Option<Rect> {
+        let close = self.close_button();
+        self.app
+            .resizable()
+            .then(|| Rect::new(close.x - close.w - 4, close.y, close.w, close.h))
+    }
+
+    /// The corner that resizes the window when dragged. Maximised
+    /// windows have none.
+    fn grip(&self) -> Option<Rect> {
+        (self.app.resizable() && self.restore.is_none()).then(|| {
+            Rect::new(
+                self.frame.right() - BORDER - GRIP,
+                self.frame.bottom() - BORDER - GRIP,
+                GRIP,
+                GRIP,
+            )
+        })
     }
 
     fn content(&self) -> Rect {
@@ -211,6 +248,9 @@ pub struct Desktop {
     left_button: bool,
     /// The window being moved, and where in its frame it was grabbed.
     drag: Option<(WindowId, Point)>,
+    /// The window being resized by its corner, and where in the corner
+    /// (relative to the frame's bottom-right) it was grabbed.
+    resize: Option<(WindowId, Point)>,
     /// The window whose content area the left button was pressed in and
     /// is still held over: it receives pointer movement.
     capture: Option<WindowId>,
@@ -234,6 +274,7 @@ impl Desktop {
             pointer: Point::new(width / 2, height / 2),
             left_button: false,
             drag: None,
+            resize: None,
             capture: None,
             dirty: Rect::new(0, 0, width, height),
             next_id: 0,
@@ -315,7 +356,12 @@ impl Desktop {
             // Its title bar changes colour.
             self.damage(top.frame);
         }
-        self.windows.push(Window { id, frame, app });
+        self.windows.push(Window {
+            id,
+            frame,
+            app,
+            restore: None,
+        });
         self.damage(frame);
         id
     }
@@ -359,6 +405,9 @@ impl Desktop {
             if self.drag.is_some_and(|(dragged, _)| dragged == id) {
                 self.drag = None;
             }
+            if self.resize.is_some_and(|(resized, _)| resized == id) {
+                self.resize = None;
+            }
         }
     }
 
@@ -399,6 +448,24 @@ impl Desktop {
 
         if !left {
             self.drag = None;
+            self.resize = None;
+        }
+        if let Some((id, grab)) = self.resize
+            && let Some(index) = self.index_of(id)
+        {
+            // The corner follows the pointer; the top-left stays put.
+            let frame = self.windows[index].frame;
+            let min_w = MIN_CONTENT.0 + 2 * BORDER;
+            let min_h = MIN_CONTENT.1 + 2 * BORDER + TITLE_HEIGHT;
+            let w = (self.pointer.x - grab.x - frame.x).clamp(min_w, self.width.max(min_w));
+            let h = (self.pointer.y - grab.y - frame.y)
+                .clamp(min_h, (self.height - TASKBAR_HEIGHT - frame.y).max(min_h));
+            let resized = Rect::new(frame.x, frame.y, w, h);
+            if resized != frame {
+                self.windows[index].frame = resized;
+                self.damage(frame);
+                self.damage(resized);
+            }
         }
         if let Some((id, grab)) = self.drag
             && let Some(index) = self.index_of(id)
@@ -464,6 +531,30 @@ impl Desktop {
 
         if self.windows[top].close_button().contains(at) {
             self.close(id);
+        } else if self.windows[top]
+            .maximise_button()
+            .is_some_and(|button| button.contains(at))
+        {
+            self.toggle_maximised(top);
+        } else if self.windows[top]
+            .grip()
+            .is_some_and(|grip| grip.contains(at))
+        {
+            // Remember where in the corner the pointer is, so that the
+            // corner does not jump to it.
+            self.resize = Some((id, Point::new(at.x - frame.right(), at.y - frame.bottom())));
+        } else if self.windows[top].restore.is_some() {
+            // A maximised window is not dragged about; its contents
+            // still get the click.
+            let content = self.windows[top].content();
+            if content.contains(at) {
+                let mut context = Context::default();
+                self.capture = Some(id);
+                self.windows[top]
+                    .app
+                    .click(at.x - content.x, at.y - content.y, &mut context);
+                self.perform(context, Some(id));
+            }
         } else if self.windows[top].title_bar().contains(at) {
             self.drag = Some((id, Point::new(at.x - frame.x, at.y - frame.y)));
         } else {
@@ -477,6 +568,23 @@ impl Desktop {
                 self.perform(context, Some(id));
             }
         }
+    }
+
+    /// Maximises the window at `index` to the whole screen above the
+    /// task bar, or puts it back where and how large it was.
+    fn toggle_maximised(&mut self, index: usize) {
+        let window = &mut self.windows[index];
+        let old = window.frame;
+        window.frame = match window.restore.take() {
+            Some(previous) => previous,
+            None => {
+                window.restore = Some(old);
+                Rect::new(0, 0, self.width, self.height - TASKBAR_HEIGHT)
+            }
+        };
+        let new = window.frame;
+        self.damage(old);
+        self.damage(new);
     }
 
     /// Reports a key press; it goes to the top window.
@@ -589,6 +697,14 @@ fn draw_window(canvas: &mut Canvas<'_>, window: &mut Window, active: bool) {
             theme::LIGHT_TEXT,
         );
     }
+    if let Some(button) = window.maximise_button() {
+        // A square outline: "make this window as large as the screen".
+        canvas.fill(button, theme::BUTTON);
+        canvas.outline(
+            Rect::new(button.x + 4, button.y + 4, button.w - 8, button.h - 8),
+            theme::LIGHT_TEXT,
+        );
+    }
     canvas.fill(close, theme::CLOSE);
     // An "x" in the close button.
     for step in 4..close.w - 4 {
@@ -607,8 +723,22 @@ fn draw_window(canvas: &mut Canvas<'_>, window: &mut Window, active: bool) {
     }
     let content = window.content();
     canvas.fill(content, theme::WINDOW);
-    let mut inner = canvas.sub(content);
-    window.app.draw(&mut inner, content.w, content.h);
+    {
+        let mut inner = canvas.sub(content);
+        window.app.draw(&mut inner, content.w, content.h);
+    }
+    if let Some(grip) = window.grip() {
+        // Three diagonal strokes in the corner, over the contents.
+        for offset in [3, 6, 9] {
+            for step in 0..GRIP - offset {
+                canvas.set(
+                    grip.x + offset + step,
+                    grip.bottom() - 1 - step,
+                    theme::GRIP,
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -838,8 +968,126 @@ mod tests {
         assert_eq!(f.pixel(frame.x - 1, frame.y + 50), theme::BACKGROUND);
         assert_eq!(f.pixel(frame.right(), frame.y + 50), theme::BACKGROUND);
         assert_eq!(f.pixel(frame.x + 50, frame.bottom()), theme::BACKGROUND);
+        // The content area is all the app's, except the strokes of the
+        // resize grip in its corner (9 + 6 + 3 pixels).
         let reds = f.surface.pixels().iter().filter(|&&p| p == RED).count();
-        assert_eq!(reds, 200 * 100);
+        assert_eq!(reds, 200 * 100 - 18);
+        let grip = f.desktop.windows[0].grip().unwrap();
+        assert_eq!(f.pixel(grip.x + 3, grip.bottom() - 1), theme::GRIP);
+    }
+
+    #[test]
+    fn dragging_the_corner_resizes_and_the_button_maximises() {
+        let mut f = Fixture::new();
+        let id = f.open("sizeable", RED);
+        f.render();
+        let before = f.desktop.window_frame(id).unwrap();
+        let grip = f.desktop.windows[0].grip().unwrap();
+
+        // Drag the corner 40 right and 25 down: the frame grows by that,
+        // its top-left stays, and the app is drawn at the new size.
+        f.move_to(grip.x + 5, grip.y + 5);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(40, 25, 1);
+        f.desktop.mouse(0, 0, 0);
+        let grown = f.desktop.window_frame(id).unwrap();
+        assert_eq!(
+            grown,
+            Rect::new(before.x, before.y, before.w + 40, before.h + 25)
+        );
+        f.render();
+        assert_eq!(f.pixel(grown.right() - 20, grown.bottom() - 20), RED);
+        assert_eq!(
+            f.pixel(grown.right() + 2, grown.bottom() - 20),
+            theme::BACKGROUND
+        );
+        // No pointer events went to the app, and releasing ends it.
+        assert!(f.log.borrow().clicks.is_empty() && f.log.borrow().pointer.is_empty());
+        f.desktop.mouse(30, 30, 0);
+        assert_eq!(f.desktop.window_frame(id), Some(grown));
+
+        // It cannot be made smaller than the minimum, nor larger than
+        // the space above the task bar.
+        let grip = f.desktop.windows[0].grip().unwrap();
+        f.move_to(grip.x + 5, grip.y + 5);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(-2000, -2000, 1);
+        let small = f.desktop.window_frame(id).unwrap();
+        assert_eq!(
+            (small.w, small.h),
+            (
+                MIN_CONTENT.0 + 2 * BORDER,
+                MIN_CONTENT.1 + 2 * BORDER + TITLE_HEIGHT
+            )
+        );
+        f.desktop.mouse(5000, 5000, 1);
+        f.desktop.mouse(0, 0, 0);
+        let large = f.desktop.window_frame(id).unwrap();
+        assert_eq!(large.bottom(), H as i32 - TASKBAR_HEIGHT);
+        assert!(large.w <= W as i32);
+
+        // Maximise: the whole screen above the task bar, no grip, and
+        // the title bar no longer drags. Again: back as it was.
+        let button = f.desktop.windows[0].maximise_button().unwrap();
+        f.click_at(button.x + 2, button.y + 2);
+        let full = Rect::new(0, 0, W as i32, H as i32 - TASKBAR_HEIGHT);
+        assert_eq!(f.desktop.window_frame(id), Some(full));
+        assert!(f.desktop.windows[0].grip().is_none());
+        f.render();
+        assert_eq!(f.pixel(W as i32 - 3, H as i32 - TASKBAR_HEIGHT - 3), RED);
+        assert_eq!(f.pixel(3, H as i32 - 3), theme::TASKBAR);
+        f.move_to(100, 10);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(50, 50, 1);
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.desktop.window_frame(id), Some(full));
+        // A click in the contents still arrives.
+        f.click_at(300, 200);
+        assert_eq!(f.log.borrow().clicks.len(), 1);
+        let button = f.desktop.windows[0].maximise_button().unwrap();
+        f.click_at(button.x + 2, button.y + 2);
+        assert_eq!(f.desktop.window_frame(id), Some(large));
+        // The incremental repaint still equals a full one.
+        f.render();
+        let mut fresh = Surface::new(W, H, 0);
+        f.desktop.damage(Rect::new(0, 0, W as i32, H as i32));
+        f.desktop.render(&mut fresh);
+        assert!(f.surface.pixels() == fresh.pixels());
+    }
+
+    #[test]
+    fn fixed_size_windows_have_no_grip_or_maximise_button() {
+        struct Fixed;
+        impl App for Fixed {
+            fn title(&self) -> &str {
+                "fixed"
+            }
+            fn draw(&mut self, _: &mut Canvas<'_>, _: i32, _: i32) {}
+            fn resizable(&self) -> bool {
+                false
+            }
+        }
+        let mut f = Fixture::new();
+        let id = f.desktop.open(Box::new(Fixed), 200, 100);
+        let frame = f.desktop.window_frame(id).unwrap();
+        assert!(f.desktop.windows[0].grip().is_none());
+        assert!(f.desktop.windows[0].maximise_button().is_none());
+        // Where the grip would be: a press there is an ordinary click in
+        // the contents, and nothing changes size.
+        f.move_to(frame.right() - 5, frame.bottom() - 5);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(30, 30, 1);
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.desktop.window_frame(id), Some(frame));
+        // Where the maximise button would be is title bar: it drags.
+        let close = f.desktop.windows[0].close_button();
+        f.move_to(close.x - 10, close.y + 2);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(10, 10, 1);
+        f.desktop.mouse(0, 0, 0);
+        let moved = f.desktop.window_frame(id).unwrap();
+        assert_eq!((moved.w, moved.h), (frame.w, frame.h));
+        assert_eq!((moved.x, moved.y), (frame.x + 10, frame.y + 10));
     }
 
     #[test]

@@ -296,10 +296,10 @@ been run on a physical machine.
 | PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
-| Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
+| Desktop (`/bin/desktop`): windows that can be moved, resized by a corner and maximised; task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window, maximises and restores it and exits, checking screenshots. Resizing by the corner is tested on the host only |
 | Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
 | Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
-| A terminal emulator, resizable windows, graphics modes | Not started |
+| A terminal emulator, resizable windows for other programs, minimising, graphics modes | Not started |
 | A small game (`/bin/pop`: click the shrinking discs) redrawing 50 times a second, with frame pacing against the clock | Working; the QEMU test plays one move and the game reports its frame intervals (average 20.0 ms at the intended 20 ms, longest 25–30 ms under emulation; ADR 0013). Not synchronised to the display, and only multiples of the 10 ms timer tick can be paced |
 | GPU drivers and acceleration, Vulkan, Direct3D, existing games | Not started; requirements and a proposed order of work are in ADR 0013 |
 | Windows threads: `CreateThread`, exit codes, `WaitForSingleObject`, events, critical sections, `Tls*` storage, per-thread TEB | Working, tested by a multi-threaded Windows program (44 checks) |
@@ -522,8 +522,8 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next steps**, in no promised order: on the desktop, resizable windows
-and a terminal as a separate program; for Windows programs, what a C
+**Next steps**, in no promised order: on the desktop, resizing for the
+windows of other programs and a terminal as a separate program; for Windows programs, what a C
 runtime needs before any existing program can start (static thread-local
 storage, exception handling, a much larger part of the API); for
 hardware, USB hubs and storage, interrupts for device drivers (MSI-X)

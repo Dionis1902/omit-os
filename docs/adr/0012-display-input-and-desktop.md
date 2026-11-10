@@ -82,7 +82,9 @@ same font code and searching for it:
 - Only the firmware's framebuffer and resolution; no mode setting, no
   acceleration, no vertical-sync, one fixed-size ASCII-oriented font.
 - PS/2 mouse and keyboard only (no USB), no mouse wheel, US layout.
-- Windows cannot be resized, minimised or maximised.
+- Windows cannot be minimised. (Since this was written they can be
+  resized by a corner and maximised — the built-in ones; windows of
+  other programs have a fixed size.)
 - Input is polled once per timer tick (10 ms).
 - Under software emulation in debug builds, full-screen repaints are
   visibly slow; no performance measurements have been made.

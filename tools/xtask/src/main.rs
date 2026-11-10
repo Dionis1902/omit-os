@@ -2015,7 +2015,7 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         fn draw(&mut self, _: &mut omit_gfx::surface::Canvas<'_>, _: i32, _: i32) {}
     }
     layout.open(Box::new(Blank), 470, 200);
-    layout.open(Box::new(Blank), 620, 360);
+    let run_window = layout.open(Box::new(Blank), 620, 360);
     let scribble = layout.open(Box::new(Blank), 360, 240);
     let frame = layout
         .window_frame(scribble)
@@ -2225,6 +2225,46 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                 && screen_shows(image, "Hello from a Windows executable!")
         },
     )?;
+
+    // Maximise the Run window with the button in its title bar — it then
+    // covers the screen above the task bar — and put it back.
+    let moved = layout
+        .window_frame(run_window)
+        .ok_or("no frame for the Run window")?
+        .translate(420, 330);
+    // (The buttons are squares of the title bar's height less 8, 4 from
+    // its edge and from each other; close is the right one.)
+    let side = TITLE_HEIGHT - 8;
+    let maximise = |frame: omit_gfx::geometry::Rect| {
+        (
+            frame.right() - BORDER - 2 * (side + 4) + side / 2,
+            frame.y + BORDER + 4 + side / 2,
+        )
+    };
+    let (x, y) = maximise(moved);
+    mouse.click(x, y)?;
+    let far = (image.width - 10, 400usize);
+    wait_for_screen(check, "the Run window maximised", patience, |image| {
+        image.pixel(far.0, far.1) == rgb(theme::WINDOW)
+            && image.pixel(20, 400) == rgb(theme::WINDOW)
+            && image.pixel(image.width / 2, 12) == rgb(theme::TITLE_ACTIVE)
+            && image.pixel(image.width / 2, image.height - 2) == rgb(theme::TASKBAR)
+            && screen_shows(image, "Hello from a Windows executable!")
+    })?;
+    let full = omit_gfx::geometry::Rect::new(
+        0,
+        0,
+        image.width as i32,
+        image.height as i32 - TASKBAR_HEIGHT,
+    );
+    let (x, y) = maximise(full);
+    mouse.click(x, y)?;
+    mouse.move_to(exit_x, exit_y - 60)?;
+    wait_for_screen(check, "the Run window restored", patience, |image| {
+        image.pixel(far.0, far.1) == rgb(theme::BACKGROUND)
+            && image.pixel(20, 400) == rgb(theme::BACKGROUND)
+            && image.pixel(grab_x as usize + 320, grab_y as usize + 330) == rgb(theme::TITLE_ACTIVE)
+    })?;
 
     mouse.click(exit_x, exit_y)
 }

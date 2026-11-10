@@ -126,6 +126,12 @@ impl App for Remote {
         });
     }
 
+    /// The other program drew for the size it asked for; the protocol
+    /// has no way to tell it about another.
+    fn resizable(&self) -> bool {
+        false
+    }
+
     fn key(&mut self, code: i32, _context: &mut Context) {
         self.connection.send(Event::Key { code });
     }
