@@ -986,6 +986,42 @@ const BOOT_TESTS: &[BootTest] = &[
         sata: false,
         no_serial: false,
     },
+    // The same keyboard behind a hub, and a mouse behind a second hub
+    // plugged into the first.
+    BootTest {
+        name: "usb-keyboard-behind-hubs",
+        cmdline: "nops2",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            SUCCESS_MESSAGE,
+            "[INFO ] usb: port 5.1: keyboard (0627:0001)",
+            "[INFO ] usb: port 5.2.3: mouse (0627:0001)",
+            "[INFO ] usb: port 5.2: hub with 8 ports",
+            "[INFO ] usb: port 5: hub with 8 ports",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[("echo typed-on-serial", "\ntyped-on-serial\n")],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: true,
+        desktop: false,
+        qemu_args: &[
+            "-device",
+            "qemu-xhci,id=xhci",
+            "-device",
+            "usb-hub,bus=xhci.0,port=1",
+            "-device",
+            "usb-kbd,bus=xhci.0,port=1.1",
+            "-device",
+            "usb-hub,bus=xhci.0,port=1.2",
+            "-device",
+            "usb-mouse,bus=xhci.0,port=1.2.3",
+        ],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: false,
+    },
     // And the whole desktop scenario — pointer movement, clicks, drags,
     // typing — with USB mouse and keyboard only.
     BootTest {

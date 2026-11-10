@@ -59,9 +59,10 @@ cost is up to one tick (10 ms) of added input latency.
 - **Tested only against QEMU's emulated controller and devices.** Real
   controllers and devices differ in timing and in how strictly they
   follow the specifications; this driver has never met one.
-- **No hubs.** Only devices plugged directly into the controller's own
-  ports are seen. Many machines route some sockets, and some keyboards
-  route themselves, through hubs.
+- Hubs (added later; up to five in a row) are asked about their ports
+  twice a second over the control endpoint; their own change
+  notifications are not used. Tested with QEMU's emulated hub: a
+  keyboard behind one hub and a mouse behind two.
 - Only boot-protocol keyboards and mice. No other HID devices
   (touchpads that are not also boot mice, tablets, game controllers),
   no mouse wheel, no keyboard LEDs, no storage or any other class.

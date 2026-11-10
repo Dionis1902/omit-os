@@ -14,8 +14,8 @@
 //!
 //! Limits, all deliberate for a first USB driver:
 //!
-//! * no hubs: a device behind a hub (including the hubs built into some
-//!   keyboards, monitors and docking stations) is not seen;
+//! * hubs are supported (up to five in a row), but are asked about
+//!   their ports twice a second instead of being listened to;
 //! * only HID boot keyboards and mice; no storage, no other class;
 //! * no interrupts: one kernel thread looks at the controller's event
 //!   ring every timer tick (10 ms), which adds up to that much latency;
@@ -119,6 +119,9 @@ const MAX_SLOTS: u32 = 16;
 /// Reports queued per interrupt endpoint.
 const REPORT_BUFFERS: usize = 8;
 const REPORT_BUFFER_SIZE: usize = 64;
+
+/// How often hubs are asked about their ports.
+const HUB_SCAN_TICKS: u64 = time::TICK_HZ as u64 / 2;
 
 /// Auto-repeat: a held key repeats after this many ticks, then at this
 /// interval.
@@ -320,10 +323,65 @@ struct Endpoint {
     repeat_at: Option<u64>,
 }
 
+/// Where a device is plugged in.
+#[derive(Clone, Copy)]
+struct Place {
+    /// The controller's own port the device hangs off, directly or
+    /// through hubs.
+    root_port: u8,
+    /// The path through hubs: four bits per hub, the nearest to the
+    /// controller lowest, each the number of the hub's port.
+    route: u32,
+    /// How many hubs are on the way.
+    tier: u8,
+    speed: u32,
+    /// The hub (its slot) and the port of it the device is plugged into.
+    parent: Option<(u8, u8)>,
+    /// For a low- or full-speed device behind a high-speed hub: that hub
+    /// and its port, which translate between the speeds.
+    translator: Option<(u8, u8)>,
+}
+
+impl Place {
+    /// The first three words of a slot context for a device here.
+    fn slot_words(&self, context_entries: u32, hub_ports: Option<u8>) -> [u32; 3] {
+        let hub = u32::from(hub_ports.is_some()) << 26;
+        let (translator_slot, translator_port) = self.translator.unwrap_or((0, 0));
+        [
+            self.route | (self.speed << 20) | hub | (context_entries << 27),
+            (u32::from(self.root_port) << 16) | (u32::from(hub_ports.unwrap_or(0)) << 24),
+            u32::from(translator_slot) | (u32::from(translator_port) << 8),
+        ]
+    }
+}
+
+impl fmt::Display for Place {
+    /// `5` for the controller's port 5, `5.2` for port 2 of a hub there.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.root_port)?;
+        for tier in 0..self.tier {
+            write!(f, ".{}", (self.route >> (4 * tier)) & 0xF)?;
+        }
+        Ok(())
+    }
+}
+
+/// What the driver keeps for a hub.
+struct Hub {
+    ports: u8,
+    /// The hub's control endpoint, for asking about its ports.
+    ring: Ring,
+    scratch: DmaPage,
+    /// Ports whose device was looked at (and perhaps found unusable), so
+    /// that it is not tried again on every poll.
+    tried: u16,
+}
+
 /// A device that has been set up.
 struct Device {
     slot: u8,
-    port: u8,
+    place: Place,
+    hub: Option<Hub>,
 }
 
 /// The controller.
@@ -675,26 +733,234 @@ impl Xhci {
         self.write32(register, (status & PORT_PRESERVE) | PORT_CHANGES);
         let speed = (status >> 10) & 0xF;
 
+        self.enumerate_at(Place {
+            root_port: port,
+            route: 0,
+            tier: 0,
+            speed,
+            parent: None,
+            translator: None,
+        })
+    }
+
+    /// Sets up the device at `place`, whose port has been reset.
+    fn enumerate_at(&mut self, place: Place) -> Result<Option<String>, XhciError> {
         let slot = self.command(0, TRB_ENABLE_SLOT << 10)?.slot();
         if slot == 0 || u32::from(slot) > MAX_SLOTS {
             return Err(XhciError::Protocol);
         }
-        let result = self.setup_device(slot, port, speed);
+        let result = self.setup_device(slot, place);
         if !matches!(result, Ok(Some(_))) {
             // Give the slot back; the device is left alone.
-            let _ = self.command(0, (TRB_DISABLE_SLOT << 10) | (u32::from(slot) << 24));
-            self.device_contexts.write64(usize::from(slot) * 8, 0);
-            self.endpoints.retain(|endpoint| endpoint.slot != slot);
+            self.detach(slot);
         }
         result
     }
 
-    fn setup_device(
+    /// Forgets the device in `slot` and, if it is a hub, everything
+    /// plugged into it.
+    fn detach(&mut self, slot: u8) {
+        let children: Vec<u8> = self
+            .devices
+            .iter()
+            .filter(|device| device.place.parent.is_some_and(|(hub, _)| hub == slot))
+            .map(|device| device.slot)
+            .collect();
+        for child in children {
+            self.detach(child);
+        }
+        self.devices.retain(|device| device.slot != slot);
+        self.endpoints.retain(|endpoint| endpoint.slot != slot);
+        let _ = self.command(0, (TRB_DISABLE_SLOT << 10) | (u32::from(slot) << 24));
+        self.device_contexts.write64(usize::from(slot) * 8, 0);
+    }
+
+    /// Finishes setting up a hub: tells the controller it is one, powers
+    /// its ports and looks at what is plugged into them.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the pieces of a device set-up in progress"
+    )]
+    fn setup_hub(
         &mut self,
         slot: u8,
-        port: u8,
-        speed: u32,
+        place: Place,
+        mut ring: Ring,
+        scratch: DmaPage,
+        input: DmaPage,
+        configuration: u8,
     ) -> Result<Option<String>, XhciError> {
+        if place.tier >= 5 {
+            // The route to a device has room for five hubs.
+            return Ok(None);
+        }
+        self.control(
+            slot,
+            &mut ring,
+            scratch,
+            [0x00, 9, configuration, 0, 0, 0, 0, 0],
+            Data::None,
+        )?;
+        // The hub descriptor (class request, type 0x29): byte 2 is the
+        // number of ports, byte 5 the time from power-on to usable, in
+        // units of 2 ms.
+        let mut descriptor = [0u8; 8];
+        self.control(
+            slot,
+            &mut ring,
+            scratch,
+            [0xA0, 6, 0, 0x29, 0, 0, 8, 0],
+            Data::In(&mut descriptor),
+        )?;
+        // A route names ports with four bits.
+        let ports = descriptor[2].min(15);
+        input.clear();
+        input.write32(4, 1);
+        for (index, word) in place.slot_words(1, Some(ports)).into_iter().enumerate() {
+            input.write32(self.input_context(0) + 4 * index, word);
+        }
+        self.command(
+            input.phys,
+            (TRB_CONFIGURE_ENDPOINT << 10) | (u32::from(slot) << 24),
+        )?;
+        for port in 1..=ports {
+            // SET_FEATURE(PORT_POWER).
+            self.control(
+                slot,
+                &mut ring,
+                scratch,
+                [0x23, 3, 8, 0, port, 0, 0, 0],
+                Data::None,
+            )?;
+        }
+        sched::sleep_ticks((u64::from(descriptor[5]) * 2).div_ceil(10).max(10));
+        self.devices.push(Device {
+            slot,
+            place,
+            hub: Some(Hub {
+                ports,
+                ring,
+                scratch,
+                tried: 0,
+            }),
+        });
+        self.scan_hub(slot);
+        Ok(Some(alloc::format!("hub with {ports} ports")))
+    }
+
+    /// Looks at the ports of the hub in `slot`: sets up devices that
+    /// have appeared, forgets those that are gone.
+    fn scan_hub(&mut self, slot: u8) {
+        let Some(position) = self.devices.iter().position(|device| device.slot == slot) else {
+            return;
+        };
+        // Taken out of the list while its control endpoint is in use.
+        let mut device = self.devices.swap_remove(position);
+        let place = device.place;
+        let mut arrived = Vec::new();
+        let mut gone = Vec::new();
+        if let Some(hub) = &mut device.hub {
+            for port in 1..=hub.ports {
+                let mut status = [0u8; 4];
+                let ask = |xhci: &mut Self, hub: &mut Hub, status: &mut [u8; 4]| {
+                    // GET_STATUS for the port: status bits, change bits.
+                    xhci.control(
+                        slot,
+                        &mut hub.ring,
+                        hub.scratch,
+                        [0xA3, 0, 0, 0, port, 0, 4, 0],
+                        Data::In(status),
+                    )
+                    .is_ok()
+                };
+                if !ask(self, hub, &mut status) {
+                    continue;
+                }
+                let connected = status[0] & 0x01 != 0;
+                let bit = 1u16 << port;
+                if !connected {
+                    hub.tried &= !bit;
+                    gone.push(port);
+                    continue;
+                }
+                if hub.tried & bit != 0 {
+                    continue;
+                }
+                hub.tried |= bit;
+                // Reset the port (SET_FEATURE 4) and wait for it to be
+                // enabled; then clear the "reset" and "connection"
+                // change bits (CLEAR_FEATURE 20 and 16).
+                let request = |xhci: &mut Self, hub: &mut Hub, kind: u8, feature: u8| {
+                    xhci.control(
+                        slot,
+                        &mut hub.ring,
+                        hub.scratch,
+                        [0x23, kind, feature, 0, port, 0, 0, 0],
+                        Data::None,
+                    )
+                    .is_ok()
+                };
+                if !request(self, hub, 3, 4) {
+                    continue;
+                }
+                let mut enabled = false;
+                for _ in 0..50 {
+                    sched::sleep_ticks(1);
+                    if ask(self, hub, &mut status) && status[0] & 0x10 == 0 && status[0] & 0x02 != 0
+                    {
+                        enabled = true;
+                        break;
+                    }
+                }
+                request(self, hub, 1, 20);
+                request(self, hub, 1, 16);
+                if !enabled {
+                    continue;
+                }
+                // Bit 9 of the status: low speed; bit 10: high speed.
+                let speed = match status[1] & 0x06 {
+                    0x02 => SPEED_LOW,
+                    0x04 => SPEED_HIGH,
+                    _ => SPEED_FULL,
+                };
+                let translator = match (speed, place.speed) {
+                    (SPEED_HIGH, _) => None,
+                    (_, SPEED_HIGH) => Some((slot, port)),
+                    _ => place.translator,
+                };
+                arrived.push(Place {
+                    root_port: place.root_port,
+                    route: place.route | (u32::from(port) << (4 * place.tier)),
+                    tier: place.tier + 1,
+                    speed,
+                    parent: Some((slot, port)),
+                    translator,
+                });
+            }
+        }
+        self.devices.push(device);
+        for port in gone {
+            let child = self
+                .devices
+                .iter()
+                .find(|device| device.place.parent == Some((slot, port)))
+                .map(|device| (device.slot, device.place));
+            if let Some((child, place)) = child {
+                self.detach(child);
+                info!("usb: port {place}: device removed");
+            }
+        }
+        for place in arrived {
+            match self.enumerate_at(place) {
+                Ok(Some(description)) => info!("usb: port {place}: {description}"),
+                Ok(None) => {}
+                Err(error) => warn!("usb: port {place}: cannot use the device: {error}"),
+            }
+        }
+    }
+
+    fn setup_device(&mut self, slot: u8, place: Place) -> Result<Option<String>, XhciError> {
+        let speed = place.speed;
         let output = DmaPage::new()?;
         let input = DmaPage::new()?;
         let scratch = DmaPage::new()?;
@@ -714,9 +980,10 @@ impl Xhci {
         let endpoint0 = self.input_context(1);
         // Input control context: add the slot context and endpoint 0.
         input.write32(4, 0b11);
-        // One context entry (endpoint 0), the speed, the root hub port.
-        input.write32(slot_context, (1 << 27) | (speed << 20));
-        input.write32(slot_context + 4, u32::from(port) << 16);
+        // One context entry (endpoint 0), and where the device is.
+        for (index, word) in place.slot_words(1, None).into_iter().enumerate() {
+            input.write32(slot_context + 4 * index, word);
+        }
         // Error count 3, control endpoint, packet size.
         input.write32(
             endpoint0 + 4,
@@ -773,12 +1040,16 @@ impl Xhci {
         )?;
         let total = usize::from(u16::from_le_bytes([configuration[2], configuration[3]]))
             .min(configuration.len());
+        if device[4] == 9 {
+            // Device class 9: a hub.
+            return self.setup_hub(slot, place, ring, scratch, input, configuration[5]);
+        }
         let found = boot_interfaces(&configuration[..total]);
         if found.is_empty() {
             // Not a keyboard or mouse: leave it unconfigured.
             info!(
-                "usb: port {port}: device {vendor:04x}:{product:04x} is not a boot keyboard or \
-                 mouse; ignored"
+                "usb: port {place}: device {vendor:04x}:{product:04x} is not a boot keyboard \
+                 or mouse; ignored"
             );
             return Ok(None);
         }
@@ -853,8 +1124,10 @@ impl Xhci {
             });
         }
         input.write32(4, add_flags);
-        input.write32(slot_context, (u32::from(last_index) << 27) | (speed << 20));
-        input.write32(slot_context + 4, u32::from(port) << 16);
+        let words = place.slot_words(u32::from(last_index), None);
+        for (index, word) in words.into_iter().enumerate() {
+            input.write32(slot_context + 4 * index, word);
+        }
         self.command(input.phys, (TRB_CONFIGURE_ENDPOINT << 10) | slot_bits)?;
 
         // Start listening: queue transfers for the reports.
@@ -865,7 +1138,11 @@ impl Xhci {
                 }
             }
         }
-        self.devices.push(Device { slot, port });
+        self.devices.push(Device {
+            slot,
+            place,
+            hub: None,
+        });
         Ok(Some(alloc::format!(
             "{} ({vendor:04x}:{product:04x})",
             names.join(" and ")
@@ -991,17 +1268,36 @@ impl Xhci {
         let register = self.port_register(port);
         let status = self.read32(register);
         self.write32(register, (status & PORT_PRESERVE) | PORT_CHANGES);
-        let known = self.devices.iter().position(|device| device.port == port);
+        let known = self.root_device(port);
         match (status & PORT_CONNECTED != 0, known) {
             (true, None) => self.attach(port),
-            (false, Some(position)) => {
-                let slot = self.devices.swap_remove(position).slot;
-                self.endpoints.retain(|endpoint| endpoint.slot != slot);
-                let _ = self.command(0, (TRB_DISABLE_SLOT << 10) | (u32::from(slot) << 24));
-                self.device_contexts.write64(usize::from(slot) * 8, 0);
+            (false, Some(slot)) => {
+                self.detach(slot);
                 info!("usb: port {port}: device removed");
             }
             _ => {}
+        }
+    }
+
+    /// The slot of the device plugged directly into the controller's
+    /// port `port`, if one has been set up.
+    fn root_device(&self, port: u8) -> Option<u8> {
+        self.devices
+            .iter()
+            .find(|device| device.place.parent.is_none() && device.place.root_port == port)
+            .map(|device| device.slot)
+    }
+
+    /// Looks at the ports of every hub.
+    fn scan_hubs(&mut self) {
+        let hubs: Vec<u8> = self
+            .devices
+            .iter()
+            .filter(|device| device.hub.is_some())
+            .map(|device| device.slot)
+            .collect();
+        for slot in hubs {
+            self.scan_hub(slot);
         }
     }
 
@@ -1094,17 +1390,25 @@ fn run(controller: usize) {
     // Devices need a moment after power-up before they answer.
     sched::sleep_ticks(u64::from(time::TICK_HZ) / 5);
     for port in 1..=xhci.ports {
-        if !xhci.devices.iter().any(|device| device.port == port) {
+        if xhci.root_device(port).is_none() {
             xhci.attach(port);
         }
     }
     INITIAL_SCAN_DONE.store(true, Ordering::Release);
+    let mut next_hub_scan = time::ticks();
     loop {
         while let Some(event) = xhci.next_event() {
             xhci.handle(event);
         }
         while let Some(port) = xhci.changed_ports.pop() {
             xhci.port_changed(port);
+        }
+        // Hubs are asked about their ports twice a second (their own
+        // way of announcing changes, an interrupt endpoint, is not
+        // used).
+        if time::ticks() >= next_hub_scan {
+            next_hub_scan = time::ticks() + HUB_SCAN_TICKS;
+            xhci.scan_hubs();
         }
         xhci.repeat_keys();
         sched::sleep_ticks(1);

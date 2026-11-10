@@ -200,9 +200,9 @@ publishing. See [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
 
 **Not tested on real hardware.** Requirements: x86-64, UEFI, Secure Boot off.
 The screen should work wherever the firmware provides a 32-bit framebuffer.
-Keyboard input needs a PS/2 keyboard, or a USB keyboard plugged directly
-into a port of an xHCI controller (not through a hub; the USB driver has
-only been tested in QEMU); otherwise the only way to type is a serial port
+Keyboard input needs a PS/2 keyboard, or a USB keyboard on an xHCI
+controller (directly or through hubs; the USB driver has only been
+tested in QEMU); otherwise the only way to type is a serial port
 (COM1, 115200 8N1). A serial port is not needed: without one the system
 uses the screen and keyboard alone.
 
@@ -267,8 +267,8 @@ machine.
 | Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest`, `threadtest` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
-| USB keyboards and mice on xHCI controllers (boot protocol, polled; hot-plug) | Working in QEMU: one test types on a USB keyboard and another runs the whole desktop scenario with USB keyboard and mouse, PS/2 switched off. **Never run on real hardware; no hubs.** See ADR 0019 |
-| Other USB devices (storage, hubs, anything else) | Not started |
+| USB keyboards and mice on xHCI controllers (boot protocol, polled; hot-plug), directly or through hubs | Working in QEMU: tests type on a USB keyboard — plugged in directly, and behind a hub with the mouse behind a second hub — and one runs the whole desktop scenario with USB keyboard and mouse, PS/2 switched off. **Never run on real hardware.** See ADR 0019 |
+| Other USB devices (storage, anything else) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
 | PCI device discovery (`lspci`) | Working, tested in QEMU |
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
@@ -350,8 +350,8 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   Run window is a line-mode terminal without escape sequences (see ADRs
   0012, 0014 and 0018). Debug builds draw noticeably slowly
   under emulation.
-- Keyboards (US layout) and mice: PS/2, or USB plugged directly into an
-  xHCI port — no hubs, and USB is untested outside QEMU.
+- Keyboards (US layout) and mice: PS/2, or USB on an xHCI controller;
+  USB is untested outside QEMU.
 - Installation works onto SATA, NVMe and VirtIO disks and has only been
   tested with QEMU's emulated ones; there is no USB storage driver. An installed system still runs from memory; only `/data`
   persists.
@@ -503,6 +503,7 @@ checks both QEMU's exit status and the serial log:
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
 | `no-serial-port` | A machine without a serial port: the console must appear on the screen, and `exit` typed on the keyboard must end the shell (the exit status is the only thing such a machine can report to the test) |
 | `calibrate-with-pm-timer` | The clocks are measured against the ACPI power-management timer instead of the PIT (as on a machine without a working PIT); the other clock serves as a check, and the date and a program run |
+| `usb-keyboard-behind-hubs` | The same with the keyboard behind a USB hub and the mouse behind a second hub plugged into the first |
 | `usb-keyboard` | PS/2 devices switched off (`nops2`): the xHCI driver finds a USB keyboard and mouse, and a command typed on the USB keyboard runs |
 | `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
@@ -530,7 +531,7 @@ Windows executables natively — each have a first working instance (ADRs
 windows of other programs and a terminal as a separate program; for Windows programs, what a C
 runtime needs before any existing program can start (static thread-local
 storage, exception handling, a much larger part of the API); for
-hardware, USB hubs and storage, interrupts for device drivers (MSI-X)
+hardware, USB storage, interrupts for device drivers (MSI-X)
 instead of polling, more than one CPU; for the system itself, a
 network stack, loadable drivers, a shell outside the kernel, and a Rust
 `std` port so that ordinary command-line tools can be built.

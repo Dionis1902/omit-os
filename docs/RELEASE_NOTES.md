@@ -112,8 +112,7 @@ and `GDI32.dll` (`winrun --list`). The programs on the image were written
 for it; existing Windows software does not run.
 
 On a real computer: the keyboard must be PS/2 (as built into many
-laptops) or USB plugged directly into the machine, not through a hub. A
-serial port is not needed.
+laptops) or USB. A serial port is not needed.
 
 ## Status
 
