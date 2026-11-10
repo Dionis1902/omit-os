@@ -154,6 +154,16 @@ from 161 ms to 33 ms. (The first version of the new drawing code
 measured 15.3 ms; filling the insides of shapes without per-pixel work
 halved that.) Debug builds are slower by the same factor as before.
 
+Those figures are from the first stage. After the eighth, the same
+measurement in the desktop test reads an average of 13 ms and a longest
+update of 230 to 330 ms (two runs on an idle machine). The two are not
+the same experiment — the test now opens eleven windows instead of
+five, and some of what it does repaints the whole screen (a change of
+theme, every step of the window switcher) — so this is not a measured
+slowdown of any one thing; but nobody has looked into where the
+longest updates come from, and with many windows open the desktop is
+slower than the first figures say.
+
 ## Not yet, and differences from the design
 
 - **Most of the design's screens**: lock screen and sign-in (there are
