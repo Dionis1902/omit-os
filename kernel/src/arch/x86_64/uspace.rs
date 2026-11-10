@@ -24,6 +24,9 @@ const PRESENT: u64 = 1 << 0;
 const WRITABLE: u64 = 1 << 1;
 const USER: u64 = 1 << 2;
 const HUGE: u64 = 1 << 7;
+/// Available to software: the frame behind this leaf entry belongs to a
+/// shared memory segment, not to the address space.
+const SHARED: u64 = 1 << 9;
 const NO_EXECUTE: u64 = 1 << 63;
 const ADDRESS_MASK: u64 = 0x000F_FFFF_FFFF_F000;
 
@@ -99,6 +102,26 @@ impl AddressSpace {
         writable: bool,
         executable: bool,
     ) -> Result<(), MapError> {
+        self.map_with(virt, phys, writable, executable, 0)
+    }
+
+    /// Maps the user page at `virt`, writable, to a frame of a shared
+    /// memory segment. The address space does not take ownership: the
+    /// frame is not freed when the page is unmapped or the address space
+    /// dropped. The caller keeps the segment alive for as long as the
+    /// mapping exists.
+    pub fn map_shared(&mut self, virt: u64, phys: u64) -> Result<(), MapError> {
+        self.map_with(virt, phys, true, false, SHARED)
+    }
+
+    fn map_with(
+        &mut self,
+        virt: u64,
+        phys: u64,
+        writable: bool,
+        executable: bool,
+        extra: u64,
+    ) -> Result<(), MapError> {
         if !virt.is_multiple_of(PAGE_SIZE)
             || !phys.is_multiple_of(PAGE_SIZE)
             || !is_user_range(virt, PAGE_SIZE)
@@ -125,7 +148,7 @@ impl AddressSpace {
             };
         }
         let entries = table(current).ok_or(MapError::InvalidRange)?;
-        let mut flags = PRESENT | USER;
+        let mut flags = PRESENT | USER | extra;
         if writable {
             flags |= WRITABLE;
         }
@@ -144,8 +167,9 @@ impl AddressSpace {
     }
 
     /// Removes the mapping of the user page at `virt` and returns the frame
-    /// it was mapped to, which the caller now owns. Returns `None` if the
-    /// page was not mapped.
+    /// it was mapped to, which the caller now owns — unless the page was
+    /// mapped with [`AddressSpace::map_shared`]: then `None` is returned,
+    /// like for a page that was not mapped.
     pub fn unmap(&mut self, virt: u64) -> Option<u64> {
         if !virt.is_multiple_of(PAGE_SIZE) || !is_user_range(virt, PAGE_SIZE) {
             return None;
@@ -174,7 +198,7 @@ impl AddressSpace {
             }
             slot.write(0);
             core::arch::asm!("invlpg [{}]", in(reg) virt, options(nostack, preserves_flags));
-            Some(entry & ADDRESS_MASK)
+            (entry & SHARED == 0).then_some(entry & ADDRESS_MASK)
         }
     }
 
@@ -349,9 +373,10 @@ unsafe fn free_table(phys: u64, level: u8) {
             // SAFETY: a present entry above level 1 points at a table owned
             // by the same address space (huge pages are never created).
             unsafe { free_table(target, level - 1) };
-        } else {
+        } else if entry & SHARED == 0 {
             // SAFETY: leaf frames were handed to the address space by
-            // `map` and are referenced by nothing else.
+            // `map` and are referenced by nothing else. (Frames of
+            // shared segments belong to the segment.)
             let _ = unsafe { frame::free(target, 0) };
         }
     }

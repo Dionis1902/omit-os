@@ -171,15 +171,18 @@ fn strip_elf(file: &[u8]) -> Result<Vec<u8>> {
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
     "cat",
+    "clock",
     "crash",
     "desktop",
     "echo",
     "fileops",
     "hello",
+    "ipctest",
     "ls",
     "memtest",
     "pipetest",
     "run",
+    "scribble",
     "sleeper",
     "spin",
     "syscheck",
@@ -725,7 +728,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -803,6 +806,8 @@ const BOOT_TESTS: &[BootTest] = &[
             // program, and through a filter with more data than a pipe
             // holds.
             ("pipetest", "\npipetest: all checks passed\n"),
+            // Shared memory between two processes, channels, poll.
+            ("ipctest", "\nipctest: all checks passed\n"),
             // Threads within a process: results through join, a mutex
             // under contention, the shared heap, the futex, and a process
             // that ends while two of its threads never would.
@@ -1569,10 +1574,20 @@ fn rgb(colour: omit_gfx::Colour) -> [u8; 3] {
 /// window (same font, same colours), anywhere on the screen.
 fn screen_shows(image: &Screenshot, text: &str) -> bool {
     use omit_gfx::desktop::theme;
+    screen_shows_in(image, text, theme::TEXT, theme::WINDOW)
+}
+
+/// Whether `image` contains `text` drawn in `colour` on `background`.
+fn screen_shows_in(
+    image: &Screenshot,
+    text: &str,
+    colour: omit_gfx::Colour,
+    background: omit_gfx::Colour,
+) -> bool {
     use omit_gfx::surface::{Surface, TEXT_HEIGHT, text_width};
     let (width, height) = (text_width(text) as usize, TEXT_HEIGHT as usize);
-    let mut rendered = Surface::new(width, height, theme::WINDOW);
-    rendered.canvas().text(0, 0, text, theme::TEXT);
+    let mut rendered = Surface::new(width, height, background);
+    rendered.canvas().text(0, 0, text, colour);
     let pattern: Vec<[u8; 3]> = rendered.pixels().iter().map(|&p| rgb(p)).collect();
     if image.width < width || image.height < height {
         return false;
@@ -1655,7 +1670,7 @@ impl<'a> Mouse<'a> {
 
 /// Labels of the desktop's task bar buttons; must match
 /// `userspace/programs/src/bin/desktop/main.rs`.
-const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Exit"];
+const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Scribble", "Clock", "Exit"];
 
 /// Operates the graphical desktop, which the caller has just started from
 /// the serial console, and checks what it shows:
@@ -1670,7 +1685,7 @@ const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Exit"];
 /// 4. dragging the title bar moves the window, contents included;
 /// 5. the Exit button ends the desktop.
 fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
-    use omit_gfx::desktop::{Desktop, TASKBAR_HEIGHT, theme};
+    use omit_gfx::desktop::{BORDER, Desktop, TASKBAR_HEIGHT, TITLE_HEIGHT, theme};
     let patience = Duration::from_secs(30);
     let count_all =
         |image: &Screenshot, colour: omit_gfx::Colour| image.count(0..image.height, rgb(colour));
@@ -1762,6 +1777,77 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     let before = wait_for_screen(check, "the prompt after tee ended", patience, |image| {
         screen_shows(image, "> _")
     })?;
+
+    // A program with a window of its own. `scribble` is the third window
+    // opened; the desktop's own layout code says where it appears.
+    struct Blank;
+    impl omit_gfx::desktop::App for Blank {
+        fn title(&self) -> &str {
+            ""
+        }
+        fn draw(&mut self, _: &mut omit_gfx::surface::Canvas<'_>, _: i32, _: i32) {}
+    }
+    layout.open(Box::new(Blank), 470, 200);
+    layout.open(Box::new(Blank), 620, 360);
+    let scribble = layout.open(Box::new(Blank), 360, 240);
+    let frame = layout
+        .window_frame(scribble)
+        .ok_or("no frame for the third window")?;
+    // The content area's corner, and colours from `scribble.rs`.
+    let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+    let at =
+        |image: &Screenshot, x: i32, y: i32| image.pixel((left + x) as usize, (top + y) as usize);
+    let (paper, black, red) = (rgb(0xFF_FF_F0), rgb(0x20_20_20), rgb(0xC0_20_20));
+    let title = |image: &Screenshot, text: &str| {
+        screen_shows_in(image, text, theme::LIGHT_TEXT, theme::TITLE_ACTIVE)
+    };
+    type_on_keyboard(
+        &check.monitor,
+        &["s", "c", "r", "i", "b", "b", "l", "e", "ret"],
+    )?;
+    wait_for_screen(check, "the Scribble window", patience, |image| {
+        title(image, "Scribble") && at(image, 10, 100) == paper && at(image, 10, 3) == black
+    })?;
+    // Draw a stroke: press, move, release. The program hears about all
+    // three and draws a line between the two points.
+    mouse.move_to(left + 50, top + 50)?;
+    mouse.button(true)?;
+    mouse.move_to(left + 150, top + 120)?;
+    mouse.button(false)?;
+    // (Away, so that the pointer does not cover what is checked.)
+    mouse.move_to(left + 300, top + 200)?;
+    wait_for_screen(
+        check,
+        "a stroke in the Scribble window",
+        patience,
+        |image| {
+            at(image, 50, 50) == black
+                && at(image, 100, 85) == black
+                && at(image, 150, 120) == black
+                && at(image, 100, 150) == paper
+                && title(image, "Scribble - 1 stroke(s)")
+        },
+    )?;
+    // Keys go to the program: `2` selects red, `c` clears the drawing.
+    type_on_keyboard(&check.monitor, &["2"])?;
+    wait_for_screen(check, "the red colour strip", patience, |image| {
+        at(image, 10, 3) == red && at(image, 100, 85) == black
+    })?;
+    type_on_keyboard(&check.monitor, &["c"])?;
+    wait_for_screen(check, "a cleared Scribble window", patience, |image| {
+        at(image, 100, 85) == paper && at(image, 10, 3) == red && title(image, "Scribble")
+    })?;
+    // `q` ends the program; its window goes away and Run, which started
+    // it, has its prompt back.
+    type_on_keyboard(&check.monitor, &["q"])?;
+    wait_for_screen(
+        check,
+        "the desktop without the Scribble window",
+        patience,
+        |image| {
+            screen_shows(image, "> _") && at(image, 10, 100) != paper && at(image, 10, 3) != red
+        },
+    )?;
 
     // The Run window is the second one opened; drag it by its title bar
     // (the About window does not reach this far right).

@@ -9,8 +9,7 @@
 //! The window manager and all drawing are in the `omit-gfx` library; this
 //! program provides the windows' contents ([`apps`]) and the loop that
 //! feeds input events to the desktop and copies what changed to the
-//! screen. Everything runs in this one process: there is no way yet for
-//! other programs to open windows.
+//! screen. Other programs can have windows too: see [`remote`].
 
 #![no_std]
 #![no_main]
@@ -18,9 +17,13 @@
 extern crate alloc;
 
 mod apps;
+mod remote;
 
 use alloc::boxed::Box;
 use alloc::format;
+use alloc::rc::Rc;
+use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use omit_gfx::desktop::Desktop;
 use omit_gfx::surface::Surface;
@@ -65,15 +68,30 @@ fn main() -> i32 {
     desktop.add_launcher("About", move |context| {
         context.open(Box::new(apps::About::new(width, height)), 470, 200);
     });
+    // Programs with windows of their own, started from the task bar.
+    // They are only started here; their windows arrive through `server`.
+    let children: Rc<RefCell<Vec<u64>>> = Rc::new(RefCell::new(Vec::new()));
+    for (label, program) in [("Scribble", "/bin/scribble"), ("Clock", "/bin/clock")] {
+        let children = children.clone();
+        desktop.add_launcher(label, move |_| {
+            if let Ok(pid) = omit_rt::spawn(program, &[program]) {
+                children.borrow_mut().push(pid);
+            }
+        });
+    }
     desktop.add_launcher("Exit", |context| context.quit());
     desktop.open(Box::new(apps::About::new(width, height)), 470, 200);
+
+    // Windows of other programs. Without the channel (another desktop
+    // has it?) there are simply none.
+    let mut server = remote::Server::new(width, height);
 
     let mut events = [InputEvent::default(); 32];
     let mut failure = None;
     let mut latency = Latency::default();
     // When the oldest input not yet visible on the screen arrived.
     let mut pending_since: Option<u64> = None;
-    while !desktop.quit_requested() {
+    'run: while !desktop.quit_requested() {
         let seconds = omit_rt::uptime_ms() / 1000;
         desktop.set_status(&format!(
             "up {}:{:02}:{:02}",
@@ -103,7 +121,20 @@ fn main() -> i32 {
         }
         pending_since = None;
 
-        let count = match omit_rt::read_events(&mut events, IDLE_MS) {
+        // Sleep until there is input, another program wants something,
+        // or it is time to update the clock.
+        let descriptors = server
+            .as_ref()
+            .map(remote::Server::descriptors)
+            .unwrap_or_default();
+        if let Err(error) = omit_rt::poll(&descriptors, IDLE_MS, true) {
+            failure = Some(error);
+            break;
+        }
+        if let Some(server) = &mut server {
+            server.serve(&mut desktop);
+        }
+        let count = match omit_rt::read_events(&mut events, 0) {
             Ok(count) => count,
             Err(error) => {
                 failure = Some(error);
@@ -115,7 +146,7 @@ fn main() -> i32 {
             match input.kind {
                 event::KEY if input.a == key::F1 + 11 => {
                     // F12 always leaves, whatever the windows do.
-                    return finish(None, &latency);
+                    break 'run;
                 }
                 event::KEY => desktop.key(input.a),
                 event::MOUSE => desktop.mouse(input.a, input.b, input.c),
@@ -123,6 +154,18 @@ fn main() -> i32 {
             }
         }
         desktop.tick();
+        // Collect the exit status of started programs that have ended.
+        children
+            .borrow_mut()
+            .retain(|&pid| matches!(omit_rt::try_wait(pid), Ok(None)));
+    }
+    // Programs that still have windows lose them now; do not leave them
+    // running without one.
+    drop(desktop);
+    drop(server);
+    for pid in children.borrow().iter() {
+        let _ = omit_rt::kill(*pid);
+        let _ = omit_rt::wait(*pid);
     }
     finish(failure, &latency)
 }

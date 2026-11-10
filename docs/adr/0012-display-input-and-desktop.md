@@ -107,4 +107,4 @@ into a terminal, let programs own windows, and allow the shell to move
 out of the kernel.
 
 *Update:* pipes now exist and *Run* is a line-mode terminal (ADR 0014).
-Programs owning windows still needs shared memory or message passing.
+Programs can now own windows (ADR 0018).

@@ -136,7 +136,59 @@ pub mod nr {
     /// threads of the calling process sleeping in `futex_wait` on
     /// `address`.
     pub const FUTEX_WAKE: u64 = 31;
+    /// `shared_create(length, token_out) -> address` — creates a shared
+    /// memory segment of `length` bytes (rounded up to pages, at most
+    /// [`super::SHARED_MAX`]), zero-filled, maps it writable into the
+    /// caller and stores the segment's token (a `u64`) at `token_out`.
+    /// Any process that knows the token can map the same memory. The
+    /// segment exists while it is mapped somewhere.
+    pub const SHARED_CREATE: u64 = 32;
+    /// `shared_map(token, length_out) -> address` — maps the segment
+    /// named by `token` writable into the caller and stores its length in
+    /// bytes at `length_out`. Fails with `NotFound` if no such segment
+    /// exists (any more). `unmap` with the segment's address and length
+    /// removes the mapping.
+    pub const SHARED_MAP: u64 = 33;
+    /// `channel_listen(name, name_len) -> fd` — claims the name and
+    /// returns a descriptor on which connections to it arrive. Fails with
+    /// `Exists` while another listener has the name.
+    pub const CHANNEL_LISTEN: u64 = 34;
+    /// `channel_accept(fd, flags) -> fd` — takes the next connection made
+    /// to the listener: a descriptor that can be read and written, each
+    /// direction a byte stream. Waits for one unless `flags` has
+    /// [`super::READ_NO_WAIT`], in which case it fails with `WouldBlock`.
+    pub const CHANNEL_ACCEPT: u64 = 35;
+    /// `channel_connect(name, name_len) -> fd` — connects to the listener
+    /// of that name. Fails with `NotFound` if there is none.
+    pub const CHANNEL_CONNECT: u64 = 36;
+    /// `poll(fds, count, timeout_ms, flags) -> ready` — waits until one
+    /// of the `count` (at most [`super::POLL_MAX`]) descriptors in the
+    /// `u64` array `fds` can be read without waiting (data, end of
+    /// input, or a connection to accept), or the time has passed. Returns
+    /// a bit mask: bit *i* is set if `fds[i]` is ready. With
+    /// [`super::POLL_INPUT`] in `flags`, the call also ends when an input
+    /// event is pending for the display owner, reported as
+    /// [`super::POLL_INPUT_READY`]. 0 means the time passed.
+    pub const POLL: u64 = 37;
 }
+
+/// Largest shared memory segment, in bytes.
+pub const SHARED_MAX: u64 = 64 << 20;
+/// Longest channel name, in bytes.
+pub const CHANNEL_NAME_MAX: u64 = 64;
+/// Most descriptors one `poll` call examines.
+pub const POLL_MAX: u64 = 32;
+/// Longest `poll` timeout, in milliseconds.
+pub const POLL_TIMEOUT_MAX: u64 = 60_000;
+/// `poll` flag: also wake for input events (display owner only).
+pub const POLL_INPUT: u64 = 1;
+/// Bit in the result of `poll`: an input event is pending. (Not the top
+/// bit: results with it set are error codes.)
+pub const POLL_INPUT_READY: u64 = 1 << 62;
+/// Flag for the `write` system call (fourth argument): if the descriptor
+/// is a pipe or channel without room for all the data, fail with
+/// `WouldBlock` and write nothing, instead of waiting.
+pub const WRITE_NO_WAIT: u64 = 1;
 
 /// `futex_wait` timeout value meaning "wait without limit".
 pub const FUTEX_NO_TIMEOUT: u64 = u64::MAX;
@@ -405,7 +457,9 @@ impl Errno {
 
     /// Decodes a system call result.
     pub const fn from_result(result: i64) -> Option<Self> {
-        match -result {
+        // (`wrapping_neg`: the most negative value is no error code, and
+        // must not overflow either.)
+        match result.wrapping_neg() {
             2 => Some(Self::NotFound),
             9 => Some(Self::BadFileDescriptor),
             14 => Some(Self::Fault),

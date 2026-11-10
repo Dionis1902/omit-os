@@ -29,6 +29,14 @@ struct Shared {
     changed: WaitQueue,
 }
 
+impl Shared {
+    /// Wakes the threads blocked on this pipe and those in `poll`.
+    fn wake(&self) {
+        self.changed.wake_all();
+        crate::poll::notify();
+    }
+}
+
 /// The reading end of a pipe.
 pub struct Reader(Arc<Shared>);
 
@@ -74,7 +82,7 @@ impl Reader {
                     }
                     drop(state);
                     // Writers may be waiting for this space.
-                    self.0.changed.wake_all();
+                    self.0.wake();
                     return Ok(count);
                 }
                 if state.writers == 0 {
@@ -105,8 +113,36 @@ impl Reader {
             *slot = byte;
         }
         drop(state);
-        self.0.changed.wake_all();
+        self.0.wake();
         Some(count)
+    }
+}
+
+impl Reader {
+    /// Whether a read would return at once: there is data, or no writing
+    /// end is left.
+    pub fn ready(&self) -> bool {
+        let state = self.0.state.lock();
+        !state.buffer.is_empty() || state.writers == 0
+    }
+}
+
+impl Writer {
+    /// Like [`Writer::write`], but never waits: if there is not room for
+    /// all of `data`, nothing is written and `Ok(false)` returned. (Data
+    /// longer than [`CAPACITY`] can therefore never be written this way.)
+    pub fn try_write(&self, data: &[u8]) -> Result<bool, PipeError> {
+        let mut state = self.0.state.lock();
+        if state.readers == 0 {
+            return Err(PipeError::NoReaders);
+        }
+        if CAPACITY - state.buffer.len() < data.len() {
+            return Ok(false);
+        }
+        state.buffer.extend(data);
+        drop(state);
+        self.0.wake();
+        Ok(true)
     }
 }
 
@@ -125,7 +161,7 @@ impl Writer {
                     state.buffer.extend(&data[..count]);
                     data = &data[count..];
                     drop(state);
-                    self.0.changed.wake_all();
+                    self.0.wake();
                     continue;
                 }
             }
@@ -159,7 +195,7 @@ impl Drop for Reader {
     fn drop(&mut self) {
         self.0.state.lock().readers -= 1;
         // Writers must learn that nobody may be listening any more.
-        self.0.changed.wake_all();
+        self.0.wake();
     }
 }
 
@@ -167,7 +203,7 @@ impl Drop for Writer {
     fn drop(&mut self) {
         self.0.state.lock().writers -= 1;
         // Readers must learn that the input may have ended.
-        self.0.changed.wake_all();
+        self.0.wake();
     }
 }
 

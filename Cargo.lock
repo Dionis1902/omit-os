@@ -142,6 +142,7 @@ version = "0.1.0"
 dependencies = [
  "omit-abi",
  "omit-mm",
+ "omit-window",
 ]
 
 [[package]]
@@ -163,6 +164,7 @@ dependencies = [
  "omit-pe",
  "omit-rt",
  "omit-win32",
+ "omit-window",
 ]
 
 [[package]]
@@ -193,6 +195,10 @@ version = "0.1.0"
 dependencies = [
  "omit-abi",
 ]
+
+[[package]]
+name = "omit-window"
+version = "0.1.0"
 
 [[package]]
 name = "proc-macro2"

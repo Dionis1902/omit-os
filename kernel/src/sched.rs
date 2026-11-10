@@ -26,7 +26,9 @@ use core::sync::atomic::{AtomicBool, Ordering};
 
 use crate::arch::uspace::{self, AddressSpace};
 use crate::arch::{context, cpu, gdt, interrupts, syscall};
+use crate::mm::PAGE_SIZE;
 use crate::mm::kstack::KernelStack;
+use crate::shared::Segment;
 use crate::sync::SpinLock;
 use crate::time;
 
@@ -88,7 +90,13 @@ struct Thread {
 pub struct SharedSpace {
     /// Physical address of the top-level page table; never changes.
     root: u64,
+    // Declared (and so dropped) before `shared`: the page tables go away
+    // before the segments they may still point into.
     space: SpinLock<AddressSpace>,
+    /// Shared memory segments mapped into the address space: first
+    /// address, number of pages, and the reference that keeps the
+    /// segment's frames allocated.
+    shared: SpinLock<Vec<(u64, u64, Arc<Segment>)>>,
 }
 
 impl SharedSpace {
@@ -97,7 +105,40 @@ impl SharedSpace {
         Arc::new(Self {
             root: space.root(),
             space: SpinLock::new(space),
+            shared: SpinLock::new(Vec::new()),
         })
+    }
+
+    /// Records that `segment` is mapped at `base`.
+    pub fn add_shared(&self, base: u64, segment: Arc<Segment>) {
+        let pages = segment.frames().len() as u64;
+        self.shared.lock().push((base, pages, segment));
+    }
+
+    /// Forgets the segment mapped at exactly `base` and returns its size
+    /// in pages and the reference.
+    pub fn take_shared(&self, base: u64) -> Option<(u64, Arc<Segment>)> {
+        let mut shared = self.shared.lock();
+        let index = shared.iter().position(|&(start, _, _)| start == base)?;
+        let (_, pages, segment) = shared.swap_remove(index);
+        Some((pages, segment))
+    }
+
+    /// The size in pages of the segment mapped at exactly `base`.
+    pub fn shared_pages_at(&self, base: u64) -> Option<u64> {
+        let shared = self.shared.lock();
+        shared
+            .iter()
+            .find(|&&(start, _, _)| start == base)
+            .map(|&(_, pages, _)| pages)
+    }
+
+    /// Whether `[address, end)` touches a mapped segment.
+    pub fn overlaps_shared(&self, address: u64, end: u64) -> bool {
+        self.shared
+            .lock()
+            .iter()
+            .any(|&(start, pages, _)| address < start + pages * PAGE_SIZE && start < end)
     }
 
     /// Runs `f` on the address space. `f` runs with interrupts disabled,

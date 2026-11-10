@@ -148,6 +148,29 @@ impl Canvas<'_> {
         }
     }
 
+    /// Gives `draw` each visible row of `area` to fill in: it is called
+    /// with the position of the row's first visible pixel, relative to
+    /// `area`'s corner, and the pixels from there to the end of the
+    /// visible part of the row. For copying an image without going
+    /// through [`Canvas::set`] pixel by pixel.
+    pub fn rows(&mut self, area: Rect, mut draw: impl FnMut(i32, i32, &mut [Colour])) {
+        let absolute = area.translate(self.origin.x, self.origin.y);
+        let target = absolute.intersect(&self.clip);
+        if target.is_empty() {
+            return;
+        }
+        let width = self.surface.width;
+        let (left, right) = (target.x as usize, target.right() as usize);
+        for y in target.y..target.bottom() {
+            let row = y as usize * width;
+            draw(
+                target.x - absolute.x,
+                y - absolute.y,
+                &mut self.surface.pixels[row + left..row + right],
+            );
+        }
+    }
+
     /// Draws a one-pixel outline just inside `area`.
     pub fn outline(&mut self, area: Rect, colour: Colour) {
         if area.is_empty() {
@@ -207,6 +230,37 @@ mod tests {
 
     fn count(surface: &Surface, colour: Colour) -> usize {
         surface.pixels().iter().filter(|&&p| p == colour).count()
+    }
+
+    #[test]
+    fn rows_offers_exactly_the_visible_part_of_an_area() {
+        let mut surface = Surface::new(10, 8, 0);
+        // An image of 6x5 "pixels" numbered by position, placed so that
+        // it sticks out at the left, the top and (with the clip) below.
+        let mut canvas = surface.canvas();
+        let mut clipped = canvas.clipped(Rect::new(0, 0, 10, 3));
+        let mut calls = 0;
+        clipped.rows(Rect::new(-2, -1, 6, 5), |x, y, row| {
+            calls += 1;
+            assert_eq!(x, 2);
+            assert_eq!(row.len(), 4);
+            for (index, pixel) in row.iter_mut().enumerate() {
+                *pixel = (y * 6 + x + index as i32) as Colour;
+            }
+        });
+        // Rows 1, 2 and 3 of the image land on surface rows 0, 1 and 2.
+        assert_eq!(calls, 3);
+        for (sy, iy) in [(0, 1), (1, 2), (2, 3)] {
+            for sx in 0..4 {
+                assert_eq!(surface.pixel(sx, sy), Some((iy * 6 + sx + 2) as Colour));
+            }
+            assert_eq!(surface.pixel(4, sy), Some(0));
+        }
+        assert_eq!(surface.pixel(0, 3), Some(0));
+        // Entirely outside: never called.
+        surface
+            .canvas()
+            .rows(Rect::new(20, 20, 5, 5), |_, _, _| panic!("called"));
     }
 
     #[test]

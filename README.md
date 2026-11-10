@@ -205,7 +205,8 @@ compatibility), the parts that could be built and tested were: DLL
 support, a second Linux driver family, and latency measurement; Direct3D,
 Vulkan, GPU acceleration and games were investigated only (ADR 0013). "First instance" means what it
 says: two small Linux drivers; Windows programs that use only a small part of one
-system library; a desktop that is a single program.
+system library; a desktop with a handful of built-in windows and a minimal
+protocol for other programs' windows.
 
 | Component | State |
 | --- | --- |
@@ -230,7 +231,7 @@ system library; a desktop that is a single program.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe`, `thread_create`, `thread_exit`, `futex_wait`, `futex_wake` | Working, tested |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe`, `thread_create`, `thread_exit`, `futex_wait`, `futex_wake`, `shared_create`, `shared_map`, `channel_listen`, `channel_accept`, `channel_connect`, `poll` | Working, tested |
 | Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
 | Output redirection (`>`, `>>`) for programs | Working, tested |
 | Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
@@ -254,6 +255,7 @@ system library; a desktop that is a single program.
 | Loadable drivers, driver packages, automatic driver installation | Not started |
 | Pipes between processes; standard input, output and error connectable to pipes or files at `spawn`; non-waiting reads | Working; self-tested at every boot and by `/bin/pipetest` (300 KB through a filter) |
 | Shell pipelines (`a \| b \| c`) and input redirection (`< file`) | Working; host-tested and run in QEMU, including Windows programs in pipelines |
+| Shared memory segments, named channels between unrelated programs, `poll` over descriptors and input | Working; `/bin/ipctest` checks sharing across processes, segment lifetime, connect/accept, wake-ups and timeouts. No permissions: see ADR 0018 |
 | Threads within a process (shared address space, `thread_create`, process-wide exit), futex, user-space mutex and join | Working on one CPU; `/bin/threadtest` checks contention, the shared heap, futex semantics and process exit with threads still running |
 | Environment variables, signals, shared memory, more than one CPU | Not started |
 | GUID partition tables: partitions of the VirtIO disk as block devices (`vda1`, ...) | Working; library host-tested including damaged and hostile tables |
@@ -270,6 +272,7 @@ system library; a desktop that is a single program.
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
 | Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
+| Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
 | Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
 | Programs opening their own windows, a terminal emulator, resizing, USB input, graphics modes | Not started |
 | GPU drivers and acceleration, Vulkan, Direct3D, games | Not started; requirements and a proposed order of work are in ADR 0013 |
@@ -311,9 +314,10 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - The kernel requires a working COM1 serial port even when a screen is
   present, and stops silently without one.
 - Graphics are limited to the firmware's framebuffer at its boot
-  resolution. The desktop is a single program; other programs cannot open
-  windows, and its Run window is a line-mode terminal without escape
-  sequences (see ADRs 0012 and 0014). Debug builds draw noticeably slowly
+  resolution. Other programs can open windows, but only fixed-size
+  ones, one per connection, without resizing, menus or a clipboard; the
+  Run window is a line-mode terminal without escape sequences (see ADRs
+  0012, 0014 and 0018). Debug builds draw noticeably slowly
   under emulation.
 - Only PS/2 keyboards (US layout) and PS/2 mice. No USB.
 - Installation works onto VirtIO and NVMe disks and has only been tested
@@ -388,6 +392,7 @@ compat/windows/samples/ Windows test programs (built for x86_64-pc-windows-msvc)
 drivers/linux/   Linux driver sources, unmodified, with provenance
 libs/fat/        one-pass FAT16 writer for the installer, verified against the fatfs crate
 libs/gfx/        drawing, text and window manager for programs, host-tested
+libs/window/     protocol between programs with windows and the desktop, host-tested
 libs/gpt/        GUID partition tables: build and parse, host-tested
 libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
@@ -448,6 +453,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0015 — Threads within a process, and the futex](docs/adr/0015-threads-and-futex.md)
 - [ADR 0016 — Installing to a disk](docs/adr/0016-installation.md)
 - [ADR 0017 — NVMe driver](docs/adr/0017-nvme.md)
+- [ADR 0018 — Shared memory, channels, poll, and windows for other programs](docs/adr/0018-windows-for-programs.md)
 
 ## Testing
 
@@ -479,12 +485,12 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next step:** shared memory and a way to wait on several things at once
-(what the desktop needs to become a display server), and the rest of what Windows programs with a C runtime need (static
+**Next step:** building on the new window protocol (a terminal as a
+separate program, resizable windows), and the rest of what Windows programs with a C runtime need (static
 thread-local storage, exception handling, more of the API). Pipes and
 threads exist, natively and for Windows programs (ADRs 0011, 0014 and
 0015). Still open from earlier milestones: interrupts for device drivers (MSI-X), an
-installer, loadable drivers and packages, a Rust `std` port for coreutils,
+loadable drivers and packages, a Rust `std` port for coreutils,
 threads, and the Windows functions the C runtime needs.
 
 ## Licence

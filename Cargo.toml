@@ -20,6 +20,7 @@ members = [
     "libs/mm",
     "libs/term",
     "libs/vfs",
+    "libs/window",
     "shell",
     "tools/xtask",
     "userspace/programs",
@@ -41,6 +42,7 @@ default-members = [
     "libs/mm",
     "libs/term",
     "libs/vfs",
+    "libs/window",
     "shell",
     "tools/xtask",
 ]
@@ -58,6 +60,7 @@ omit-fat = { path = "libs/fat" }
 omit-gfx = { path = "libs/gfx" }
 omit-gpt = { path = "libs/gpt" }
 omit-pe = { path = "compat/windows/pe" }
+omit-window = { path = "libs/window" }
 omit-win32 = { path = "compat/windows/win32" }
 omit-acpi = { path = "libs/acpi" }
 omit-bootproto = { path = "libs/bootproto" }

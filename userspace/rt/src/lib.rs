@@ -33,6 +33,7 @@ extern crate alloc;
 mod heap;
 pub mod sync;
 pub mod thread;
+pub mod window;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -235,6 +236,109 @@ pub fn read_no_wait(fd: u64, buffer: &mut [u8]) -> Result<Option<usize>, Errno> 
         Err(Errno::WouldBlock) => Ok(None),
         Err(error) => Err(error),
     }
+}
+
+/// Like [`write`], but if `fd` is a pipe or channel without room for all
+/// of `bytes`, writes nothing and returns `Ok(false)` instead of waiting.
+pub fn write_no_wait(fd: u64, bytes: &[u8]) -> Result<bool, Errno> {
+    // SAFETY: the pointer and length describe a live, readable slice.
+    let outcome = result(unsafe {
+        syscall4(
+            nr::WRITE,
+            fd,
+            bytes.as_ptr() as u64,
+            bytes.len() as u64,
+            abi::WRITE_NO_WAIT,
+        )
+    });
+    match outcome {
+        Ok(_) => Ok(true),
+        Err(Errno::WouldBlock) => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
+/// Creates a shared memory segment of `length` bytes, zero-filled, and
+/// maps it. Returns its address and the token by which another process
+/// can map the same memory with [`shared_map`].
+pub fn shared_create(length: usize) -> Result<(*mut u8, u64), Errno> {
+    let mut token = 0u64;
+    // SAFETY: the pointer refers to a live, writable `u64`.
+    let address =
+        result(unsafe { syscall(nr::SHARED_CREATE, length as u64, &raw mut token as u64, 0) })?;
+    Ok((address as *mut u8, token))
+}
+
+/// Maps the shared memory segment named by `token`. Returns its address
+/// and length in bytes. Release it with [`unmap`], passing both.
+pub fn shared_map(token: u64) -> Result<(*mut u8, usize), Errno> {
+    let mut length = 0u64;
+    // SAFETY: the pointer refers to a live, writable `u64`.
+    let address = result(unsafe { syscall(nr::SHARED_MAP, token, &raw mut length as u64, 0) })?;
+    Ok((address as *mut u8, length as usize))
+}
+
+/// Starts listening for connections on the channel `name`.
+pub fn channel_listen(name: &str) -> Result<u64, Errno> {
+    // SAFETY: the pointer and length describe a live, readable string.
+    result(unsafe {
+        syscall(
+            nr::CHANNEL_LISTEN,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            0,
+        )
+    })
+}
+
+/// Takes the next connection made to `listener`, without waiting:
+/// `Ok(None)` if there is none.
+pub fn channel_accept_no_wait(listener: u64) -> Result<Option<u64>, Errno> {
+    // SAFETY: plain integer arguments.
+    match result(unsafe { syscall(nr::CHANNEL_ACCEPT, listener, abi::READ_NO_WAIT, 0) }) {
+        Ok(fd) => Ok(Some(fd)),
+        Err(Errno::WouldBlock) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Waits for the next connection made to `listener`.
+pub fn channel_accept(listener: u64) -> Result<u64, Errno> {
+    // SAFETY: plain integer arguments.
+    result(unsafe { syscall(nr::CHANNEL_ACCEPT, listener, 0, 0) })
+}
+
+/// Connects to the listener on the channel `name`. The descriptor can be
+/// read and written.
+pub fn channel_connect(name: &str) -> Result<u64, Errno> {
+    // SAFETY: the pointer and length describe a live, readable string.
+    result(unsafe {
+        syscall(
+            nr::CHANNEL_CONNECT,
+            name.as_ptr() as u64,
+            name.len() as u64,
+            0,
+        )
+    })
+}
+
+/// Waits until one of `fds` (at most [`abi::POLL_MAX`]) can be read
+/// without waiting, or `timeout_ms` has passed. Bit *i* of the result is
+/// set if `fds[i]` is ready; 0 means the time passed. With `input`, an
+/// input event pending for this program (as display owner) also ends the
+/// wait and sets [`abi::POLL_INPUT_READY`].
+pub fn poll(fds: &[u64], timeout_ms: u64, input: bool) -> Result<u64, Errno> {
+    let flags = if input { abi::POLL_INPUT } else { 0 };
+    // SAFETY: the pointer and length describe a live, readable slice.
+    result(unsafe {
+        syscall4(
+            nr::POLL,
+            fds.as_ptr() as u64,
+            fds.len() as u64,
+            timeout_ms,
+            flags,
+        )
+    })
 }
 
 /// Closes file descriptor `fd`.

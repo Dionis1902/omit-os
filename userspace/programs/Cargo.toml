@@ -12,6 +12,7 @@ omit-gfx.workspace = true
 omit-pe.workspace = true
 omit-rt.workspace = true
 omit-win32.workspace = true
+omit-window.workspace = true
 
 [lints]
 workspace = true

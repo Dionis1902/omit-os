@@ -9,6 +9,7 @@
 use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::fmt;
 
@@ -22,9 +23,11 @@ use crate::arch::gdt::{USER_CS, USER_DS};
 use crate::arch::paging::MapError;
 use crate::arch::syscall::enter_user;
 use crate::arch::uspace::{self, AddressSpace};
+use crate::channel;
 use crate::mm::{self, PAGE_SIZE, frame};
 use crate::pipe;
 use crate::sched::{self, SpawnError, ThreadId};
+use crate::shared::Segment;
 use crate::sync::SpinLock;
 
 /// Identifies a process. Never reused.
@@ -83,6 +86,10 @@ pub enum Descriptor {
     PipeRead(pipe::Reader),
     /// The writing end of a pipe.
     PipeWrite(pipe::Writer),
+    /// One end of a channel connection: a pipe in each direction.
+    Channel(pipe::Reader, pipe::Writer),
+    /// A channel name being listened on.
+    Listener(Arc<channel::Handle>),
 }
 
 /// The standard streams of a new process: input, output, error. `None`
@@ -579,17 +586,7 @@ pub fn map_memory(length: u64, align: u64) -> Option<u64> {
     }
     let align = align.max(PAGE_SIZE);
     let pages = length.div_ceil(PAGE_SIZE);
-
-    // Reserve the address range first; it is never reused, so a failure
-    // below only wastes address space.
-    let base = with_current(|record| {
-        let base = record.map_next.checked_next_multiple_of(align)?;
-        let end = base.checked_add(pages * PAGE_SIZE)?;
-        (end <= USER_MAP_END).then(|| {
-            record.map_next = end;
-            base
-        })
-    })??;
+    let base = reserve_addresses(pages, align)?;
 
     let mut mapped = 0;
     while mapped < pages {
@@ -617,6 +614,53 @@ pub fn map_memory(length: u64, align: u64) -> Option<u64> {
     Some(base)
 }
 
+/// Reserves `pages` pages of the calling process's `map` area at a
+/// multiple of `align`. The range is never reused, so a failure to fill
+/// it only wastes address space.
+fn reserve_addresses(pages: u64, align: u64) -> Option<u64> {
+    with_current(|record| {
+        let base = record.map_next.checked_next_multiple_of(align)?;
+        let end = base.checked_add(pages * PAGE_SIZE)?;
+        (end <= USER_MAP_END).then(|| {
+            record.map_next = end;
+            base
+        })
+    })?
+}
+
+/// Maps a shared memory segment, writable, into the calling process and
+/// returns its address. The mapping holds a reference to the segment
+/// until it is unmapped or the process ends.
+pub fn map_shared(segment: Arc<Segment>) -> Option<u64> {
+    let space = sched::current_space()?;
+    let pages = segment.frames().len() as u64;
+    let base = reserve_addresses(pages, PAGE_SIZE)?;
+    let mut mapped = 0;
+    while mapped < pages {
+        let batch = (pages - mapped).min(MAP_BATCH);
+        let ok = space.with(|space| {
+            (0..batch).all(|index| {
+                let page = mapped + index;
+                space
+                    .map_shared(base + page * PAGE_SIZE, segment.frames()[page as usize])
+                    .is_ok()
+            })
+        });
+        if !ok {
+            // Shared pages are not freed by unmapping them.
+            space.with(|space| {
+                for page in 0..mapped + batch {
+                    space.unmap(base + page * PAGE_SIZE);
+                }
+            });
+            return None;
+        }
+        mapped += batch;
+    }
+    space.add_shared(base, segment);
+    Some(base)
+}
+
 /// Unmaps and frees every mapped page of the calling process in
 /// `[address, address + length)`, which must lie in the `map` area and be
 /// page-aligned. Returns `false` for an invalid range.
@@ -628,6 +672,15 @@ pub fn unmap_memory(address: u64, length: u64) -> bool {
         return false;
     }
     let pages = length.div_ceil(PAGE_SIZE);
+    // A shared segment is unmapped as a whole or not at all, so that the
+    // reference to it can be given up exactly when its last page goes.
+    let Some(shared_space) = sched::current_space() else {
+        return false;
+    };
+    let whole_segment = shared_space.shared_pages_at(address) == Some(pages);
+    if !whole_segment && shared_space.overlaps_shared(address, end) {
+        return false;
+    }
     let mut done = 0;
     while done < pages {
         let batch = (pages - done).min(MAP_BATCH);
@@ -641,6 +694,10 @@ pub fn unmap_memory(address: u64, length: u64) -> bool {
             }
         });
         done += batch;
+    }
+    if whole_segment {
+        // The pages are gone from the page table; now the reference.
+        drop(shared_space.take_shared(address));
     }
     true
 }
@@ -658,6 +715,9 @@ pub fn protect_memory(address: u64, length: u64, writable: bool, executable: boo
         || !address.is_multiple_of(PAGE_SIZE)
         || address < USER_MAP_BASE
         || end > USER_MAP_END
+        // Shared memory stays writable data: another process may hold a
+        // writable mapping of the same frames.
+        || sched::current_space().is_none_or(|space| space.overlaps_shared(address, end))
     {
         return false;
     }

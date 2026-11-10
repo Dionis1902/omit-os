@@ -144,6 +144,12 @@ pub trait App {
     /// area.
     fn click(&mut self, _x: i32, _y: i32, _context: &mut Context) {}
 
+    /// The pointer moved, or a button changed, at (`x`, `y`) in the
+    /// content area, between a press there and the release of the left
+    /// button (which is reported too, with bit 0 of `buttons` clear).
+    /// The position can lie outside the content area.
+    fn pointer(&mut self, _x: i32, _y: i32, _buttons: u32, _context: &mut Context) {}
+
     /// Called regularly. Returns whether the contents changed and need to
     /// be drawn again.
     fn tick(&mut self, _context: &mut Context) -> bool {
@@ -205,6 +211,9 @@ pub struct Desktop {
     left_button: bool,
     /// The window being moved, and where in its frame it was grabbed.
     drag: Option<(WindowId, Point)>,
+    /// The window whose content area the left button was pressed in and
+    /// is still held over: it receives pointer movement.
+    capture: Option<WindowId>,
     /// The area that needs repainting.
     dirty: Rect,
     next_id: u32,
@@ -225,6 +234,7 @@ impl Desktop {
             pointer: Point::new(width / 2, height / 2),
             left_button: false,
             drag: None,
+            capture: None,
             dirty: Rect::new(0, 0, width, height),
             next_id: 0,
             quit: false,
@@ -406,6 +416,22 @@ impl Desktop {
         }
         if pressed {
             self.press();
+        } else if let Some(id) = self.capture {
+            // Movement and the release go to the window that was pressed.
+            if let Some(index) = self.index_of(id) {
+                let content = self.windows[index].content();
+                let mut context = Context::default();
+                self.windows[index].app.pointer(
+                    self.pointer.x - content.x,
+                    self.pointer.y - content.y,
+                    buttons,
+                    &mut context,
+                );
+                self.perform(context, Some(id));
+            }
+        }
+        if !left {
+            self.capture = None;
         }
     }
 
@@ -444,6 +470,7 @@ impl Desktop {
             let content = self.windows[top].content();
             if content.contains(at) {
                 let mut context = Context::default();
+                self.capture = Some(id);
                 self.windows[top]
                     .app
                     .click(at.x - content.x, at.y - content.y, &mut context);
@@ -596,6 +623,7 @@ mod tests {
     struct Log {
         keys: Vec<(String, i32)>,
         clicks: Vec<(String, i32, i32)>,
+        pointer: Vec<(String, i32, i32, u32)>,
         draws: usize,
     }
 
@@ -638,6 +666,12 @@ mod tests {
         }
         fn click(&mut self, x: i32, y: i32, _: &mut Context) {
             self.log.borrow_mut().clicks.push((self.name.clone(), x, y));
+        }
+        fn pointer(&mut self, x: i32, y: i32, buttons: u32, _: &mut Context) {
+            self.log
+                .borrow_mut()
+                .pointer
+                .push((self.name.clone(), x, y, buttons));
         }
         fn tick(&mut self, _: &mut Context) -> bool {
             self.name == "ticker"
@@ -694,6 +728,65 @@ mod tests {
 
     const RED: Colour = 0xAA_00_00;
     const GREEN: Colour = 0x00_AA_00;
+
+    #[test]
+    fn a_press_in_a_window_captures_the_pointer_until_release() {
+        let mut f = Fixture::new();
+        let back = f.open("back", RED);
+        let front = f.open("front", GREEN);
+        let content = f.desktop.windows[1].content();
+        // Movement without a button held is nobody's business.
+        f.move_to(content.x + 10, content.y + 10);
+        assert!(f.log.borrow().pointer.is_empty());
+        // Press: a click. Then movement, even out of the window and over
+        // another one, and finally the release, go to the same app.
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(5, 7, 1);
+        let far = f.desktop.window_frame(back).unwrap();
+        f.move_to(far.x + 2, far.y + 40);
+        f.desktop.mouse(0, 0, 0);
+        f.desktop.mouse(3, 3, 0);
+        let log = f.log.borrow();
+        assert_eq!(log.clicks, [("front".into(), 10, 10)]);
+        assert_eq!(
+            log.pointer,
+            [
+                ("front".into(), 15, 17, 1),
+                (
+                    "front".into(),
+                    far.x + 2 - content.x,
+                    far.y + 40 - content.y,
+                    1
+                ),
+                (
+                    "front".into(),
+                    far.x + 2 - content.x,
+                    far.y + 40 - content.y,
+                    0
+                ),
+            ]
+        );
+        // The window order did not change by dragging across.
+        assert_eq!(f.desktop.windows.last().unwrap().id, front);
+        drop(log);
+
+        // A press on a title bar drags the window; no pointer events.
+        let bar = f.desktop.windows[1].title_bar();
+        f.move_to(bar.x + 5, bar.y + 5);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(4, 4, 1);
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.log.borrow().pointer.len(), 3);
+
+        // A window closed while it has the pointer is simply forgotten.
+        let content = f.desktop.windows[1].content();
+        f.move_to(content.x + 10, content.y + 10);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.close(front);
+        f.desktop.mouse(1, 1, 1);
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.log.borrow().pointer.len(), 3);
+    }
 
     #[test]
     fn first_render_paints_everything() {

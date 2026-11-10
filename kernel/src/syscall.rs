@@ -11,9 +11,10 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use omit_abi::{
-    ARGS_MAX, Blit, Errno, FUTEX_NO_TIMEOUT, INPUT_READ_MAX, INPUT_TIMEOUT_MAX, InputEvent,
-    KIND_DIRECTORY, KIND_FILE, PATH_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat,
-    WAIT_NO_HANG, WRITE_MAX, nr, open, protect,
+    ARGS_MAX, Blit, CHANNEL_NAME_MAX, Errno, FUTEX_NO_TIMEOUT, INPUT_READ_MAX, INPUT_TIMEOUT_MAX,
+    InputEvent, KIND_DIRECTORY, KIND_FILE, PATH_MAX, POLL_INPUT, POLL_INPUT_READY, POLL_MAX,
+    POLL_TIMEOUT_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG, WRITE_MAX,
+    WRITE_NO_WAIT, nr, open, protect,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
@@ -23,7 +24,7 @@ use crate::futex::WaitResult;
 use crate::pipe::{self, PipeError};
 use crate::process::{self, Descriptor, OpenFile};
 use crate::sync::Mutex;
-use crate::{display, fs, input, kprint, sched, time};
+use crate::{channel, display, fs, input, kprint, poll, sched, shared, time};
 
 type SysResult = Result<u64, Errno>;
 
@@ -33,7 +34,7 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
     process::exit_if_killed();
     let result: SysResult = match number {
         nr::EXIT => process::exit(a0 as i32),
-        nr::WRITE => write(a0, a1, a2),
+        nr::WRITE => write(a0, a1, a2, a3),
         nr::READ => read(a0, a1, a2, a3),
         nr::OPEN => open_file(a0, a1, a2),
         nr::CLOSE => {
@@ -122,6 +123,12 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
             .ok_or(Errno::NoSuchProcess),
         nr::CLOCK => Ok(time::monotonic_ns() / 1000),
         nr::PIPE => create_pipe(a0),
+        nr::SHARED_CREATE => shared_create(a0, a1),
+        nr::SHARED_MAP => shared_map(a0, a1),
+        nr::CHANNEL_LISTEN => channel_listen(a0, a1),
+        nr::CHANNEL_ACCEPT => channel_accept(a0, a1),
+        nr::CHANNEL_CONNECT => channel_connect(a0, a1),
+        nr::POLL => poll_descriptors(a0, a1, a2, a3),
         nr::THREAD_CREATE => {
             // The addresses are the program's own business — a wrong one
             // faults in user mode — but they must at least be user
@@ -310,6 +317,133 @@ fn read_dir(path_address: u64, path_length: u64, buffer: u64, buffer_length: u64
     Ok(records.len() as u64)
 }
 
+fn shared_create(length: u64, token_out: u64) -> SysResult {
+    let segment = shared::create(length).ok_or(Errno::NoSpace)?;
+    let token = segment.token();
+    let address = process::map_shared(segment).ok_or(Errno::NoSpace)?;
+    if let Err(error) = copy_out(token_out, &token.to_le_bytes()) {
+        // Nobody learnt the token; unmapping frees the segment.
+        process::unmap_memory(address, length);
+        return Err(error);
+    }
+    Ok(address)
+}
+
+fn shared_map(token: u64, length_out: u64) -> SysResult {
+    let segment = shared::find(token).ok_or(Errno::NotFound)?;
+    let length = segment.len();
+    let address = process::map_shared(segment).ok_or(Errno::NoSpace)?;
+    if let Err(error) = copy_out(length_out, &length.to_le_bytes()) {
+        process::unmap_memory(address, length);
+        return Err(error);
+    }
+    Ok(address)
+}
+
+/// Reads a channel name: printable ASCII without spaces.
+fn channel_name(address: u64, length: u64) -> Result<String, Errno> {
+    if length == 0 || length > CHANNEL_NAME_MAX {
+        return Err(Errno::InvalidArgument);
+    }
+    let bytes = copy_in(address, length as usize)?;
+    if !bytes.iter().all(u8::is_ascii_graphic) {
+        return Err(Errno::InvalidArgument);
+    }
+    String::from_utf8(bytes).map_err(|_| Errno::InvalidArgument)
+}
+
+fn channel_listen(name_address: u64, name_length: u64) -> SysResult {
+    let name = channel_name(name_address, name_length)?;
+    let listener = channel::listen(&name).ok_or(Errno::Exists)?;
+    process::install(Descriptor::Listener(listener)).map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn channel_accept(fd: u64, flags: u64) -> SysResult {
+    if flags & !READ_NO_WAIT != 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    let Some(Descriptor::Listener(listener)) = process::descriptor(fd) else {
+        return Err(Errno::BadFileDescriptor);
+    };
+    let connection = if flags & READ_NO_WAIT != 0 {
+        listener.try_accept().ok_or(Errno::WouldBlock)?
+    } else {
+        match listener.accept() {
+            Some(connection) => connection,
+            None => {
+                // Killed while waiting; `exit` does not return, so let go
+                // of the listener first.
+                drop(listener);
+                process::exit_if_killed();
+                return Err(Errno::WouldBlock);
+            }
+        }
+    };
+    process::install(Descriptor::Channel(connection.0, connection.1))
+        .map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn channel_connect(name_address: u64, name_length: u64) -> SysResult {
+    let name = channel_name(name_address, name_length)?;
+    let (reader, writer) = channel::connect(&name).map_err(|error| match error {
+        channel::ConnectError::NoListener => Errno::NotFound,
+        channel::ConnectError::Busy => Errno::Busy,
+    })?;
+    process::install(Descriptor::Channel(reader, writer)).map_err(|_| Errno::TooManyOpenFiles)
+}
+
+fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> SysResult {
+    if count > POLL_MAX || timeout_ms > POLL_TIMEOUT_MAX || flags & !POLL_INPUT != 0 {
+        return Err(Errno::InvalidArgument);
+    }
+    let with_input = flags & POLL_INPUT != 0;
+    if with_input && !display::is_owner(current_pid()?) {
+        return Err(Errno::Busy);
+    }
+    let raw = copy_in(address, count as usize * 8)?;
+    // The descriptors are looked up once: the objects stay referenced
+    // (and so alive) while this thread sleeps, whatever other threads of
+    // the process close meanwhile.
+    let mut watched = Vec::new();
+    for chunk in raw.chunks_exact(8) {
+        let fd = u64::from_le_bytes(chunk.try_into().unwrap_or_default());
+        match process::descriptor(fd) {
+            Some(
+                descriptor @ (Descriptor::PipeRead(_)
+                | Descriptor::Channel(..)
+                | Descriptor::Listener(_)),
+            ) => watched.push(descriptor),
+            // Files can always be read; anything else cannot be polled.
+            Some(Descriptor::File(file)) if !file.writable => watched.push(Descriptor::File(file)),
+            _ => return Err(Errno::BadFileDescriptor),
+        }
+    }
+    let ready = || {
+        let mut mask = 0u64;
+        for (index, descriptor) in watched.iter().enumerate() {
+            let is_ready = match descriptor {
+                Descriptor::PipeRead(reader) | Descriptor::Channel(reader, _) => reader.ready(),
+                Descriptor::Listener(listener) => listener.ready(),
+                _ => true,
+            };
+            if is_ready {
+                mask |= 1 << index;
+            }
+        }
+        if with_input && input::pending() {
+            mask |= POLL_INPUT_READY;
+        }
+        mask
+    };
+    let tick_ms = 1000 / u64::from(time::TICK_HZ);
+    poll::wait(|| ready() != 0, timeout_ms.div_ceil(tick_ms));
+    let mask = ready();
+    // `exit` (if the thread was killed) does not return.
+    drop(watched);
+    process::exit_if_killed();
+    Ok(mask)
+}
+
 fn create_pipe(address: u64) -> SysResult {
     let (reader, writer) = pipe::new();
     let read_fd =
@@ -489,7 +623,10 @@ fn read(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
             process::set_offset(fd, file.offset + count as u64);
             count
         }
-        Some(Descriptor::PipeRead(pipe)) => {
+        Some(descriptor @ (Descriptor::PipeRead(_) | Descriptor::Channel(..))) => {
+            let (Descriptor::PipeRead(pipe) | Descriptor::Channel(pipe, _)) = &descriptor else {
+                return Err(Errno::BadFileDescriptor);
+            };
             buffer
                 .try_reserve_exact(length)
                 .map_err(|_| Errno::NoSpace)?;
@@ -502,9 +639,9 @@ fn read(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
             match pipe.read(&mut buffer) {
                 Ok(count) => count,
                 Err(_) => {
-                    // Killed while waiting. Let go of the pipe end first:
-                    // `exit` does not return.
-                    drop(pipe);
+                    // Killed while waiting. Let go of the descriptor
+                    // first: `exit` does not return.
+                    drop(descriptor);
                     process::exit_if_killed();
                     0
                 }
@@ -555,11 +692,21 @@ fn read_console(address: u64, length: usize) -> SysResult {
     Ok(bytes.len() as u64)
 }
 
-fn write(fd: u64, address: u64, length: u64) -> SysResult {
-    if length > WRITE_MAX {
+fn write(fd: u64, address: u64, length: u64, flags: u64) -> SysResult {
+    if length > WRITE_MAX || flags & !WRITE_NO_WAIT != 0 {
         return Err(Errno::InvalidArgument);
     }
     match process::descriptor(fd) {
+        Some(Descriptor::PipeWrite(pipe) | Descriptor::Channel(_, pipe))
+            if flags & WRITE_NO_WAIT != 0 =>
+        {
+            let data = copy_in(address, length as usize)?;
+            match pipe.try_write(&data) {
+                Ok(true) => Ok(length),
+                Ok(false) => Err(Errno::WouldBlock),
+                Err(_) => Err(Errno::BrokenPipe),
+            }
+        }
         // Standard output and error go to the console unless the process
         // was started with them connected elsewhere.
         None if fd == STDOUT || fd == STDERR => write_console(address, length),
@@ -573,13 +720,16 @@ fn write(fd: u64, address: u64, length: u64) -> SysResult {
             process::set_offset(fd, end);
             Ok(length)
         }
-        Some(Descriptor::PipeWrite(pipe)) => {
+        Some(descriptor @ (Descriptor::PipeWrite(_) | Descriptor::Channel(..))) => {
+            let (Descriptor::PipeWrite(pipe) | Descriptor::Channel(_, pipe)) = &descriptor else {
+                return Err(Errno::BadFileDescriptor);
+            };
             let data = copy_in(address, length as usize)?;
             match pipe.write(&data) {
                 Ok(()) => Ok(length),
                 Err(PipeError::NoReaders) => Err(Errno::BrokenPipe),
                 Err(PipeError::Killed) => {
-                    drop(pipe);
+                    drop(descriptor);
                     process::exit_if_killed();
                     Err(Errno::BrokenPipe)
                 }

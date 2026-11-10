@@ -107,6 +107,7 @@ pub fn key_pressed(pressed: Key) {
         time_us: now_us(),
     });
     ARRIVED.wake_all();
+    crate::poll::notify();
 }
 
 /// Handles a report from the mouse driver (interrupt context).
@@ -136,6 +137,12 @@ pub fn mouse_moved(report: Report) {
     });
     drop(queue);
     ARRIVED.wake_all();
+    crate::poll::notify();
+}
+
+/// Whether an event is pending.
+pub fn pending() -> bool {
+    QUEUE.lock().len != 0
 }
 
 /// Removes the oldest pending event.

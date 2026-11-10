@@ -10,6 +10,7 @@
 extern crate alloc;
 
 mod arch;
+mod channel;
 mod console;
 mod display;
 mod drivers;
@@ -24,8 +25,10 @@ mod mm;
 mod panic;
 mod pci;
 mod pipe;
+mod poll;
 mod process;
 mod sched;
+mod shared;
 mod shell;
 mod sync;
 mod syscall;
@@ -395,6 +398,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     sched::init().map_err(InitError::Scheduler)?;
     sched::self_test().map_err(InitError::SchedulerSelfTest)?;
     pipe::self_test().map_err(InitError::PipeSelfTest)?;
+    channel::self_test().map_err(InitError::PipeSelfTest)?;
     info!("sched: round-robin scheduler started; preemption self-test passed");
     sched::spawn("status-bar", ui::status_thread, 0).map_err(InitError::Scheduler)?;
     arch::syscall::init();
