@@ -141,6 +141,21 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         nr::NET_INFO => net_info(a0),
         nr::SYSTEM_INFO => system_info(a0),
         nr::TASK_LIST => task_list(a0, a1),
+        nr::RANDOM => {
+            if a1 > omit_abi::RANDOM_MAX {
+                Err(Errno::InvalidArgument)
+            } else {
+                let mut bytes = vec![0u8; a1 as usize];
+                let hardware = crate::random::fill(&mut bytes);
+                copy_out(a0, &bytes).map(|()| {
+                    if hardware {
+                        omit_abi::RANDOM_HARDWARE
+                    } else {
+                        omit_abi::RANDOM_TIMING
+                    }
+                })
+            }
+        }
         nr::TCP_CONNECT => tcp_connect(a0, a1),
         nr::TCP_LISTEN => tcp_listen(a0),
         nr::TCP_ACCEPT => tcp_accept(a0, a1, a2),

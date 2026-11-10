@@ -170,6 +170,7 @@ pub fn realtime_us() -> Option<u64> {
 
 fn on_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::random::note_timing();
     crate::sched::on_tick();
 }
 

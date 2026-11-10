@@ -188,6 +188,7 @@ const USER_PROGRAMS: &[&str] = &[
     "nettest",
     "pipetest",
     "pop",
+    "random",
     "run",
     "scribble",
     "sleeper",
@@ -765,7 +766,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\nclock\ncrash\ndesktop\necho\nechod\nfetch\nfileops\nhello\nhost\nipctest\nls\nmemtest\nnettest\npipetest\npop\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\ntftp\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nechod\nfetch\nfileops\nhello\nhost\nipctest\nls\nmemtest\nnettest\npipetest\npop\nrandom\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\ntftp\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -839,6 +840,8 @@ const BOOT_TESTS: &[BootTest] = &[
             // expects (segment selectors, flags, preserved registers),
             // including after being interrupted there.
             ("syscheck", "\nsyscheck: all checks passed\n"),
+            ("random --check", "\nrandom: ok, from "),
+            ("random 3", "\n"),
             // Pipes between processes: within one program, from another
             // program, and through a filter with more data than a pipe
             // holds.

@@ -238,7 +238,23 @@ pub mod nr {
     /// [`crate::system::TASKS_MAX`]) at `out`, and returns how many
     /// threads there are — which can be more than were written.
     pub const TASK_LIST: u64 = 49;
+    /// `random(out, length) -> quality`: fills the `length` bytes (at
+    /// most [`crate::RANDOM_MAX`]) at `out` with random bytes for
+    /// cryptographic use. Returns [`crate::RANDOM_HARDWARE`] if the
+    /// processor's random number generator went into them, and
+    /// [`crate::RANDOM_TIMING`] if they rest only on the timing of
+    /// events in this machine — which may be guessable, above all in a
+    /// virtual machine; a program doing something that matters should
+    /// then say so.
+    pub const RANDOM: u64 = 50;
 }
+
+/// Most bytes one `random` call gives.
+pub const RANDOM_MAX: u64 = 4096;
+/// `random`: the processor's random number generator was used.
+pub const RANDOM_HARDWARE: u64 = 0;
+/// `random`: only the timing of events was available as a source.
+pub const RANDOM_TIMING: u64 = 1;
 
 /// Largest shared memory segment, in bytes.
 pub const SHARED_MAX: u64 = 64 << 20;

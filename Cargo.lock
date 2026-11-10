@@ -128,6 +128,7 @@ dependencies = [
  "omit-hwdb",
  "omit-mm",
  "omit-net",
+ "omit-rng",
  "omit-shell",
  "omit-term",
  "omit-vfs",
@@ -143,6 +144,10 @@ version = "0.2.0"
 
 [[package]]
 name = "omit-pe"
+version = "0.2.0"
+
+[[package]]
+name = "omit-rng"
 version = "0.2.0"
 
 [[package]]

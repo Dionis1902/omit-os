@@ -1,0 +1,12 @@
+[package]
+name = "omit-rng"
+description = "The system's random number generator, without the hardware: a ChaCha20-based generator with key erasure (no_std)"
+version.workspace = true
+edition.workspace = true
+license = "GPL-2.0-only"
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true

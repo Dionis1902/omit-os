@@ -29,6 +29,7 @@ mod pci;
 mod pipe;
 mod poll;
 mod process;
+mod random;
 mod sched;
 mod shared;
 mod shell;
@@ -373,6 +374,11 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     match time::init_realtime() {
         Some(moment) => info!("time: real-time clock reads {moment} UTC"),
         None => warn!("time: the real-time clock holds no valid date; there is no date and time"),
+    }
+    if random::init() {
+        info!("random: seeded by the processor's random number instruction");
+    } else {
+        info!("random: the processor offers no random numbers; seeded from timing only");
     }
     let elapsed_ns = time::self_test().map_err(InitError::TickSelfTest)?;
     info!(

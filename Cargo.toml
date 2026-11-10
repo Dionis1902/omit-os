@@ -20,6 +20,7 @@ members = [
     "libs/inet",
     "libs/mm",
     "libs/net",
+    "libs/rng",
     "libs/term",
     "libs/vfs",
     "libs/window",
@@ -45,6 +46,7 @@ default-members = [
     "libs/inet",
     "libs/mm",
     "libs/net",
+    "libs/rng",
     "libs/term",
     "libs/vfs",
     "libs/window",
@@ -65,6 +67,7 @@ omit-gfx = { path = "libs/gfx" }
 omit-gpt = { path = "libs/gpt" }
 omit-inet = { path = "libs/inet" }
 omit-net = { path = "libs/net" }
+omit-rng = { path = "libs/rng" }
 omit-pe = { path = "compat/windows/pe" }
 omit-window = { path = "libs/window" }
 omit-win32 = { path = "compat/windows/win32" }

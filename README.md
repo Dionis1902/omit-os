@@ -44,7 +44,7 @@ narrow each of those is, and what has been tested.
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
 
 Typing `desktop` at the prompt starts a small graphical desktop, drawn to
-the project's own design system (two stages of it so far; see ADR 0023).
+the project's own design system (eight stages of it so far; see ADR 0023).
 These screenshots are taken from QEMU by the automated test: the Files
 window in front of others, and Settings just after "Dark" was chosen:
 
@@ -281,7 +281,7 @@ machine.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe`, `thread_create`, `thread_exit`, `futex_wait`, `futex_wake`, `shared_create`, `shared_map`, `channel_listen`, `channel_accept`, `channel_connect`, `poll`, `realtime`, `seek`, `system_info`, `task_list` | Working, tested |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe`, `thread_create`, `thread_exit`, `futex_wait`, `futex_wake`, `shared_create`, `shared_map`, `channel_listen`, `channel_accept`, `channel_connect`, `poll`, `realtime`, `seek`, `system_info`, `task_list`, `random` | Working, tested |
 | Date and time: read from the PC real-time clock at start-up (taken as UTC), `date` command, Windows time functions | Working, tested in QEMU with a fixed emulated clock; no time zones, no way to set the clock. See ADR 0021 |
 | Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
 | Output redirection (`>`, `>>`) for programs | Working, tested |
@@ -289,7 +289,7 @@ machine.
 | Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest`, `threadtest` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest`, `threadtest`, `random` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB keyboards and mice on xHCI controllers (boot protocol, polled; hot-plug), directly or through hubs | Working in QEMU: tests type on a USB keyboard — plugged in directly, and behind a hub with the mouse behind a second hub — and one runs the whole desktop scenario with USB keyboard and mouse, PS/2 switched off. **Never run on real hardware.** See ADR 0019 |
@@ -526,6 +526,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0020 — AHCI driver (SATA disks)](docs/adr/0020-ahci.md)
 - [ADR 0021 — Date and time](docs/adr/0021-date-and-time.md)
 - [ADR 0023 — The desktop follows the Omit OS design system](docs/adr/0023-design-system.md)
+- [ADR 0024 — Random numbers](docs/adr/0024-random-numbers.md)
 - [ADR 0022 — Networking: a first network card and the base of IPv4](docs/adr/0022-networking.md)
 
 ## Testing

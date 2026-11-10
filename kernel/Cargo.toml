@@ -25,6 +25,7 @@ omit-hwdb.workspace = true
 omit-bootproto.workspace = true
 omit-mm.workspace = true
 omit-net.workspace = true
+omit-rng.workspace = true
 omit-shell.workspace = true
 omit-term.workspace = true
 # Pre-rasterised Noto Sans Mono glyphs for the framebuffer console (crate:

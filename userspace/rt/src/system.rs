@@ -23,6 +23,22 @@ pub fn info() -> Info {
     info
 }
 
+/// Fills `out` with random bytes fit for cryptographic use. Returns
+/// `true` if the processor's random number generator went into them;
+/// `false` means they rest only on the timing of events in this
+/// machine, which may be guessable (above all in a virtual machine).
+pub fn random(out: &mut [u8]) -> bool {
+    let mut hardware = true;
+    for chunk in out.chunks_mut(omit_abi::RANDOM_MAX as usize) {
+        // SAFETY: the pointer and length describe a live, writable
+        // buffer.
+        let quality =
+            unsafe { syscall(nr::RANDOM, chunk.as_mut_ptr() as u64, chunk.len() as u64, 0) };
+        hardware &= quality == omit_abi::RANDOM_HARDWARE as i64;
+    }
+    hardware
+}
+
 /// One thread of the system.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Task {

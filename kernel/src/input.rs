@@ -110,6 +110,7 @@ pub fn modifiers_held(held: u8) {
 
 /// Handles a key press from the keyboard driver (interrupt context).
 pub fn key_pressed(pressed: Key) {
+    crate::random::note_timing();
     if !GRABBED.load(Ordering::Relaxed) {
         if let Key::Char(ch) = pressed {
             crate::console::push_input(ch);
@@ -143,6 +144,7 @@ pub fn key_pressed(pressed: Key) {
 
 /// Handles a report from the mouse driver (interrupt context).
 pub fn mouse_moved(report: Report) {
+    crate::random::note_timing();
     if !GRABBED.load(Ordering::Relaxed) {
         return;
     }

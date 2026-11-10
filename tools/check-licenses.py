@@ -32,6 +32,7 @@ COMPONENTS = {
     "libs/gpt/": GPL2,
     "libs/hwdb/": GPL2,
     "libs/net/": GPL2,
+    "libs/rng/": GPL2,
     "libs/term/": GPL2,
     "libs/vfs/": GPL2,
     "libs/abi/": SYSCALL,
