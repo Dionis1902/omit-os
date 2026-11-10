@@ -1599,7 +1599,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ("lsdrv", "native     virtio-net\n"),
             (
                 "lspci",
-                " 1af4:1041 VirtIO network device [native driver: virtio-net]\n",
+                " 1af4:1000 VirtIO network device (transitional) [native driver: virtio-net]\n",
             ),
             (
                 "ifconfig",
