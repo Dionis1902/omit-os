@@ -110,7 +110,7 @@ this ADR records how the system implements it and how far it has got.
 
 ## What works
 
-- 131 host tests in `libs/gfx`: the font and icon files (every
+- 132 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -163,11 +163,15 @@ theme, every step of the window switcher) — so this is not a measured
 slowdown of any one thing, but with many windows open the desktop is
 slower than the first figures say. The desktop now also reports what
 its longest update was: in both runs a repaint of the whole screen
-that took about 0.22 s, nearly all of it drawing. The likely cause —
-not verified — is the first repaint after a change between light and
-dark, for which the wallpaper is scaled to the screen again; the
-other whole-screen repaints (each step of the window switcher) are
-evidently much faster, or the average would be higher.
+that took about 0.22 s, nearly all of it drawing. That is the first
+repaint after a change between light and dark, for which the
+wallpaper is scaled to the screen again: timed on the build machine,
+the scaling took 38 ms where an ordinary repaint of the whole screen
+takes 0.4 ms. Finding the places along each axis once instead of for
+every pixel brought the scaling to 16 ms there (the pixels are the
+same, which a test checks) and the longest update in the desktop test
+to between 0.14 and 0.16 s. A change of mode is still a visible pause
+under emulation.
 
 ## Not yet, and differences from the design
 

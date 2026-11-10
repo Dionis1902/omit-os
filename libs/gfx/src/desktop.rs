@@ -1867,13 +1867,11 @@ pub fn wallpaper_at(theme: &Theme, width: i32, height: i32, x: i32, y: i32) -> C
 
 /// The whole wallpaper for a `width` x `height` screen, row by row.
 fn make_wallpaper(theme: &Theme, width: i32, height: i32) -> Vec<Colour> {
-    let mut pixels = Vec::with_capacity((width.max(0) * height.max(0)) as usize);
-    for y in 0..height {
-        for x in 0..width {
-            pixels.push(wallpaper_at(theme, width, height, x, y));
-        }
+    match art::wallpaper(theme.mode) {
+        Some(picture) => picture.scaled_to(width, height),
+        // (Only if the picture built into the library were damaged.)
+        None => alloc::vec![theme.wallpaper[1]; (width.max(0) * height.max(0)) as usize],
     }
-    pixels
 }
 
 fn draw_window(

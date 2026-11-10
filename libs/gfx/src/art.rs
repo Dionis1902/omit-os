@@ -13,6 +13,8 @@
 //! per pixel (u8: 3 for red, green, blue; 4 with opacity), three zero
 //! bytes, then the pixels row by row.
 
+use alloc::vec::Vec;
+
 use crate::Colour;
 use crate::paint::mix;
 use crate::theme::Mode;
@@ -79,26 +81,75 @@ impl Picture {
     /// both directions, centred, what does not fit cut off; in-between
     /// pixels blended from their four neighbours. For opaque pictures.
     pub fn scaled(&self, width: i32, height: i32, x: i32, y: i32) -> Colour {
-        // Source pixels per target pixel, in 1/65536: the smaller of the
-        // two ratios, so that the picture covers the area.
+        let step = self.step(width, height);
+        let across = Self::place(x, width, self.width, step);
+        let down = Self::place(y, height, self.height, step);
+        self.blend(across, down)
+    }
+
+    /// The whole of what [`Picture::scaled`] gives for a `width` x
+    /// `height` area, row by row: the same colours, worked out with the
+    /// places along each axis found once instead of for every pixel.
+    pub fn scaled_to(&self, width: i32, height: i32) -> Vec<Colour> {
+        let (width, height) = (width.max(0), height.max(0));
+        let step = self.step(width, height);
+        let across: Vec<Place> = (0..width)
+            .map(|x| Self::place(x, width, self.width, step))
+            .collect();
+        let mut pixels = Vec::with_capacity(width as usize * height as usize);
+        for y in 0..height {
+            let down = Self::place(y, height, self.height, step);
+            pixels.extend(across.iter().map(|&across| self.blend(across, down)));
+        }
+        pixels
+    }
+
+    /// Source pixels per target pixel, in 1/65536: the smaller of the
+    /// two ratios, so that the picture covers the area.
+    fn step(&self, width: i32, height: i32) -> i64 {
         let (w, h) = (i64::from(width.max(1)), i64::from(height.max(1)));
         let (pw, ph) = (i64::from(self.width), i64::from(self.height));
-        let step = ((pw << 16) / w).min((ph << 16) / h).max(1);
-        // The centre of target pixel (x, y), in source coordinates,
-        // measured from the centre of source pixel (0, 0).
-        let place = |position: i32, target: i64, source: i64| {
-            let offset = ((source << 16) - target * step) / 2;
-            let at = offset + i64::from(position) * step + step / 2 - (1 << 15);
-            at.clamp(0, (source - 1) << 16)
-        };
-        let (sx, sy) = (place(x, w, pw), place(y, h, ph));
-        let (x0, y0) = ((sx >> 16) as i32, (sy >> 16) as i32);
-        let (x1, y1) = ((x0 + 1).min(self.width - 1), (y0 + 1).min(self.height - 1));
-        let (fx, fy) = (((sx >> 8) & 0xFF) as u8, ((sy >> 8) & 0xFF) as u8);
-        let top = mix(self.pixel(x1, y0).0, self.pixel(x0, y0).0, fx);
-        let bottom = mix(self.pixel(x1, y1).0, self.pixel(x0, y1).0, fx);
-        mix(bottom, top, fy)
+        ((pw << 16) / w).min((ph << 16) / h).max(1)
     }
+
+    /// Where the centre of target pixel `position` (of `target` along
+    /// this axis) falls among the `source` pixels of the picture: the
+    /// pixel before it, the one after, and how far between the two.
+    fn place(position: i32, target: i32, source: i32, step: i64) -> Place {
+        let (target, source) = (i64::from(target.max(1)), i64::from(source));
+        let offset = ((source << 16) - target * step) / 2;
+        let at = (offset + i64::from(position) * step + step / 2 - (1 << 15))
+            .clamp(0, (source - 1) << 16);
+        let before = (at >> 16) as i32;
+        Place {
+            before,
+            after: (before + 1).min(source as i32 - 1),
+            between: ((at >> 8) & 0xFF) as u8,
+        }
+    }
+
+    fn blend(&self, across: Place, down: Place) -> Colour {
+        let top = mix(
+            self.pixel(across.after, down.before).0,
+            self.pixel(across.before, down.before).0,
+            across.between,
+        );
+        let bottom = mix(
+            self.pixel(across.after, down.after).0,
+            self.pixel(across.before, down.after).0,
+            across.between,
+        );
+        mix(bottom, top, down.between)
+    }
+}
+
+/// A place between two neighbouring pixels along one axis.
+#[derive(Clone, Copy)]
+struct Place {
+    before: i32,
+    after: i32,
+    /// How far from `before` towards `after`, in 1/256.
+    between: u8,
 }
 
 /// The wallpaper for `mode`: "Dawn" in light mode, "Dusk" in dark.
@@ -194,6 +245,27 @@ mod tests {
             0, 255, 0, 255, 255, 255, // green, white
         ];
         Picture::parse(&DATA).unwrap()
+    }
+
+    /// The whole-area scaling is a faster way to the same colours.
+    #[test]
+    fn scaling_a_whole_area_gives_what_scaling_each_pixel_gives() {
+        for mode in [Mode::Light, Mode::Dark] {
+            let picture = wallpaper(mode).unwrap();
+            for (width, height) in [(1280, 800), (640, 480), (97, 301), (1, 1), (0, 5)] {
+                let whole = picture.scaled_to(width, height);
+                assert_eq!(whole.len(), (width * height) as usize);
+                for y in 0..height {
+                    for x in 0..width {
+                        assert_eq!(
+                            whole[(y * width + x) as usize],
+                            picture.scaled(width, height, x, y),
+                            "{width}x{height} at ({x}, {y})"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
