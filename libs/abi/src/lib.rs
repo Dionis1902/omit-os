@@ -334,6 +334,7 @@ pub struct InputEvent {
     /// Mouse: movement down the screen.
     pub b: i32,
     /// Mouse: the buttons held (bit 0 left, bit 1 right, bit 2 middle).
+    /// Key and modifiers: the modifier keys held (see [`modifier`]).
     pub c: u32,
     /// When the kernel received the event from the device, in
     /// microseconds on the clock of the `clock` system call. For mouse
@@ -347,6 +348,20 @@ pub mod event {
     pub const KEY: u32 = 1;
     /// The mouse moved or a button changed.
     pub const MOUSE: u32 = 2;
+    /// A modifier key (Shift, Ctrl, Alt) was pressed or let go; the
+    /// event says which are held now.
+    pub const MODIFIERS: u32 = 3;
+}
+
+/// The modifier keys, as bits of [`InputEvent::c`] in key and modifier
+/// events.
+pub mod modifier {
+    /// Either Shift key.
+    pub const SHIFT: u32 = 1 << 0;
+    /// Either Ctrl key.
+    pub const CONTROL: u32 = 1 << 1;
+    /// Either Alt key.
+    pub const ALT: u32 = 1 << 2;
 }
 
 /// Key codes. Keys with an ASCII meaning have that value (Enter is 13,

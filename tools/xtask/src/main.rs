@@ -48,6 +48,7 @@ ENVIRONMENT:
     QEMU                 QEMU binary [default: qemu-system-x86_64]
     OVMF_CODE, OVMF_VARS UEFI firmware images (auto-detected if unset)
     OMIT_TEST_TIMEOUT    Per-test timeout in seconds [default: 120]
+                         (the desktop tests get three times as long)
 ";
 
 /// Size of the generated disk image.
@@ -2895,6 +2896,53 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         );
     }
 
+    // The window switcher. A quick Alt+Tab goes to the window used
+    // before this one, the Calculator. Then, with Alt+Tab held, the
+    // switcher is on the screen: one of its tiles is outlined in the
+    // accent colour (which one is not asked: a held Tab repeats on some
+    // keyboards). When the keys are let go it is gone.
+    {
+        use omit_gfx::desktop::modifier;
+        type_on_keyboard(&check.monitor, &["alt-tab"])?;
+        wait_for_screen(check, "the Calculator after Alt+Tab", patience, |image| {
+            title(image, "Calculator")
+        })?;
+        layout.set_modifiers(modifier::ALT);
+        layout.key(9);
+        let tiles: Vec<_> = (0..layout.window_count())
+            .filter_map(|index| layout.switcher_tile_frame(index))
+            .collect();
+        layout.key(27);
+        layout.set_modifiers(0);
+        if tiles.len() != layout.window_count() || tiles.is_empty() {
+            return Err("the switcher has no tiles to look for".into());
+        }
+        let outlined = |image: &Screenshot| {
+            tiles.iter().any(|tile| {
+                [
+                    (tile.x + tile.w / 2, tile.y),
+                    (tile.x + tile.w / 2, tile.y + tile.h - 1),
+                    (tile.x, tile.y + tile.h / 2),
+                    (tile.x + tile.w - 1, tile.y + tile.h / 2),
+                ]
+                .iter()
+                .all(|&(x, y)| image.pixel(x as usize, y as usize) == rgb(theme.accent))
+            })
+        };
+        monitor_command(&check.monitor, "sendkey alt-tab 6000")?;
+        wait_for_screen(check, "the window switcher", patience, |image| {
+            outlined(image)
+        })?;
+        // Kept next to the serial log: the switcher.
+        let _ = fs::copy(
+            &check.screenshot,
+            check.screenshot.with_extension("switcher.ppm"),
+        );
+        wait_for_screen(check, "the switcher put away", patience, |image| {
+            !outlined(image)
+        })?;
+    }
+
     // The Start mark opens the list of programs; the row under the
     // pointer is filled with the accent colour. Its power button ends
     // the desktop.
@@ -3703,6 +3751,10 @@ fn cmd_test(options: &Options) -> Result<ExitCode> {
     println!("1..{}", tests.len());
     let mut failed = 0;
     for (index, test) in tests.iter().enumerate() {
+        // The desktop tests operate a dozen windows by mouse and
+        // keyboard, each step waiting for the screen: three times the
+        // time of the others.
+        let timeout = if test.desktop { timeout * 3 } else { timeout };
         let (failures, run) = run_boot_test(test, &artifacts, options, timeout)?;
         let number = index + 1;
         if failures.is_empty() {

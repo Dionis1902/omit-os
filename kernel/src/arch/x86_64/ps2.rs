@@ -83,10 +83,12 @@ fn drain(controller: &mut Controller, deliver: bool) {
             {
                 handler(report);
             }
-        } else if let (Some(key), Some(handler)) =
-            (controller.keys.feed_key(byte), controller.key_handler)
-        {
-            handler(key);
+        } else {
+            let key = controller.keys.feed_key(byte);
+            crate::input::modifiers_held(controller.keys.modifiers());
+            if let (Some(key), Some(handler)) = (key, controller.key_handler) {
+                handler(key);
+            }
         }
     }
 }

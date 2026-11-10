@@ -20,6 +20,7 @@ const EXTENDED_PREFIX: u8 = 0xE0;
 const LEFT_SHIFT: u8 = 0x2A;
 const RIGHT_SHIFT: u8 = 0x36;
 const CONTROL: u8 = 0x1D;
+const ALT: u8 = 0x38;
 const CAPS_LOCK: u8 = 0x3A;
 const ENTER: u8 = 0x1C;
 const KEYPAD_SLASH: u8 = 0x35;
@@ -75,9 +76,18 @@ pub struct Decoder {
     left_shift: bool,
     right_shift: bool,
     control: bool,
+    left_alt: bool,
+    right_alt: bool,
     caps_lock: bool,
     extended: bool,
 }
+
+/// [`Decoder::modifiers`]: a Shift key is held.
+pub const MODIFIER_SHIFT: u8 = 1 << 0;
+/// [`Decoder::modifiers`]: a Ctrl key is held.
+pub const MODIFIER_CONTROL: u8 = 1 << 1;
+/// [`Decoder::modifiers`]: an Alt key is held.
+pub const MODIFIER_ALT: u8 = 1 << 2;
 
 impl Decoder {
     /// Creates a decoder with no modifiers active.
@@ -86,9 +96,28 @@ impl Decoder {
             left_shift: false,
             right_shift: false,
             control: false,
+            left_alt: false,
+            right_alt: false,
             caps_lock: false,
             extended: false,
         }
+    }
+
+    /// The modifier keys held after the scancodes fed so far, as
+    /// `MODIFIER_*` bits. (One Ctrl key let go counts as both let go:
+    /// the two are not told apart.)
+    pub fn modifiers(&self) -> u8 {
+        let mut held = 0;
+        if self.left_shift || self.right_shift {
+            held |= MODIFIER_SHIFT;
+        }
+        if self.control {
+            held |= MODIFIER_CONTROL;
+        }
+        if self.left_alt || self.right_alt {
+            held |= MODIFIER_ALT;
+        }
+        held
     }
 
     /// Processes one scancode byte and returns the character it produces,
@@ -118,6 +147,11 @@ impl Decoder {
                     self.control = pressed;
                     None
                 }
+                // Right Alt.
+                ALT => {
+                    self.right_alt = pressed;
+                    None
+                }
                 ENTER if pressed => Some(Key::Char(b'\r')),
                 KEYPAD_SLASH if pressed => Some(Key::Char(b'/')),
                 0x48 if pressed => Some(Key::Up),
@@ -140,6 +174,7 @@ impl Decoder {
             LEFT_SHIFT => self.left_shift = pressed,
             RIGHT_SHIFT => self.right_shift = pressed,
             CONTROL => self.control = pressed,
+            ALT => self.left_alt = pressed,
             CAPS_LOCK if pressed => self.caps_lock = !self.caps_lock,
             // F1-F10, F11, F12.
             0x3B..=0x44 if pressed => return Some(Key::Function(code - 0x3A)),
@@ -189,6 +224,37 @@ mod tests {
     /// Make code followed by break code.
     fn tap(code: u8) -> [u8; 2] {
         [code, code | RELEASE]
+    }
+
+    #[test]
+    fn modifiers_are_reported_while_held() {
+        let mut decoder = Decoder::new();
+        assert_eq!(decoder.modifiers(), 0);
+        // Left Alt down: no key, but held.
+        assert_eq!(decoder.feed_key(0x38), None);
+        assert_eq!(decoder.modifiers(), MODIFIER_ALT);
+        // Tab with Alt held is still Tab.
+        assert_eq!(decoder.feed_key(0x0F), Some(Key::Char(b'\t')));
+        assert_eq!(decoder.feed_key(0x8F), None);
+        // Right Alt (prefixed) down, left up: still held.
+        assert_eq!(decoder.feed_key(0xE0), None);
+        assert_eq!(decoder.feed_key(0x38), None);
+        assert_eq!(decoder.feed_key(0xB8), None);
+        assert_eq!(decoder.modifiers(), MODIFIER_ALT);
+        // Shift and Ctrl join in.
+        decoder.feed_key(0x2A);
+        decoder.feed_key(0x1D);
+        assert_eq!(
+            decoder.modifiers(),
+            MODIFIER_ALT | MODIFIER_SHIFT | MODIFIER_CONTROL
+        );
+        // All let go.
+        for code in [0xE0, 0xB8, 0xAA, 0x9D] {
+            decoder.feed_key(code);
+        }
+        assert_eq!(decoder.modifiers(), 0);
+        // Alt does not disturb ordinary typing afterwards.
+        assert_eq!(decoder.feed_key(0x1E), Some(Key::Char(b'a')));
     }
 
     #[test]

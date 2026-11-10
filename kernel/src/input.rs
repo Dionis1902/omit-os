@@ -78,6 +78,35 @@ pub fn set_grabbed(grabbed: bool) {
     GRABBED.store(grabbed, Ordering::Relaxed);
 }
 
+/// The modifier keys held, as last reported by a keyboard (the bits of
+/// `omit_abi::modifier`, which are the decoder's).
+static MODIFIERS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+const _: () = {
+    use omit_term::scancode::{MODIFIER_ALT, MODIFIER_CONTROL, MODIFIER_SHIFT};
+    assert!(MODIFIER_SHIFT as u32 == omit_abi::modifier::SHIFT);
+    assert!(MODIFIER_CONTROL as u32 == omit_abi::modifier::CONTROL);
+    assert!(MODIFIER_ALT as u32 == omit_abi::modifier::ALT);
+};
+
+/// Tells which modifier keys a keyboard has held now; called by the
+/// keyboard drivers after every scancode (interrupt context). A change
+/// is passed on to the program that has the input.
+pub fn modifiers_held(held: u8) {
+    let held = u32::from(held);
+    if MODIFIERS.swap(held, Ordering::Relaxed) == held || !GRABBED.load(Ordering::Relaxed) {
+        return;
+    }
+    QUEUE.lock().push(InputEvent {
+        kind: event::MODIFIERS,
+        a: 0,
+        b: 0,
+        c: held,
+        time_us: now_us(),
+    });
+    ARRIVED.wake_all();
+}
+
 /// Handles a key press from the keyboard driver (interrupt context).
 pub fn key_pressed(pressed: Key) {
     if !GRABBED.load(Ordering::Relaxed) {
@@ -104,7 +133,7 @@ pub fn key_pressed(pressed: Key) {
         kind: event::KEY,
         a: code,
         b: 0,
-        c: 0,
+        c: MODIFIERS.load(Ordering::Relaxed),
         time_us: now_us(),
     });
     ARRIVED.wake_all();

@@ -78,11 +78,19 @@ this ADR records how the system implements it and how far it has got.
   thread: process, state, processor time, name), which any program
   may use; like the other windows it lives in the library and gets
   its figures through a trait, so the arithmetic is tested on the
-  host with made-up systems.
+  host with made-up systems. The fifth: the **window switcher** —
+  Alt+Tab shows the windows in the order of their use (minimised ones
+  last), Tab or the arrows move on, Shift goes back, letting go of Alt
+  brings the chosen one to the front, Escape leaves things as they
+  were — and Alt+F4 closes the window in front. For this the kernel
+  now follows the Alt keys and tells the program that has the input
+  which modifier keys are held: with every key press, and in an event
+  of its own when one is pressed or let go (key releases were not
+  reported at all before, and still are not for other keys).
 
 ## What works
 
-- 106 host tests in `libs/gfx`: the font and icon files (every
+- 111 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -105,7 +113,10 @@ this ADR records how the system implements it and how far it has got.
   Calculator's keys followed by − 2 Enter on the keyboard.
   Since the fourth, the System Monitor is opened and must list the
   kernel's line and the desktop itself, and show its graphs' page.
-  Ending a process from it is tested on the host only.
+  Ending a process from it is tested on the host only. Since the
+  fifth, a quick Alt+Tab must bring the Calculator back in front, and
+  with the keys held the switcher must be on the screen and gone when
+  they are let go.
   That the settings file is read back at the next start is tested on
   the host only (the parser), not across a restart in QEMU.
 
@@ -120,16 +131,18 @@ halved that.) Debug builds are slower by the same factor as before.
 ## Not yet, and differences from the design
 
 - **Most of the design's screens**: lock screen and sign-in (there are
-  no users yet), the separate search screen, the window switcher and
-  the picker that offers a second window for the other half after one
-  was arranged, the quick panel and notifications,
-  Market; all pages of Settings but one. In
+  no users yet), the separate search screen, the picker that offers
+  a second window for the other half after one was arranged, the
+  quick panel and notifications, Market; all pages of Settings but
+  one. In
   Files: tabs, search, the preview pane, the context menu, renaming,
   deleting and the Recycle Bin, sorting, and scrolling with the mouse
   (there are no wheel events yet); a row is opened by clicking it a
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
+- The window switcher shows icons and titles, not pictures of the
+  windows.
 - The System Monitor does not show memory per process (the kernel
   does not account for it yet), nor disks, network or sorting; its
   processor figure is for the one processor the kernel uses, counted

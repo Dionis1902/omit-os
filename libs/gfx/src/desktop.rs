@@ -364,6 +364,23 @@ pub enum Zone {
 /// The space left between arranged windows, and around them.
 const GUTTER: i32 = 8;
 
+/// Keys that change what others mean, as bits of what
+/// [`Desktop::set_modifiers`] is told. (The values are those of the
+/// kernel's input events.)
+pub mod modifier {
+    /// Either Shift key.
+    pub const SHIFT: u32 = 1 << 0;
+    /// Either Ctrl key.
+    pub const CONTROL: u32 = 1 << 1;
+    /// Either Alt key.
+    pub const ALT: u32 = 1 << 2;
+}
+
+/// One window in the switcher: this wide and high, ...
+const SWITCH_TILE: (i32, i32) = (116, 92);
+/// ... this far from the next and from the panel's edge.
+const SWITCH_GAP: i32 = 8;
+
 /// What the pointer is over, of the things that show it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hover {
@@ -409,6 +426,11 @@ pub struct Desktop {
     /// The window whose content area the left button was pressed in and
     /// is still held over: it receives pointer movement.
     capture: Option<WindowId>,
+    /// The modifier keys held (see [`modifier`]).
+    modifiers: u32,
+    /// While the window switcher is shown: which of
+    /// [`Desktop::switcher_windows`] it would bring to the front.
+    switcher: Option<usize>,
     /// The area that needs repainting.
     dirty: Rect,
     next_id: u32,
@@ -439,6 +461,8 @@ impl Desktop {
             zone: None,
             resize: None,
             capture: None,
+            modifiers: 0,
+            switcher: None,
             dirty: Rect::new(0, 0, width, height),
             next_id: 0,
             quit: false,
@@ -659,6 +683,7 @@ impl Desktop {
         );
         // The window that was in front loses its place.
         self.damage_front();
+        self.switcher_changed();
         self.windows.push(Window {
             id,
             frame,
@@ -732,7 +757,13 @@ impl Desktop {
     fn close(&mut self, id: WindowId) {
         if let Some(index) = self.index_of(id) {
             self.damage_window(index);
+            self.switcher_changed();
             self.windows.remove(index);
+            // The switcher goes on with the windows that are left.
+            self.switcher = match (self.switcher, self.windows.len()) {
+                (Some(at), count) if count > 0 => Some(at.min(count - 1)),
+                _ => None,
+            };
             self.damage_front();
             self.damage(self.taskbar());
             if self.drag.is_some_and(|(dragged, _)| dragged == id) {
@@ -989,6 +1020,20 @@ impl Desktop {
 
     fn press(&mut self) {
         let at = self.pointer;
+        if self.switcher.is_some() {
+            // A press on one of the switcher's windows chooses it; a
+            // press anywhere else only puts the switcher away.
+            let chosen = (0..self.switcher_windows().len())
+                .find(|&index| self.switcher_tile(index).contains(at));
+            match chosen {
+                Some(index) => {
+                    self.switcher = Some(index);
+                    self.finish_switch();
+                }
+                None => self.cancel_switch(),
+            }
+            return;
+        }
         if self.start_open {
             // A press anywhere closes the panel; on one of its rows it
             // also starts that program.
@@ -1150,6 +1195,33 @@ impl Desktop {
     /// Reports a key press; it goes to the window in front. While the
     /// Start panel is open, Escape closes it instead.
     pub fn key(&mut self, code: i32) {
+        const TAB: i32 = 9;
+        const ESCAPE: i32 = 27;
+        const LEFT: i32 = 0x103;
+        const RIGHT: i32 = 0x104;
+        const F4: i32 = 0x114;
+        let alt = self.modifiers & modifier::ALT != 0;
+        let back = self.modifiers & modifier::SHIFT != 0;
+        if alt && code == TAB {
+            self.switch_step(back);
+            return;
+        }
+        if self.switcher.is_some() {
+            // Until Alt is let go the keyboard belongs to the switcher.
+            match code {
+                ESCAPE => self.cancel_switch(),
+                LEFT => self.switch_step(true),
+                RIGHT => self.switch_step(false),
+                _ => {}
+            }
+            return;
+        }
+        if alt && code == F4 {
+            if let Some(id) = self.front() {
+                self.close(id);
+            }
+            return;
+        }
         if self.start_open {
             self.start_key(code);
             return;
@@ -1162,6 +1234,109 @@ impl Desktop {
         self.windows[index].app.key(code, &mut context);
         self.damage(self.windows[index].frame);
         self.perform(context, Some(id));
+    }
+
+    /// Tells the desktop which modifier keys are held now (bits of
+    /// [`modifier`]). Letting go of Alt while the window switcher is
+    /// shown brings the chosen window to the front.
+    pub fn set_modifiers(&mut self, held: u32) {
+        self.modifiers = held;
+        if held & modifier::ALT == 0 && self.switcher.is_some() {
+            self.finish_switch();
+        }
+    }
+
+    /// The windows as the switcher shows them: the one in front first,
+    /// then those behind it, then the minimised ones.
+    pub fn switcher_windows(&self) -> Vec<WindowId> {
+        let shown = self.windows.iter().rev().filter(|w| !w.minimised);
+        let hidden = self.windows.iter().rev().filter(|w| w.minimised);
+        shown.chain(hidden).map(|w| w.id).collect()
+    }
+
+    /// The window the switcher would bring to the front, while it is
+    /// shown.
+    pub fn switcher_choice(&self) -> Option<WindowId> {
+        self.switcher_windows().get(self.switcher?).copied()
+    }
+
+    /// The switcher's panel, in the middle of the desktop: as many
+    /// tiles in a row as fit, and as many rows as that takes.
+    fn switcher_panel(&self) -> Rect {
+        let count = self.switcher_windows().len().max(1) as i32;
+        let columns = self.switcher_columns();
+        let rows = (count + columns - 1) / columns;
+        let width = columns * (SWITCH_TILE.0 + SWITCH_GAP) + SWITCH_GAP;
+        let height = rows * (SWITCH_TILE.1 + SWITCH_GAP) + SWITCH_GAP;
+        Rect::new(
+            (self.width - width) / 2,
+            (self.height - TASKBAR_HEIGHT - height).max(0) / 2,
+            width,
+            height,
+        )
+    }
+
+    fn switcher_columns(&self) -> i32 {
+        let count = self.switcher_windows().len().max(1) as i32;
+        let fit = (self.width - 2 * GUTTER - SWITCH_GAP) / (SWITCH_TILE.0 + SWITCH_GAP);
+        count.min(fit.max(1))
+    }
+
+    fn switcher_tile(&self, index: usize) -> Rect {
+        let panel = self.switcher_panel();
+        let columns = self.switcher_columns();
+        let (column, row) = (index as i32 % columns, index as i32 / columns);
+        Rect::new(
+            panel.x + SWITCH_GAP + column * (SWITCH_TILE.0 + SWITCH_GAP),
+            panel.y + SWITCH_GAP + row * (SWITCH_TILE.1 + SWITCH_GAP),
+            SWITCH_TILE.0,
+            SWITCH_TILE.1,
+        )
+    }
+
+    /// Where the `index`-th window is in the switcher, while it is shown.
+    pub fn switcher_tile_frame(&self, index: usize) -> Option<Rect> {
+        (self.switcher.is_some() && index < self.switcher_windows().len())
+            .then(|| self.switcher_tile(index))
+    }
+
+    /// What the switcher shows is about to change, or just did. (It is
+    /// rare and brief enough to repaint the screen for.)
+    fn switcher_changed(&mut self) {
+        if self.switcher.is_some() {
+            self.damage(self.screen());
+        }
+    }
+
+    /// Alt+Tab: shows the switcher with the window behind the front one
+    /// chosen, or moves on to the next (`back`: the one before).
+    fn switch_step(&mut self, back: bool) {
+        let count = self.windows.len();
+        if count == 0 {
+            return;
+        }
+        let next = match self.switcher {
+            None if back => count - 1,
+            None => 1 % count,
+            Some(at) if back => (at.min(count - 1) + count - 1) % count,
+            Some(at) => (at + 1) % count,
+        };
+        self.set_start(false);
+        self.switcher = Some(next);
+        self.switcher_changed();
+    }
+
+    fn cancel_switch(&mut self) {
+        self.switcher_changed();
+        self.switcher = None;
+    }
+
+    fn finish_switch(&mut self) {
+        let chosen = self.switcher_choice();
+        self.cancel_switch();
+        if let Some(index) = chosen.and_then(|id| self.index_of(id)) {
+            self.raise(index);
+        }
     }
 
     /// A key pressed while the Start panel is open: typing searches,
@@ -1281,6 +1456,9 @@ impl Desktop {
         }
         if let Hover::Launcher(index) = self.hover {
             self.draw_tooltip(&mut canvas, index);
+        }
+        if let Some(chosen) = self.switcher {
+            self.draw_switcher(&mut canvas, chosen);
         }
 
         for (row, line) in POINTER.iter().enumerate() {
@@ -1500,6 +1678,56 @@ impl Desktop {
             theme.text_2
         };
         draw_icon(canvas, power, "power", 20, ink);
+    }
+
+    fn draw_switcher(&self, canvas: &mut Canvas<'_>, chosen: usize) {
+        let theme = &self.theme;
+        let panel = self.switcher_panel();
+        canvas.shadow(
+            panel.translate(0, SHADOW_BEHIND.1),
+            16,
+            SHADOW_FRONT.0,
+            theme.shadow,
+            theme.shadow_popup,
+        );
+        // Like the Start panel: nearly opaque, for want of blur.
+        canvas.round_rect(panel, 16, theme.glass.colour, 242);
+        canvas.round_outline(panel, 16, theme.highlight.colour, theme.highlight.alpha);
+        for (index, id) in self.switcher_windows().into_iter().enumerate() {
+            let Some(window) = self.windows.iter().find(|w| w.id == id) else {
+                continue;
+            };
+            let tile = self.switcher_tile(index);
+            if index == chosen {
+                tone(canvas, tile, 10, theme.fill_2);
+                canvas.round_outline(tile, 10, theme.accent, 255);
+            }
+            draw_program_icon(
+                canvas,
+                Rect::new(tile.x, tile.y + 12, tile.w, 34),
+                window.app.icon(),
+                30,
+                24,
+                theme.text_2,
+            );
+            let (title, cut) = REGULAR_12.fit(window.app.title(), tile.w - 16);
+            let ink = if window.minimised {
+                theme.text_3
+            } else {
+                theme.text
+            };
+            let width = REGULAR_12.width(title) + if cut { REGULAR_12.width("...") } else { 0 };
+            let end = canvas.write(
+                tile.x + (tile.w - width) / 2,
+                tile.y + 58,
+                title,
+                REGULAR_12,
+                ink,
+            );
+            if cut {
+                canvas.write(end, tile.y + 58, "...", REGULAR_12, theme.text_3);
+            }
+        }
     }
 
     fn draw_tooltip(&self, canvas: &mut Canvas<'_>, index: usize) {
@@ -2693,6 +2921,11 @@ mod tests {
                     2 | 3 => f
                         .desktop
                         .key([0x74, 0x69, 127, 0x102, 0x101, 13][next(6) as usize]),
+                    // The window switcher: Alt (and Shift) down or up,
+                    // Tab, Escape.
+                    4 => f.desktop.set_modifiers([0, 4, 5, 4][next(4) as usize]),
+                    5 => f.desktop.key(9),
+                    6 => f.desktop.key([27, 0x103, 0x104, 0x114][next(4) as usize]),
                     _ => {}
                 },
             }
@@ -2703,6 +2936,172 @@ mod tests {
             }
         }
         assert!(!f.desktop.quit_requested());
+    }
+
+    #[test]
+    fn alt_tab_shows_the_windows_and_letting_go_of_alt_switches() {
+        let mut f = Fixture::new();
+        let red = f.open("red", RED);
+        let green = f.open("green", GREEN);
+        let blue = f.open("blue", BLUE);
+        f.render();
+        let before = f.repainted();
+        // Tab alone is an ordinary key for the window in front.
+        f.desktop.key(9);
+        assert_eq!(f.log.borrow().keys, [("blue".into(), 9)]);
+        assert_eq!(f.desktop.switcher_choice(), None);
+
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        // Front first, then those behind it; the one behind the front
+        // window is chosen.
+        assert_eq!(f.desktop.switcher_windows(), [blue, green, red]);
+        assert_eq!(f.desktop.switcher_choice(), Some(green));
+        // The panel is drawn, in the middle, with the chosen tile
+        // outlined in the accent colour.
+        f.render();
+        let chosen = f.desktop.switcher_tile_frame(1).unwrap();
+        let other = f.desktop.switcher_tile_frame(0).unwrap();
+        let accent = f.desktop.theme().accent;
+        assert!(f.count(chosen, accent) > 100);
+        assert_eq!(f.count(other, accent), 0);
+        assert!(f.changed(other, &before) > 200, "icon and title");
+        assert!((chosen.x + chosen.w / 2 - W as i32 / 2).abs() < 10);
+        assert!(f.desktop.switcher_tile_frame(3).is_none());
+
+        // Tab again moves on, and wraps; nothing reaches the windows.
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_choice(), Some(red));
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_choice(), Some(blue));
+        f.desktop.key(0x61);
+        // With Shift, backwards.
+        f.desktop.set_modifiers(modifier::ALT | modifier::SHIFT);
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_choice(), Some(red));
+        assert_eq!(f.log.borrow().keys.len(), 1);
+        // Shift let go changes nothing; Alt let go switches.
+        f.desktop.set_modifiers(modifier::ALT);
+        assert_eq!(f.desktop.front(), Some(blue));
+        f.desktop.set_modifiers(0);
+        assert_eq!(f.desktop.front(), Some(red));
+        assert_eq!(f.desktop.switcher_choice(), None);
+        // The panel is gone from the screen.
+        f.render();
+        let fresh = f.repainted();
+        assert!(fresh == f.surface);
+        // The windows are now in the order of their use: a quick
+        // Alt+Tab goes back to the one before.
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        f.desktop.set_modifiers(0);
+        assert_eq!(f.desktop.front(), Some(blue));
+    }
+
+    #[test]
+    fn the_switcher_can_be_left_and_reaches_minimised_windows() {
+        let mut f = Fixture::new();
+        let red = f.open("red", RED);
+        let green = f.open("green", GREEN);
+        let button = f.desktop.control_frame(green, Control::Minimise).unwrap();
+        f.click_in(button);
+        assert!(f.desktop.is_minimised(green));
+        assert_eq!(f.desktop.front(), Some(red));
+
+        // Escape leaves everything as it was.
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_windows(), [red, green]);
+        assert_eq!(f.desktop.switcher_choice(), Some(green));
+        f.desktop.key(27);
+        assert_eq!(f.desktop.switcher_choice(), None);
+        f.desktop.set_modifiers(0);
+        assert!(f.desktop.is_minimised(green));
+
+        // The arrows move too; a minimised window chosen comes back.
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        f.desktop.key(0x104);
+        assert_eq!(f.desktop.switcher_choice(), Some(red));
+        f.desktop.key(0x103);
+        assert_eq!(f.desktop.switcher_choice(), Some(green));
+        f.desktop.set_modifiers(0);
+        assert!(!f.desktop.is_minimised(green));
+        assert_eq!(f.desktop.front(), Some(green));
+
+        // A click on a tile chooses it at once; a click elsewhere only
+        // closes the switcher, and does not reach what is under it.
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        let tile = f.desktop.switcher_tile_frame(1).unwrap();
+        f.click_in(tile);
+        assert_eq!(f.desktop.front(), Some(red));
+        assert_eq!(f.desktop.switcher_choice(), None);
+        f.desktop.key(9);
+        let clicks = f.log.borrow().clicks.len();
+        f.click_at(5, 5);
+        assert_eq!(f.desktop.switcher_choice(), None);
+        assert_eq!(f.desktop.front(), Some(red));
+        assert_eq!(f.log.borrow().clicks.len(), clicks);
+        f.desktop.set_modifiers(0);
+    }
+
+    #[test]
+    fn the_switcher_copes_with_no_one_and_many_windows() {
+        let mut f = Fixture::new();
+        f.desktop.set_modifiers(modifier::ALT);
+        // No windows: nothing to show.
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_choice(), None);
+        // One: it is the choice.
+        let only = f.open("only", RED);
+        f.desktop.key(9);
+        assert_eq!(f.desktop.switcher_choice(), Some(only));
+        f.desktop.set_modifiers(0);
+        assert_eq!(f.desktop.front(), Some(only));
+        // More than fit in a row: the panel wraps and stays on the
+        // screen.
+        for _ in 0..12 {
+            f.open("more", GREEN);
+        }
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(9);
+        let screen = Rect::new(0, 0, W as i32, H as i32 - TASKBAR_HEIGHT);
+        let first = f.desktop.switcher_tile_frame(0).unwrap();
+        let last = f.desktop.switcher_tile_frame(12).unwrap();
+        assert!(last.y > first.y);
+        for tile in [first, last] {
+            assert_eq!(tile.intersect(&screen), tile);
+        }
+        f.render();
+        // A window closing while the switcher is shown leaves a valid
+        // choice.
+        for _ in 0..11 {
+            f.desktop.key(9);
+        }
+        let last_id = f.desktop.switcher_choice().unwrap();
+        f.desktop.close(last_id);
+        assert!(f.desktop.switcher_choice().is_some());
+        f.render();
+        let fresh = f.repainted();
+        assert!(fresh == f.surface);
+        f.desktop.set_modifiers(0);
+    }
+
+    #[test]
+    fn alt_f4_closes_the_window_in_front() {
+        let mut f = Fixture::new();
+        let red = f.open("red", RED);
+        f.open("green", GREEN);
+        // Without Alt, F4 is the window's own business.
+        f.desktop.key(0x114);
+        assert_eq!(f.desktop.window_count(), 2);
+        assert_eq!(f.log.borrow().keys, [("green".into(), 0x114)]);
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(0x114);
+        assert_eq!(f.desktop.window_count(), 1);
+        assert_eq!(f.desktop.front(), Some(red));
+        assert_eq!(f.log.borrow().keys.len(), 1);
     }
 
     #[test]

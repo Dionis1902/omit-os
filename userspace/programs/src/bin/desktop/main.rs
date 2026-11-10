@@ -175,7 +175,11 @@ fn main() -> i32 {
                     // F12 always leaves, whatever the windows do.
                     break 'run;
                 }
-                event::KEY => desktop.key(input.a),
+                event::KEY => {
+                    desktop.set_modifiers(input.c);
+                    desktop.key(input.a);
+                }
+                event::MODIFIERS => desktop.set_modifiers(input.c),
                 event::MOUSE => desktop.mouse(input.a, input.b, input.c),
                 _ => {}
             }

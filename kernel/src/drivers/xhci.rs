@@ -1223,7 +1223,9 @@ impl Xhci {
                     ..
                 } = endpoint;
                 let pressed = keyboard.feed(&report[..received], |scancode| {
-                    if let Some(key) = decoder.feed_key(scancode) {
+                    let key = decoder.feed_key(scancode);
+                    input::modifiers_held(decoder.modifiers());
+                    if let Some(key) = key {
                         input::key_pressed(key);
                     }
                 });
@@ -1252,7 +1254,9 @@ impl Xhci {
             } = endpoint;
             if repeat_at.is_some_and(|at| now >= at) {
                 let repeated = keyboard.repeat(|scancode| {
-                    if let Some(key) = decoder.feed_key(scancode) {
+                    let key = decoder.feed_key(scancode);
+                    input::modifiers_held(decoder.modifiers());
+                    if let Some(key) = key {
                         input::key_pressed(key);
                     }
                 });
