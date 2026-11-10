@@ -214,11 +214,20 @@ interrupts), 3 (terminal and filesystem), 4 (processes and userspace),
 instance), 7 (Windows executables, first instance) and 8 (graphics and a
 desktop, first instance) are implemented. Of Milestone 9 (advanced
 compatibility), the parts that could be built and tested were: DLL
-support, a second Linux driver family, and latency measurement; Direct3D,
-Vulkan, GPU acceleration and games were investigated only (ADR 0013). "First instance" means what it
-says: two small Linux drivers; Windows programs that use only a small part of one
-system library; a desktop with a handful of built-in windows and a minimal
-protocol for other programs' windows.
+support, a first slice of the Windows GUI, a second Linux driver family,
+and measurements of input latency and frame pacing; Direct3D, Vulkan, GPU
+acceleration and existing games were investigated only (ADR 0013).
+
+"First instance" means what it says: two small Linux drivers; Windows
+programs written for the purpose, using about 120 functions of three
+system libraries — no existing Windows application runs; a desktop with a
+handful of built-in windows and a minimal protocol for other programs'
+windows. Milestones 6 to 9 are open-ended by nature, and nothing here
+should be read as those goals being reached.
+
+Storage (VirtIO, NVMe, SATA), USB input, the clock and the installer have
+native drivers that are **tested in QEMU only**. The system has never
+been run on a physical machine.
 
 | Component | State |
 | --- | --- |
@@ -513,13 +522,14 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next step:** building on the new window protocol (a terminal as a
-separate program, resizable windows), and the rest of what Windows programs with a C runtime need (static
-thread-local storage, exception handling, more of the API). Pipes and
-threads exist, natively and for Windows programs (ADRs 0011, 0014 and
-0015). Still open from earlier milestones: interrupts for device drivers (MSI-X), an
-loadable drivers and packages, a Rust `std` port for coreutils,
-threads, and the Windows functions the C runtime needs.
+**Next steps**, in no promised order: on the desktop, resizable windows
+and a terminal as a separate program; for Windows programs, what a C
+runtime needs before any existing program can start (static thread-local
+storage, exception handling, a much larger part of the API); for
+hardware, USB hubs and storage, interrupts for device drivers (MSI-X)
+instead of polling, more than one CPU; for the system itself, a
+network stack, loadable drivers, a shell outside the kernel, and a Rust
+`std` port so that ordinary command-line tools can be built.
 
 ## Licence
 
