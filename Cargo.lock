@@ -88,6 +88,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "omit-gfx"
+version = "0.1.0"
+dependencies = [
+ "noto-sans-mono-bitmap",
+]
+
+[[package]]
 name = "omit-hwdb"
 version = "0.1.0"
 
@@ -139,6 +146,7 @@ version = "0.1.0"
 name = "omit-user-programs"
 version = "0.1.0"
 dependencies = [
+ "omit-gfx",
  "omit-pe",
  "omit-rt",
  "omit-win32",
@@ -271,5 +279,6 @@ name = "xtask"
 version = "0.1.0"
 dependencies = [
  "fatfs",
+ "omit-gfx",
  "omit-vfs",
 ]

@@ -373,6 +373,7 @@ extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
         .get(frame.vector as usize)
         .copied()
         .unwrap_or("unknown");
+    crate::fbcon::resume_for_emergency();
     kprintln!();
     kprintln!("==== KERNEL EXCEPTION ====");
     kprintln!(

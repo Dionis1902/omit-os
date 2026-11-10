@@ -13,10 +13,18 @@ interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
 (with a PS/2 keyboard) and on the serial console, and can format, mount and
 use an ext2 filesystem on a VirtIO disk. One unmodified Linux driver runs
-on a compatibility layer. There is no installer yet. See [Status](#status) for exactly what exists and what
-has been tested.
+on a compatibility layer, simple Windows console executables run natively
+(no emulation, no Windows code), and there is a small graphical desktop.
+There is no installer yet. See [Status](#status) for exactly what exists,
+how narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
+
+Typing `desktop` at the prompt starts a small graphical desktop. In this
+screenshot (taken from QEMU) its Run window has started a native program
+and two Windows executables:
+
+![Omit OS desktop: file browser and a window showing the output of Windows programs](docs/screenshot-desktop.png)
 
 The same session on the serial console:
 
@@ -187,10 +195,10 @@ keyboard); otherwise the only way to type is a serial port (COM1, 115200 8N1).
 Milestones 0 (development environment), 1 (bootable kernel), 2 (memory and
 interrupts), 3 (terminal and filesystem), 4 (processes and userspace),
 5 (storage; coreutils only in part), 6 (driver compatibility, first
-instance) and 7 (Windows executables, first instance) are implemented, with
-one addition from Milestone 8: a framebuffer text console. "First instance"
-means what it says: one Linux driver, and Windows programs that use only a
-small part of one system library.
+instance), 7 (Windows executables, first instance) and 8 (graphics and a
+desktop, first instance) are implemented. "First instance" means what it
+says: one Linux driver; Windows programs that use only a small part of one
+system library; a desktop that is a single program.
 
 | Component | State |
 | --- | --- |
@@ -215,7 +223,7 @@ small part of one system library.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `getpid`, `yield`, `sleep`, `uptime` | Working, tested |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read` | Working, tested |
 | Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
 | Output redirection (`>`, `>>`) for programs | Working, tested |
 | Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
@@ -242,6 +250,11 @@ small part of one system library.
 | Windows program loader `winrun`: mapping, relocation, import binding, W^X section rights, stack, TEB/PEB | Working, tested in QEMU |
 | Windows API: 43 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process information) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else can run**; see ADR 0011 |
 | Windows programs started by name from the shell or by `spawn`; missing functions reported before start | Working, tested |
+| PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
+| Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
+| Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
+| Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
+| Programs opening their own windows, a terminal emulator, resizing, USB input, graphics modes | Not started |
 | Windows: C runtime, threads, DLLs, exceptions, TLS, graphics, registry, networking, 32-bit programs | Not started |
 
 ### What has been verified, and how
@@ -278,9 +291,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   only been exercised in CI.
 - The kernel requires a working COM1 serial port even when a screen is
   present, and stops silently without one.
-- The screen is a text console only: fixed font, ASCII, no graphics or
-  windows. Debug builds draw noticeably slowly under emulation.
-- Only PS/2 keyboards with a US layout. No USB, no mouse.
+- Graphics are limited to the firmware's framebuffer at its boot
+  resolution. The desktop is a single program; other programs cannot open
+  windows, and its Run window is not a terminal (see ADR 0012). Debug
+  builds draw noticeably slowly under emulation.
+- Only PS/2 keyboards (US layout) and PS/2 mice. No USB.
 - There is no installer: the system always boots from the live image into
   a RAM filesystem. A disk filesystem has to be mounted by hand.
 - The disk filesystem has no journal and no cache: it is slow, and a crash
@@ -348,6 +363,7 @@ compat/windows/pe/      PE32+ (Windows executable) parser, host-tested
 compat/windows/win32/   machine-independent parts of the Windows API layer, host-tested
 compat/windows/samples/ Windows test programs (built for x86_64-pc-windows-msvc)
 drivers/linux/   Linux driver sources, unmodified, with provenance
+libs/gfx/        drawing, text and window manager for programs, host-tested
 libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
@@ -430,8 +446,9 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next step:** Milestone 8 — graphics beyond the text console: a pixel
-drawing interface for programs, a mouse, and a simple window system. Still
+**Next step:** inter-process communication (pipes and shared memory). It
+is what the desktop needs to become a display server with a real terminal,
+what the shell needs to leave the kernel, and what pipelines need. Still
 open from earlier milestones: interrupts for device drivers (MSI-X), an
 installer, loadable drivers and packages, a Rust `std` port for coreutils,
 threads, and the Windows functions the C runtime needs.

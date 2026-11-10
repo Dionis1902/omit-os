@@ -23,6 +23,7 @@ fn panic(info: &PanicInfo<'_>) -> ! {
         arch::halt_forever();
     }
 
+    crate::fbcon::resume_for_emergency();
     kprintln!();
     kprintln!("==== KERNEL PANIC ====");
     kprintln!("message: {}", info.message());

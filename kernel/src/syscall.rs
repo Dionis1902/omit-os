@@ -11,8 +11,9 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use omit_abi::{
-    ARGS_MAX, Errno, KIND_DIRECTORY, KIND_FILE, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, Stat,
-    WRITE_MAX, nr, open, protect,
+    ARGS_MAX, Blit, Errno, INPUT_READ_MAX, INPUT_TIMEOUT_MAX, InputEvent, KIND_DIRECTORY,
+    KIND_FILE, PATH_MAX, READ_MAX, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG, WRITE_MAX, nr, open,
+    protect,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
@@ -20,13 +21,13 @@ use omit_vfs::{FileType, FsError, WriteMode, path};
 use crate::console::{self, Writer};
 use crate::process::{self, OpenFile};
 use crate::sync::Mutex;
-use crate::{fs, kprint, sched, time};
+use crate::{display, fs, input, kprint, sched, time};
 
 type SysResult = Result<u64, Errno>;
 
 /// Entry point for all system calls; called by the assembly entry code
 /// with interrupts enabled, on the calling thread's kernel stack.
-pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4: u64) -> i64 {
+pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     process::exit_if_killed();
     let result: SysResult = match number {
         nr::EXIT => process::exit(a0 as i32),
@@ -69,6 +70,17 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4:
                 Err(Errno::InvalidArgument)
             }
         }
+        nr::DISPLAY_INFO => display_info(a0),
+        nr::DISPLAY_ACQUIRE => current_pid().and_then(display::acquire).map(|()| 0),
+        nr::DISPLAY_RELEASE => current_pid().and_then(|pid| {
+            if display::release(pid) {
+                Ok(0)
+            } else {
+                Err(Errno::InvalidArgument)
+            }
+        }),
+        nr::DISPLAY_BLIT => display_blit(a0),
+        nr::INPUT_READ => input_read(a0, a1, a2),
         nr::STAT => stat(a0, a1, a2),
         nr::READDIR => read_dir(a0, a1, a2, a3),
         nr::MKDIR => path_argument(a0, a1).and_then(|path| {
@@ -96,10 +108,23 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, _a4:
                     .map(|()| 0)
             })
         }
-        nr::SPAWN => spawn(a0, a1, a2, a3),
+        nr::SPAWN => spawn(a0, a1, a2, a3, a4),
+        nr::WAIT if a1 == WAIT_NO_HANG => match process::try_wait(a0) {
+            Some(Some(status)) => Ok(status as u32 as u64),
+            Some(None) => Err(Errno::Busy),
+            None => Err(Errno::NoSuchProcess),
+        },
+        nr::WAIT if a1 != 0 => Err(Errno::InvalidArgument),
         nr::WAIT => process::wait(a0)
             .map(|status| status as u32 as u64)
             .ok_or(Errno::NoSuchProcess),
+        nr::KILL => {
+            if sched::kill(a0) {
+                Ok(0)
+            } else {
+                Err(Errno::NoSuchProcess)
+            }
+        }
         nr::GETPID => Ok(sched::current_pid().unwrap_or(0)),
         nr::YIELD => {
             sched::yield_now();
@@ -255,7 +280,84 @@ fn read_dir(path_address: u64, path_length: u64, buffer: u64, buffer_length: u64
     Ok(records.len() as u64)
 }
 
-fn spawn(path_address: u64, path_length: u64, args_address: u64, args_length: u64) -> SysResult {
+fn current_pid() -> Result<u64, Errno> {
+    sched::current_pid().ok_or(Errno::InvalidArgument)
+}
+
+/// Views a plain-data value as bytes, for copying it to user memory.
+fn bytes_of<T: Copy>(value: &T) -> &[u8] {
+    // SAFETY: only used with the `repr(C)` ABI structures, which consist
+    // of integers without padding; any such value is readable as bytes
+    // for its full size.
+    unsafe { core::slice::from_raw_parts(core::ptr::from_ref(value).cast(), size_of::<T>()) }
+}
+
+fn display_info(address: u64) -> SysResult {
+    let info = display::info().ok_or(Errno::NotFound)?;
+    copy_out(address, bytes_of(&info))?;
+    Ok(0)
+}
+
+fn display_blit(address: u64) -> SysResult {
+    let raw = copy_in(address, size_of::<Blit>())?;
+    let field = |index: usize| {
+        let mut bytes = [0u8; 4];
+        bytes.copy_from_slice(&raw[8 + index * 4..12 + index * 4]);
+        u32::from_le_bytes(bytes)
+    };
+    let mut pixels = [0u8; 8];
+    pixels.copy_from_slice(&raw[..8]);
+    let request = Blit {
+        pixels: u64::from_le_bytes(pixels),
+        stride: field(0),
+        x: field(1),
+        y: field(2),
+        width: field(3),
+        height: field(4),
+    };
+    display::blit(current_pid()?, &request, |from, row| {
+        sched::with_address_space(|space| space.read(from, row)) == Some(true)
+    })?;
+    Ok(0)
+}
+
+fn input_read(address: u64, capacity: u64, timeout_ms: u64) -> SysResult {
+    if !display::is_owner(current_pid()?) {
+        return Err(Errno::Busy);
+    }
+    if timeout_ms > INPUT_TIMEOUT_MAX {
+        return Err(Errno::InvalidArgument);
+    }
+    let capacity = capacity.min(INPUT_READ_MAX) as usize;
+    let deadline = time::monotonic_ns() + timeout_ms * 1_000_000;
+    let mut events = Vec::new();
+    loop {
+        while events.len() < capacity * size_of::<InputEvent>() {
+            match input::pop() {
+                Some(event) => events.extend_from_slice(bytes_of(&event)),
+                None => break,
+            }
+        }
+        if !events.is_empty() || capacity == 0 || time::monotonic_ns() >= deadline {
+            break;
+        }
+        // Input arrives at human speed; checking once per timer tick adds
+        // at most 10 ms of latency and needs no wake-up from the interrupt
+        // handlers.
+        sched::sleep_ticks(1);
+        process::exit_if_killed();
+    }
+    copy_out(address, &events)?;
+    Ok((events.len() / size_of::<InputEvent>()) as u64)
+}
+
+fn spawn(
+    path_address: u64,
+    path_length: u64,
+    args_address: u64,
+    args_length: u64,
+    stdout: u64,
+) -> SysResult {
     let path = path_argument(path_address, path_length)?;
     if args_length > ARGS_MAX as u64 {
         return Err(Errno::InvalidArgument);
@@ -288,7 +390,22 @@ fn spawn(path_address: u64, path_length: u64, args_address: u64, args_length: u6
     }
     let cwd = process::current_dir().ok_or(Errno::InvalidArgument)?;
     let name = path::file_name(&path).unwrap_or("program");
-    process::spawn(name, &image, &args, &cwd, process::stdout_file()).map_err(|error| match error {
+    let stdout = match stdout.checked_sub(1) {
+        None => process::stdout_file(),
+        Some(fd) => {
+            let file = process::file(fd).ok_or(Errno::BadFileDescriptor)?;
+            if !file.writable {
+                return Err(Errno::BadFileDescriptor);
+            }
+            Some(OpenFile {
+                path: file.path,
+                offset: 0,
+                writable: true,
+                append: true,
+            })
+        }
+    };
+    process::spawn(name, &image, &args, &cwd, stdout).map_err(|error| match error {
         process::ExecError::Elf(_) | process::ExecError::Unsupported(_) => Errno::NotExecutable,
         process::ExecError::ArgumentsTooLong => Errno::InvalidArgument,
         process::ExecError::Map(_) | process::ExecError::Spawn(_) => Errno::NoSpace,

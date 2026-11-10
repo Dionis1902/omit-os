@@ -49,6 +49,8 @@ winhello.exe         a Windows console program, run natively
 wintest.exe          a Windows program that tests the Windows API layer
 winrun --list        the Windows functions that are implemented
 lspci                hardware, with driver status
+desktop              a graphical desktop (needs a PS/2 mouse, as virtual
+                     machines provide); Exit or F12 returns to the console
 ```
 
 Windows support is a first step: only console programs that use a small

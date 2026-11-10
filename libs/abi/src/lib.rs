@@ -66,12 +66,17 @@ pub mod nr {
     pub const REMOVE: u64 = 14;
     /// `rename(from, from_len, to, to_len)`.
     pub const RENAME: u64 = 15;
-    /// `spawn(path, path_len, args, args_len) -> pid` — starts the program
-    /// at `path`. `args` is the argument list as NUL-terminated strings,
-    /// one after another. The child inherits the working directory and
-    /// standard output of the caller.
+    /// `spawn(path, path_len, args, args_len, stdout) -> pid` — starts the
+    /// program at `path`. `args` is the argument list as NUL-terminated
+    /// strings, one after another. The child inherits the working
+    /// directory of the caller. If `stdout` is zero it also inherits the
+    /// caller's standard output; otherwise `stdout` is one more than a
+    /// descriptor the caller has open for writing, and the child's
+    /// standard output is appended to that file.
     pub const SPAWN: u64 = 16;
-    /// `wait(pid) -> exit status` — blocks until the process ends.
+    /// `wait(pid, flags) -> exit status` — blocks until the process ends.
+    /// With [`super::WAIT_NO_HANG`] in `flags` it fails with `Busy`
+    /// instead of blocking while the process is still running.
     pub const WAIT: u64 = 17;
     /// `protect(address, len, protection)` — changes the access rights of
     /// memory obtained from `map`; see [`super::protect`]. Memory can never
@@ -81,7 +86,119 @@ pub mod nr {
     /// for the calling thread, for runtimes that keep per-thread data
     /// there (such as the Windows TEB).
     pub const SET_THREAD_POINTER: u64 = 19;
+    /// `display_info(info)` — fills in a [`super::DisplayInfo`]; fails
+    /// with `NotFound` if the machine has no screen.
+    pub const DISPLAY_INFO: u64 = 20;
+    /// `display_acquire()` — makes the calling process the owner of the
+    /// screen and of keyboard and mouse input. The text console stops
+    /// drawing until the owner releases the display or exits. Fails with
+    /// `Busy` if another process owns it.
+    pub const DISPLAY_ACQUIRE: u64 = 21;
+    /// `display_release()` — gives the screen back to the text console.
+    pub const DISPLAY_RELEASE: u64 = 22;
+    /// `display_blit(request)` — copies a rectangle of pixels to the
+    /// screen; see [`super::Blit`]. Only the display owner may call it.
+    pub const DISPLAY_BLIT: u64 = 23;
+    /// `input_read(events, capacity, timeout_ms) -> count` — waits up to
+    /// `timeout_ms` for keyboard and mouse events and stores up to
+    /// `capacity` [`super::InputEvent`]s. Only the display owner may call
+    /// it.
+    pub const INPUT_READ: u64 = 24;
+    /// `kill(pid)` — asks for process `pid` to be terminated. It ends the
+    /// next time it would return to user mode.
+    pub const KILL: u64 = 25;
 }
+
+/// Flag for the `wait` system call: do not block.
+pub const WAIT_NO_HANG: u64 = 1;
+
+/// Size of the screen.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DisplayInfo {
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+/// Argument of the `display_blit` system call: copy `width` x `height`
+/// pixels to the screen with their top-left corner at (`x`, `y`). The
+/// rectangle must lie on the screen.
+///
+/// A pixel is a `u32` holding `0x00RRGGBB`. The source is read from
+/// `pixels`, `stride` pixels per row (at least `width`), which lets a
+/// program update part of the screen from a full-screen buffer.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Blit {
+    /// Address of the first source pixel.
+    pub pixels: u64,
+    /// Source pixels per row.
+    pub stride: u32,
+    /// Destination column.
+    pub x: u32,
+    /// Destination row.
+    pub y: u32,
+    /// Width of the rectangle.
+    pub width: u32,
+    /// Height of the rectangle.
+    pub height: u32,
+}
+
+/// One keyboard or mouse event, as returned by `input_read`.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct InputEvent {
+    /// [`event::KEY`] or [`event::MOUSE`].
+    pub kind: u32,
+    /// Key: the key code (see [`key`]). Mouse: movement to the right.
+    pub a: i32,
+    /// Mouse: movement down the screen.
+    pub b: i32,
+    /// Mouse: the buttons held (bit 0 left, bit 1 right, bit 2 middle).
+    pub c: u32,
+}
+
+/// Event kinds.
+pub mod event {
+    /// A key was pressed.
+    pub const KEY: u32 = 1;
+    /// The mouse moved or a button changed.
+    pub const MOUSE: u32 = 2;
+}
+
+/// Key codes. Keys with an ASCII meaning have that value (Enter is 13,
+/// Backspace 127, Escape 27, Ctrl+letter 1-26); the others follow.
+pub mod key {
+    /// Cursor up.
+    pub const UP: i32 = 0x101;
+    /// Cursor down.
+    pub const DOWN: i32 = 0x102;
+    /// Cursor left.
+    pub const LEFT: i32 = 0x103;
+    /// Cursor right.
+    pub const RIGHT: i32 = 0x104;
+    /// Home.
+    pub const HOME: i32 = 0x105;
+    /// End.
+    pub const END: i32 = 0x106;
+    /// Page Up.
+    pub const PAGE_UP: i32 = 0x107;
+    /// Page Down.
+    pub const PAGE_DOWN: i32 = 0x108;
+    /// Insert.
+    pub const INSERT: i32 = 0x109;
+    /// Delete.
+    pub const DELETE: i32 = 0x10A;
+    /// F1; F2 to F12 follow consecutively.
+    pub const F1: i32 = 0x111;
+}
+
+/// Most events one `input_read` call returns.
+pub const INPUT_READ_MAX: u64 = 64;
+/// Longest `input_read` timeout, in milliseconds.
+pub const INPUT_TIMEOUT_MAX: u64 = 60_000;
 
 /// Protection flags for the `protect` system call. Memory is always
 /// readable.

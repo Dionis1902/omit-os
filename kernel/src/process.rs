@@ -294,6 +294,10 @@ pub fn spawn(
 /// Ends the calling process with `status`. Must be called from a process's
 /// own thread.
 pub fn exit(status: i32) -> ! {
+    if let Some(pid) = sched::current_pid() {
+        // If it owned the screen, the text console takes over again.
+        crate::display::release(pid);
+    }
     if let Some(pid) = sched::current_pid()
         && let Some(record) = TABLE.lock().processes.get_mut(&pid)
     {
@@ -320,6 +324,17 @@ pub fn wait(pid: Pid) -> Option<i32> {
     let record = TABLE.lock().processes.remove(&pid)?;
     // A thread can only die without a status if the kernel ended it.
     Some(record.exit_status.unwrap_or(EXIT_KILLED))
+}
+
+/// Like [`wait`], but does not block: `Some(None)` means process `pid` is
+/// still running.
+pub fn try_wait(pid: Pid) -> Option<Option<i32>> {
+    let thread = TABLE.lock().processes.get(&pid)?.thread;
+    if sched::is_alive(thread) {
+        return Some(None);
+    }
+    let record = TABLE.lock().processes.remove(&pid)?;
+    Some(Some(record.exit_status.unwrap_or(EXIT_KILLED)))
 }
 
 /// Discards the records of finished processes that nobody waited for, such

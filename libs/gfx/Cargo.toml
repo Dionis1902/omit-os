@@ -1,0 +1,14 @@
+[package]
+name = "omit-gfx"
+description = "Pixel drawing, text and a small window manager for Omit OS programs (no_std, host-tested)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noto-sans-mono-bitmap = "0.4"
+
+[lints]
+workspace = true

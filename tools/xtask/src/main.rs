@@ -130,8 +130,8 @@ struct Artifacts {
 
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
-    "cat", "crash", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper", "spin", "tee",
-    "winrun",
+    "cat", "crash", "desktop", "echo", "fileops", "hello", "ls", "memtest", "run", "sleeper",
+    "spin", "tee", "winrun",
 ];
 
 /// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
@@ -559,6 +559,10 @@ struct BootTest {
     /// on the emulated PS/2 keyboard, check that it runs, then take a
     /// screenshot and check what the framebuffer console drew.
     display: bool,
+    /// After that, start the graphical desktop and operate it with the
+    /// emulated mouse and keyboard, checking screenshots (see
+    /// [`desktop_scenario`]). Requires `display`.
+    desktop: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -587,6 +591,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "shell-session",
@@ -636,7 +641,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinrun\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinrun\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -710,6 +715,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -725,6 +731,23 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: true,
+        desktop: false,
+    },
+    BootTest {
+        name: "desktop",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] input: PS/2 mouse enabled",
+            "desktop: closed",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[("echo before-desktop", "\nbefore-desktop\n")],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: true,
+        desktop: true,
     },
     BootTest {
         name: "disk-persistence",
@@ -780,6 +803,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "windows-programs",
@@ -856,6 +880,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -935,6 +960,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -957,6 +983,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: true,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -974,6 +1001,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -989,6 +1017,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1004,6 +1033,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1018,6 +1048,7 @@ const BOOT_TESTS: &[BootTest] = &[
         reboot_script: &[],
         ends_with_reset: false,
         display: false,
+        desktop: false,
     },
 ];
 
@@ -1033,6 +1064,8 @@ struct QemuRun {
 struct DisplayCheck {
     monitor: PathBuf,
     screenshot: PathBuf,
+    /// Also run the graphical desktop and operate it with the mouse.
+    desktop: bool,
 }
 
 /// QEMU key names that type `echo kbd-ok` followed by Enter.
@@ -1146,6 +1179,201 @@ fn take_screenshot(monitor: &Path, path: &Path) -> Result<Screenshot> {
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn rgb(colour: omit_gfx::Colour) -> [u8; 3] {
+    [(colour >> 16) as u8, (colour >> 8) as u8, colour as u8]
+}
+
+/// Whether `image` contains `text` exactly as the desktop draws it in a
+/// window (same font, same colours), anywhere on the screen.
+fn screen_shows(image: &Screenshot, text: &str) -> bool {
+    use omit_gfx::desktop::theme;
+    use omit_gfx::surface::{Surface, TEXT_HEIGHT, text_width};
+    let (width, height) = (text_width(text) as usize, TEXT_HEIGHT as usize);
+    let mut rendered = Surface::new(width, height, theme::WINDOW);
+    rendered.canvas().text(0, 0, text, theme::TEXT);
+    let pattern: Vec<[u8; 3]> = rendered.pixels().iter().map(|&p| rgb(p)).collect();
+    if image.width < width || image.height < height {
+        return false;
+    }
+    (0..=image.height - height).any(|top| {
+        (0..=image.width - width).any(|left| {
+            pattern.iter().enumerate().all(|(index, &colour)| {
+                image.pixel(left + index % width, top + index / width) == colour
+            })
+        })
+    })
+}
+
+/// Takes screenshots until `accept` is satisfied or `timeout` passes.
+fn wait_for_screen(
+    check: &DisplayCheck,
+    what: &str,
+    timeout: Duration,
+    accept: impl Fn(&Screenshot) -> bool,
+) -> Result<Screenshot> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        let image = take_screenshot(&check.monitor, &check.screenshot)?;
+        if accept(&image) {
+            return Ok(image);
+        }
+        if Instant::now() >= deadline {
+            return Err(format!("the screen never showed {what}").into());
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// The emulated mouse. QEMU's PS/2 mouse reports relative movement, so
+/// the position is tracked here after first driving the pointer into the
+/// top-left corner.
+struct Mouse<'a> {
+    monitor: &'a Path,
+    x: i32,
+    y: i32,
+}
+
+impl<'a> Mouse<'a> {
+    fn new(monitor: &'a Path) -> Result<Self> {
+        // Far more than any screen is wide or high.
+        for _ in 0..20 {
+            monitor_command(monitor, "mouse_move -250 -250")?;
+        }
+        Ok(Self {
+            monitor,
+            x: 0,
+            y: 0,
+        })
+    }
+
+    fn move_to(&mut self, x: i32, y: i32) -> Result<()> {
+        while (self.x, self.y) != (x, y) {
+            // Small steps: one PS/2 packet carries at most 255 units.
+            let dx = (x - self.x).clamp(-100, 100);
+            let dy = (y - self.y).clamp(-100, 100);
+            monitor_command(self.monitor, &format!("mouse_move {dx} {dy}"))?;
+            self.x += dx;
+            self.y += dy;
+        }
+        Ok(())
+    }
+
+    fn button(&self, pressed: bool) -> Result<()> {
+        monitor_command(self.monitor, &format!("mouse_button {}", u8::from(pressed)))?;
+        thread::sleep(Duration::from_millis(100));
+        Ok(())
+    }
+
+    fn click(&mut self, x: i32, y: i32) -> Result<()> {
+        self.move_to(x, y)?;
+        self.button(true)?;
+        self.button(false)
+    }
+}
+
+/// Labels of the desktop's task bar buttons; must match
+/// `userspace/programs/src/bin/desktop/main.rs`.
+const DESKTOP_LAUNCHERS: &[&str] = &["Files", "Run", "About", "Exit"];
+
+/// Operates the graphical desktop, which the caller has just started from
+/// the serial console, and checks what it shows:
+///
+/// 1. the desktop appears, with its task bar and the About window;
+/// 2. a click on the task bar opens the Run window, which takes the
+///    keyboard focus (the About window's title bar turns grey);
+/// 3. commands typed on the emulated keyboard run a native program and a
+///    Windows program, and their output appears in the window;
+/// 4. dragging the title bar moves the window, contents included;
+/// 5. the Exit button ends the desktop.
+fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
+    use omit_gfx::desktop::{Desktop, TASKBAR_HEIGHT, theme};
+    let patience = Duration::from_secs(30);
+    let count_all =
+        |image: &Screenshot, colour: omit_gfx::Colour| image.count(0..image.height, rgb(colour));
+
+    let image = wait_for_screen(check, "the desktop", patience, |image| {
+        image.pixel(image.width - 3, 3) == rgb(theme::BACKGROUND)
+            && screen_shows(image, "Everything you need. Nothing you don't.")
+    })?;
+    if image.pixel(image.width / 2, image.height - 2) != rgb(theme::TASKBAR) {
+        return Err("no task bar at the bottom of the screen".into());
+    }
+    if count_all(&image, theme::TITLE_ACTIVE) < 5000 {
+        return Err("the About window has no active title bar".into());
+    }
+    if count_all(&image, theme::TITLE_INACTIVE) != 0 {
+        return Err("an inactive title bar with only one window open".into());
+    }
+
+    // The same layout code the desktop uses says where its buttons are.
+    let mut layout = Desktop::new(image.width, image.height);
+    for label in DESKTOP_LAUNCHERS {
+        layout.add_launcher(label, |_| {});
+    }
+    let button = |label: &str| {
+        let index = DESKTOP_LAUNCHERS.iter().position(|l| *l == label)?;
+        let frame = layout.launcher_frame(index)?;
+        Some((frame.x + frame.w / 2, frame.y + frame.h / 2))
+    };
+    let (run_x, run_y) = button("Run").ok_or("no Run button")?;
+    let (exit_x, exit_y) = button("Exit").ok_or("no Exit button")?;
+    debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
+
+    let mut mouse = Mouse::new(&check.monitor)?;
+    mouse.click(run_x, run_y)?;
+    wait_for_screen(check, "the Run window", patience, |image| {
+        screen_shows(image, "Type a program name and press Enter, for example:")
+            && count_all(image, theme::TITLE_INACTIVE) > 5000
+    })?;
+
+    // `hello`, then `winhello.exe`.
+    type_on_keyboard(&check.monitor, &["h", "e", "l", "l", "o", "ret"])?;
+    wait_for_screen(check, "the output of `hello`", patience, |image| {
+        screen_shows(image, "Hello from user mode! I am process")
+    })?;
+    type_on_keyboard(
+        &check.monitor,
+        &[
+            "w", "i", "n", "h", "e", "l", "l", "o", "dot", "e", "x", "e", "ret",
+        ],
+    )?;
+    let before = wait_for_screen(check, "the output of `winhello.exe`", patience, |image| {
+        screen_shows(image, "Hello from a Windows executable!")
+            // The prompt is back: the program has been reaped.
+            && screen_shows(image, "> _")
+    })?;
+
+    // The Run window is the second one opened; drag it by its title bar
+    // (the About window does not reach this far right).
+    let (grab_x, grab_y) = (560, 70);
+    if before.pixel(grab_x as usize, grab_y as usize) != rgb(theme::TITLE_ACTIVE) {
+        return Err("the Run window's title bar is not where it is expected".into());
+    }
+    let probe = (640usize, 300usize);
+    if before.pixel(probe.0, probe.1) != rgb(theme::WINDOW) {
+        return Err("the Run window does not cover the probe point".into());
+    }
+    mouse.move_to(grab_x, grab_y)?;
+    mouse.button(true)?;
+    mouse.move_to(grab_x + 420, grab_y + 330)?;
+    mouse.button(false)?;
+    wait_for_screen(
+        check,
+        "the Run window in its new place",
+        patience,
+        |image| {
+            image.pixel(probe.0, probe.1) == rgb(theme::BACKGROUND)
+                // (A point of the title bar that the pointer, which is
+                // now at the grab point, does not cover.)
+                && image.pixel(grab_x as usize + 320, grab_y as usize + 330)
+                    == rgb(theme::TITLE_ACTIVE)
+                && screen_shows(image, "Hello from a Windows executable!")
+        },
+    )?;
+
+    mouse.click(exit_x, exit_y)
 }
 
 /// Checks that a screenshot shows the kernel's console: a status bar with
@@ -1338,6 +1566,27 @@ fn run_qemu_captured(
                 Ok(image) => failures.extend(check_screenshot(&image)),
                 Err(error) => failures.push(format!("cannot take a screenshot: {error}")),
             }
+            if check.desktop && failures.is_empty() {
+                // The desktop runs in the foreground: the prompt returns
+                // when it has been closed.
+                let from = output.lock().expect("output lock").len();
+                let _ = stdin.write_all(b"desktop\r");
+                if let Err(error) = desktop_scenario(check) {
+                    failures.push(format!("desktop: {error}"));
+                }
+                if wait_for_prompt(from).is_none() {
+                    failures.push("desktop: no prompt after closing the desktop".into());
+                }
+                // The text console must be back on the screen.
+                match take_screenshot(&check.monitor, &check.screenshot) {
+                    Ok(image) => failures.extend(
+                        check_screenshot(&image)
+                            .into_iter()
+                            .map(|failure| format!("after the desktop: {failure}")),
+                    ),
+                    Err(error) => failures.push(format!("cannot take a screenshot: {error}")),
+                }
+            }
         }
         if !ends_with_reset {
             let _ = stdin.write_all(b"exit\r");
@@ -1397,6 +1646,7 @@ fn run_boot_test(
     let display = test.display.then(|| DisplayCheck {
         monitor: dir.join(format!("test-{}.monitor", test.name)),
         screenshot: dir.join(format!("test-{}.screen.ppm", test.name)),
+        desktop: test.desktop,
     });
     let run = run_qemu_captured(
         qemu_command(

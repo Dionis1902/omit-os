@@ -11,6 +11,7 @@ members = [
     "libs/bootproto",
     "libs/elf",
     "libs/ext2",
+    "libs/gfx",
     "libs/hwdb",
     "libs/mm",
     "libs/term",
@@ -29,6 +30,7 @@ default-members = [
     "libs/bootproto",
     "libs/elf",
     "libs/ext2",
+    "libs/gfx",
     "libs/hwdb",
     "libs/mm",
     "libs/term",
@@ -46,6 +48,7 @@ rust-version = "1.97"
 
 [workspace.dependencies]
 omit-abi = { path = "libs/abi" }
+omit-gfx = { path = "libs/gfx" }
 omit-pe = { path = "compat/windows/pe" }
 omit-win32 = { path = "compat/windows/win32" }
 omit-acpi = { path = "libs/acpi" }
@@ -80,6 +83,11 @@ codegen-units = 1
 debug = false
 strip = "debuginfo"
 opt-level = 1
+
+# Drawing is loops over pixels; without optimisation the desktop is
+# unusably slow even in debug builds of everything else.
+[profile.dev.package.omit-gfx]
+opt-level = 3
 
 [profile.release.package.omit-user-programs]
 debug = false

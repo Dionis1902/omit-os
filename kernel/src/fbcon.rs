@@ -50,6 +50,23 @@ struct Surface {
     height: usize,
     /// Byte 0 of a pixel is blue (otherwise red).
     bgr: bool,
+    /// Cleared while a process owns the display: nothing is drawn.
+    enabled: bool,
+}
+
+/// Where the framebuffer is and what it looks like.
+#[derive(Debug, Clone, Copy)]
+pub struct Framebuffer {
+    /// Virtual address of the first pixel.
+    pub base: *mut u32,
+    /// Visible width in pixels.
+    pub width: usize,
+    /// Pixels per scanline.
+    pub stride: usize,
+    /// Visible height in pixels.
+    pub height: usize,
+    /// Byte 0 of a pixel is blue (otherwise red).
+    pub bgr: bool,
 }
 
 // SAFETY: `base` points at the framebuffer mapping, which is valid for the
@@ -64,7 +81,7 @@ impl Surface {
     }
 
     fn put_pixel(&mut self, x: usize, y: usize, colour: u32) {
-        if x < self.width && y < self.height {
+        if self.enabled && x < self.width && y < self.height {
             // SAFETY: the mapping covers `stride * height` pixels and
             // `x < width <= stride`, `y < height`, so the pixel is inside
             // it. Device memory is written with volatile accesses.
@@ -80,6 +97,26 @@ fn blend(fg: Rgb, bg: Rgb, alpha: u8) -> Rgb {
         ((f * a + b * (255 - a)) / 255) as u8
     };
     (mix(fg.0, bg.0), mix(fg.1, bg.1), mix(fg.2, bg.2))
+}
+
+impl Surface {
+    /// Paints the whole screen in the console's background colours,
+    /// including the margins the text grid does not cover, so that the
+    /// status bar reaches the screen edge.
+    fn clear(&mut self) {
+        let background = self.encode(BACKGROUND);
+        let status_background = self.encode(STATUS_BACKGROUND);
+        for y in 0..self.height {
+            let colour = if y < STATUS_ROWS * CELL_HEIGHT {
+                status_background
+            } else {
+                background
+            };
+            for x in 0..self.width {
+                self.put_pixel(x, y, colour);
+            }
+        }
+    }
 }
 
 impl Display for Surface {
@@ -171,22 +208,9 @@ pub fn init(boot_info: &BootInfo) -> Result<ConsoleInfo, FbconError> {
         stride,
         height,
         bgr: boot_info.framebuffer_format == FRAMEBUFFER_BGR,
+        enabled: true,
     };
-
-    // Paint everything once, including the margins the text grid does not
-    // cover, so the status bar reaches the screen edge.
-    let background = surface.encode(BACKGROUND);
-    let status_background = surface.encode(STATUS_BACKGROUND);
-    for y in 0..height {
-        let colour = if y < STATUS_ROWS * CELL_HEIGHT {
-            status_background
-        } else {
-            background
-        };
-        for x in 0..width {
-            surface.put_pixel(x, y, colour);
-        }
-    }
+    surface.clear();
     let info = ConsoleInfo {
         width: boot_info.framebuffer_width,
         height: boot_info.framebuffer_height,
@@ -229,5 +253,49 @@ pub fn write_fmt(args: fmt::Arguments<'_>) {
 pub fn set_status(text: &str) {
     if let Some(console) = CONSOLE.lock().as_mut() {
         console.terminal.set_status(text, &mut console.surface);
+    }
+}
+
+/// The framebuffer, for the code that draws on behalf of a display owner.
+pub fn framebuffer() -> Option<Framebuffer> {
+    CONSOLE.lock().as_ref().map(|console| Framebuffer {
+        base: console.surface.base,
+        width: console.surface.width,
+        stride: console.surface.stride,
+        height: console.surface.height,
+        bgr: console.surface.bgr,
+    })
+}
+
+/// Stops drawing. Console output is still recorded and appears when
+/// [`resume`] is called.
+pub fn suspend() {
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        console.surface.enabled = false;
+    }
+}
+
+fn repaint(console: &mut Console) {
+    console.surface.enabled = true;
+    console.surface.clear();
+    console.terminal.redraw(&mut console.surface);
+}
+
+/// Starts drawing again and repaints the whole screen.
+pub fn resume() {
+    if let Some(console) = CONSOLE.lock().as_mut() {
+        repaint(console);
+    }
+}
+
+/// For the panic and fatal-exception paths: makes sure the console is
+/// visible, taking the screen away from a display owner if there is one.
+/// Does nothing if the console is locked by the interrupted context.
+pub fn resume_for_emergency() {
+    if let Some(mut guard) = CONSOLE.try_lock()
+        && let Some(console) = guard.as_mut()
+        && !console.surface.enabled
+    {
+        repaint(console);
     }
 }

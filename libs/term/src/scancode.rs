@@ -9,7 +9,9 @@
 //! The decoder produces the bytes a serial terminal would send, so both
 //! input paths can feed the same line editor: Enter is carriage return,
 //! Backspace is DEL, and Ctrl+letter is the corresponding control code.
-//! Keys without an ASCII meaning (arrows, function keys, ...) are ignored.
+//! [`Decoder::feed`] ignores keys without an ASCII meaning;
+//! [`Decoder::feed_key`] also reports arrows, navigation and function
+//! keys, for programs that want them.
 
 const RELEASE: u8 = 0x80;
 const EXTENDED_PREFIX: u8 = 0xE0;
@@ -37,6 +39,35 @@ const SHIFTED: [u8; 0x3A] = [
     b'B', b'N', b'M', b'<', b'>', b'?', 0, b'*', 0, b' ',
 ];
 
+/// A key press.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Key {
+    /// A key with an ASCII meaning, as a serial terminal would send it.
+    Char(u8),
+    /// Cursor up.
+    Up,
+    /// Cursor down.
+    Down,
+    /// Cursor left.
+    Left,
+    /// Cursor right.
+    Right,
+    /// Home.
+    Home,
+    /// End.
+    End,
+    /// Page Up.
+    PageUp,
+    /// Page Down.
+    PageDown,
+    /// Insert.
+    Insert,
+    /// Delete (the navigation key, not Backspace).
+    Delete,
+    /// F1 to F12, as 1 to 12.
+    Function(u8),
+}
+
 /// Keyboard state: modifier keys and prefix tracking.
 #[derive(Debug, Default)]
 pub struct Decoder {
@@ -62,6 +93,15 @@ impl Decoder {
     /// Processes one scancode byte and returns the character it produces,
     /// if any.
     pub fn feed(&mut self, scancode: u8) -> Option<u8> {
+        match self.feed_key(scancode)? {
+            Key::Char(ch) => Some(ch),
+            _ => None,
+        }
+    }
+
+    /// Processes one scancode byte and returns the key press it completes,
+    /// if any.
+    pub fn feed_key(&mut self, scancode: u8) -> Option<Key> {
         if scancode == EXTENDED_PREFIX {
             self.extended = true;
             return None;
@@ -77,10 +117,20 @@ impl Decoder {
                     self.control = pressed;
                     None
                 }
-                ENTER if pressed => Some(b'\r'),
-                KEYPAD_SLASH if pressed => Some(b'/'),
-                // Arrows, navigation keys, and the fake shifts some
-                // keyboards send around them.
+                ENTER if pressed => Some(Key::Char(b'\r')),
+                KEYPAD_SLASH if pressed => Some(Key::Char(b'/')),
+                0x48 if pressed => Some(Key::Up),
+                0x50 if pressed => Some(Key::Down),
+                0x4B if pressed => Some(Key::Left),
+                0x4D if pressed => Some(Key::Right),
+                0x47 if pressed => Some(Key::Home),
+                0x4F if pressed => Some(Key::End),
+                0x49 if pressed => Some(Key::PageUp),
+                0x51 if pressed => Some(Key::PageDown),
+                0x52 if pressed => Some(Key::Insert),
+                0x53 if pressed => Some(Key::Delete),
+                // Releases, and the fake shifts some keyboards send
+                // around navigation keys.
                 _ => None,
             };
         }
@@ -90,7 +140,10 @@ impl Decoder {
             RIGHT_SHIFT => self.right_shift = pressed,
             CONTROL => self.control = pressed,
             CAPS_LOCK if pressed => self.caps_lock = !self.caps_lock,
-            _ if pressed => return self.translate(code),
+            // F1-F10, F11, F12.
+            0x3B..=0x44 if pressed => return Some(Key::Function(code - 0x3A)),
+            0x57 | 0x58 if pressed => return Some(Key::Function(code - 0x57 + 11)),
+            _ if pressed => return self.translate(code).map(Key::Char),
             _ => {}
         }
         None
@@ -208,5 +261,32 @@ mod tests {
             []
         );
         assert_eq!(decode(&tap(0x01)), [0x1B], "Escape");
+    }
+
+    #[test]
+    fn reports_navigation_and_function_keys() {
+        let mut decoder = Decoder::new();
+        let mut press = |bytes: &[u8]| bytes.iter().filter_map(|&b| decoder.feed_key(b)).last();
+        assert_eq!(press(&[0xE0, 0x48]), Some(Key::Up));
+        assert_eq!(press(&[0xE0, 0x50]), Some(Key::Down));
+        assert_eq!(press(&[0xE0, 0x4B]), Some(Key::Left));
+        assert_eq!(press(&[0xE0, 0x4D]), Some(Key::Right));
+        assert_eq!(press(&[0xE0, 0x47]), Some(Key::Home));
+        assert_eq!(press(&[0xE0, 0x4F]), Some(Key::End));
+        assert_eq!(press(&[0xE0, 0x49]), Some(Key::PageUp));
+        assert_eq!(press(&[0xE0, 0x51]), Some(Key::PageDown));
+        assert_eq!(press(&[0xE0, 0x53]), Some(Key::Delete));
+        assert_eq!(press(&[0x3B]), Some(Key::Function(1)));
+        assert_eq!(press(&[0x44]), Some(Key::Function(10)));
+        assert_eq!(press(&[0x57]), Some(Key::Function(11)));
+        assert_eq!(press(&[0x58]), Some(Key::Function(12)));
+        // Releases produce nothing; ordinary keys are characters.
+        assert_eq!(press(&[0xE0, 0xC8]), None);
+        assert_eq!(press(&[0xBB]), None);
+        assert_eq!(press(&[0x1E]), Some(Key::Char(b'a')));
+        // The plain-character interface still ignores them.
+        assert_eq!(decoder.feed(0xE0), None);
+        assert_eq!(decoder.feed(0x48), None);
+        assert_eq!(decoder.feed(0x3B), None);
     }
 }

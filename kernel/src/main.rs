@@ -11,9 +11,11 @@ extern crate alloc;
 
 mod arch;
 mod console;
+mod display;
 mod drivers;
 mod fbcon;
 mod fs;
+mod input;
 mod linuxkpi;
 mod log;
 mod mm;
@@ -48,6 +50,9 @@ const SERIAL_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 2;
 
 /// Interrupt vector of the PS/2 keyboard.
 const KEYBOARD_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 3;
+
+/// Interrupt vector of the PS/2 mouse.
+const MOUSE_VECTOR: u8 = arch::interrupts::FIRST_USABLE_VECTOR + 4;
 
 /// The line that announces a fully initialised kernel. Printed only after
 /// every step of [`init`] has succeeded; the boot tests look for it.
@@ -357,7 +362,7 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         "console: serial input enabled (GSI {} -> vector {})",
         acpi.serial_irq.gsi, SERIAL_VECTOR
     );
-    arch::ps2::init(console::push_input);
+    arch::ps2::init(input::key_pressed);
     arch::interrupts::register(KEYBOARD_VECTOR, arch::ps2::handle_interrupt)
         .map_err(InitError::InputInterrupt)?;
     arch::ioapic::enable(acpi.keyboard_irq, KEYBOARD_VECTOR, apic.id as u8)
@@ -366,6 +371,18 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         "console: PS/2 keyboard input enabled (GSI {} -> vector {})",
         acpi.keyboard_irq.gsi, KEYBOARD_VECTOR
     );
+    if arch::ps2::init_mouse(input::mouse_moved) {
+        arch::interrupts::register(MOUSE_VECTOR, arch::ps2::handle_interrupt)
+            .map_err(InitError::InputInterrupt)?;
+        arch::ioapic::enable(acpi.mouse_irq, MOUSE_VECTOR, apic.id as u8)
+            .map_err(InitError::IoApic)?;
+        info!(
+            "input: PS/2 mouse enabled (GSI {} -> vector {})",
+            acpi.mouse_irq.gsi, MOUSE_VECTOR
+        );
+    } else {
+        info!("input: no PS/2 mouse found");
+    }
 
     // Threads and the scheduler. From here on the boot context is thread 1.
     sched::init().map_err(InitError::Scheduler)?;

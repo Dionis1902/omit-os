@@ -102,6 +102,16 @@ pub unsafe fn syscall(number: u64, a0: u64, a1: u64, a2: u64) -> i64 {
 ///
 /// Same contract as [`syscall`].
 pub unsafe fn syscall4(number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
+    // SAFETY: forwarded from this function's contract.
+    unsafe { syscall5(number, a0, a1, a2, a3, 0) }
+}
+
+/// Performs a raw system call with five arguments.
+///
+/// # Safety
+///
+/// Same contract as [`syscall`].
+pub unsafe fn syscall5(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: u64) -> i64 {
     let result: i64;
     // SAFETY: the `syscall` instruction transfers to the kernel, which
     // preserves all registers except those declared here (see the ABI
@@ -114,7 +124,8 @@ pub unsafe fn syscall4(number: u64, a0: u64, a1: u64, a2: u64, a3: u64) -> i64 {
             inlateout("rsi") a1 => _,
             inlateout("rdx") a2 => _,
             inlateout("r10") a3 => _,
-            lateout("rcx") _, lateout("r8") _, lateout("r9") _,
+            inlateout("r8") a4 => _,
+            lateout("rcx") _, lateout("r9") _,
             lateout("r11") _,
             options(nostack),
         );
@@ -244,6 +255,80 @@ pub fn set_thread_pointer(address: usize) -> Result<(), Errno> {
     result(unsafe { syscall(nr::SET_THREAD_POINTER, address as u64, 0, 0) }).map(|_| ())
 }
 
+/// The size of the screen; `Err(NotFound)` if there is none.
+pub fn display_info() -> Result<abi::DisplayInfo, Errno> {
+    let mut info = abi::DisplayInfo::default();
+    // SAFETY: `info` is a live, writable value of the type the kernel
+    // fills in.
+    result(unsafe { syscall(nr::DISPLAY_INFO, &raw mut info as u64, 0, 0) })?;
+    Ok(info)
+}
+
+/// Takes over the screen, keyboard and mouse from the text console until
+/// [`display_release`] is called or the program ends.
+pub fn display_acquire() -> Result<(), Errno> {
+    // SAFETY: no arguments.
+    result(unsafe { syscall(nr::DISPLAY_ACQUIRE, 0, 0, 0) }).map(|_| ())
+}
+
+/// Gives the screen back to the text console.
+pub fn display_release() -> Result<(), Errno> {
+    // SAFETY: no arguments.
+    result(unsafe { syscall(nr::DISPLAY_RELEASE, 0, 0, 0) }).map(|_| ())
+}
+
+/// Copies part of an image to the screen. `pixels` holds rows of `stride`
+/// pixels (`0x00RRGGBB`); the `width` x `height` rectangle whose top-left
+/// corner is at (`x`, `y`) *in the image* is copied to the same place on
+/// the screen. This is the natural call for a program that draws into a
+/// screen-sized buffer and then shows what changed.
+pub fn display_blit(
+    pixels: &[u32],
+    stride: usize,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Result<(), Errno> {
+    if width == 0 || height == 0 {
+        return Ok(());
+    }
+    // The last pixel read must be inside the slice.
+    let last = (y + height - 1) * stride + x + width;
+    if x + width > stride || last > pixels.len() {
+        return Err(Errno::InvalidArgument);
+    }
+    let request = abi::Blit {
+        pixels: pixels[y * stride + x..].as_ptr() as u64,
+        stride: stride as u32,
+        x: x as u32,
+        y: y as u32,
+        width: width as u32,
+        height: height as u32,
+    };
+    // SAFETY: `request` is a live value of the type the kernel expects,
+    // and the pixel range it describes was checked above to lie inside
+    // `pixels`.
+    result(unsafe { syscall(nr::DISPLAY_BLIT, &raw const request as u64, 0, 0) }).map(|_| ())
+}
+
+/// Waits up to `timeout_ms` milliseconds for keyboard and mouse events
+/// and stores them in `events`; returns how many. Zero means the time
+/// passed without input. Only works while the program owns the display.
+pub fn read_events(events: &mut [abi::InputEvent], timeout_ms: u64) -> Result<usize, Errno> {
+    // SAFETY: the pointer and count describe a live, writable slice of
+    // the event type; any bit pattern the kernel stores is a valid event.
+    result(unsafe {
+        syscall(
+            nr::INPUT_READ,
+            events.as_mut_ptr() as u64,
+            events.len() as u64,
+            timeout_ms,
+        )
+    })
+    .map(|count| count as usize)
+}
+
 /// Reads the whole file at `path`.
 pub fn read_file(path: &str) -> Result<Vec<u8>, Errno> {
     let fd = open(path, abi::open::READ)?;
@@ -352,6 +437,17 @@ pub fn rename(from: &str, to: &str) -> Result<(), Errno> {
 /// Starts the program at `path` with `arguments` (conventionally starting
 /// with the program's name) and returns its process ID.
 pub fn spawn(path: &str, arguments: &[&str]) -> Result<u64, Errno> {
+    spawn_with_output(path, arguments, None)
+}
+
+/// Like [`spawn`]; with `output`, a descriptor open for writing, the new
+/// program's standard output is appended to that file instead of going
+/// where this program's does.
+pub fn spawn_with_output(
+    path: &str,
+    arguments: &[&str],
+    output: Option<u64>,
+) -> Result<u64, Errno> {
     let mut block = Vec::new();
     for argument in arguments {
         block.extend_from_slice(argument.as_bytes());
@@ -359,12 +455,13 @@ pub fn spawn(path: &str, arguments: &[&str]) -> Result<u64, Errno> {
     }
     // SAFETY: both pointer/length pairs describe live, readable buffers.
     result(unsafe {
-        syscall4(
+        syscall5(
             nr::SPAWN,
             path.as_ptr() as u64,
             path.len() as u64,
             block.as_ptr() as u64,
             block.len() as u64,
+            output.map_or(0, |fd| fd + 1),
         )
     })
 }
@@ -373,6 +470,23 @@ pub fn spawn(path: &str, arguments: &[&str]) -> Result<u64, Errno> {
 pub fn wait(pid: u64) -> Result<i32, Errno> {
     // SAFETY: plain integer argument.
     result(unsafe { syscall(nr::WAIT, pid, 0, 0) }).map(|status| status as i32)
+}
+
+/// Checks whether process `pid` has ended, without waiting: its exit
+/// status if so, `None` while it is still running.
+pub fn try_wait(pid: u64) -> Result<Option<i32>, Errno> {
+    // SAFETY: plain integer arguments.
+    match result(unsafe { syscall(nr::WAIT, pid, abi::WAIT_NO_HANG, 0) }) {
+        Ok(status) => Ok(Some(status as i32)),
+        Err(Errno::Busy) => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Asks for process `pid` to be terminated.
+pub fn kill(pid: u64) -> Result<(), Errno> {
+    // SAFETY: plain integer argument.
+    result(unsafe { syscall(nr::KILL, pid, 0, 0) }).map(|_| ())
 }
 
 /// The calling process's ID.

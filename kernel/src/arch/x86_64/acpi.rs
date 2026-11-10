@@ -86,10 +86,13 @@ pub struct InterruptConfig {
     pub serial_irq: IsaRoute,
     /// Routing of the PS/2 keyboard interrupt (ISA IRQ 1).
     pub keyboard_irq: IsaRoute,
+    /// Routing of the PS/2 mouse interrupt (ISA IRQ 12).
+    pub mouse_irq: IsaRoute,
 }
 
 /// ISA IRQ line of the PS/2 keyboard.
 const KEYBOARD_IRQ: u8 = 1;
+const MOUSE_IRQ: u8 = 12;
 /// ISA IRQ line of the first serial port.
 const COM1_IRQ: u8 = 4;
 
@@ -147,6 +150,7 @@ pub unsafe fn interrupt_config(rsdp_phys: u64) -> Result<InterruptConfig, AcpiLo
                 .count(),
             serial_irq: madt.isa_route(COM1_IRQ),
             keyboard_irq: madt.isa_route(KEYBOARD_IRQ),
+            mouse_irq: madt.isa_route(MOUSE_IRQ),
         });
     }
     Err(AcpiLookupError::NoMadt)
