@@ -8,9 +8,12 @@ Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
 the CPU and the address space, manages memory, handles timer and device
-interrupts, and gives you an interactive shell with a RAM filesystem, on
-screen (with a PS/2 keyboard) and on the serial console. There are no processes, no user mode, no persistent storage
-and no driver model yet. See [Status](#status) for exactly what exists and what has been tested.
+interrupts, schedules threads, and runs programs as isolated user-mode
+processes. You get an interactive shell with a RAM filesystem, on screen
+(with a PS/2 keyboard) and on the serial console. There is no persistent
+storage and no driver model yet, and programs can do very little so far
+(print, sleep, exit). See [Status](#status) for exactly what exists and what
+has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
 
@@ -176,7 +179,8 @@ keyboard); otherwise the only way to type is a serial port (COM1, 115200 8N1).
 ## Status
 
 Milestones 0 (development environment), 1 (bootable kernel), 2 (memory and
-interrupts) and 3 (terminal and filesystem) are implemented, with one
+interrupts), 3 (terminal and filesystem) and 4 (processes and userspace) are
+implemented, with one
 addition from Milestone 8: a framebuffer text console.
 
 | Component | State |
@@ -200,12 +204,18 @@ addition from Milestone 8: a framebuffer text console.
 | Interrupt-driven serial input, line editing | Working, tested end to end |
 | Virtual filesystem layer and RAM filesystem | Working; host-tested, exercised end to end through the shell |
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
-| `ps`, `kill` | Not implemented: the commands only say that there is no process management |
+| Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
+| User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
+| System calls: `exit`, `write` (console), `getpid`, `yield`, `sleep`, `uptime` | Working, tested. No file, memory or process-creation calls yet |
+| Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
+| Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
+| Userspace runtime (`omit-rt`) and sample programs `hello`, `sleeper`, `spin`, `crash` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
-| Processes, user mode, scheduler, system calls, SMP | Not started (Milestone 4) |
+| Program arguments, standard input, files from programs, dynamic memory for programs | Not started |
+| SMP | Not started |
 | Persistent storage, drivers, Windows/Linux compatibility | Not started |
 
 ### What has been verified, and how
@@ -213,7 +223,7 @@ addition from Milestone 8: a framebuffer text console.
 On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 (TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 101 host unit tests (`cargo test`): boot protocol validation, memory map
+- 110 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
   input, the buddy allocator and the heap (each including a randomised test
   against an independent model), ACPI table parsing, the VFS and RAM
@@ -226,7 +236,8 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - At every boot the kernel itself checks: a breakpoint exception round-trip;
   frame allocation, alignment, memory read-back and rejection of invalid
   frees; heap use through `Box`, `Vec` and `String` with nothing leaked;
-  mapping, aliasing and unmapping of a page; that ten timer interrupts arrive and take 100 ms ± a factor of two
+  mapping, aliasing and unmapping of a page; thread scheduling including
+  preemption; that ten timer interrupts arrive and take 100 ms ± a factor of two
   by the TSC; and that no mapping is writable and executable.
 - `cargo fmt --check` and `cargo clippy -D warnings` for host crates, kernel
   and loader.
@@ -266,8 +277,13 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - The filesystem lives in RAM and is empty at every boot. It has no
   permissions, timestamps, links or mount points, and is owned by the shell
   rather than being a kernel-wide object (see ADR 0006).
-- Shell commands cannot be interrupted, there are no pipes, variables or
-  globs, and `cp` does not copy directories.
+- Built-in shell commands cannot be interrupted, there are no pipes,
+  variables or globs, and `cp` does not copy directories.
+- Programs take no arguments, cannot read input or files, and cannot
+  allocate memory or start other programs. The system call ABI is unstable.
+- The scheduler is plain round-robin on one CPU with a 10 ms slice; it has
+  no priorities and has not been measured.
+- Panic and exception backtraces only cover the boot thread's stack.
 - Machines without ACPI or an I/O APIC are rejected at boot.
 - Only the boot CPU is used.
 - No Secure Boot support; the loader does not authenticate the kernel.
@@ -282,12 +298,15 @@ boot/            UEFI boot loader (x86_64-unknown-uefi)
 kernel/          the kernel (x86_64-unknown-none), linker script
   src/arch/      architecture-specific code (x86_64 only)
 libs/bootproto/  loader <-> kernel contract: BootInfo, memory map, command line
+libs/abi/        system call numbers and error codes shared by kernel and userspace
 libs/acpi/       ACPI static table parser (RSDP, RSDT/XSDT, MADT), host-tested
 libs/elf/        safe ELF64 program-header parser
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
 libs/term/       terminal emulator and keyboard scancode decoder, host-tested
 libs/vfs/        virtual filesystem layer and RAM filesystem, host-tested
 shell/           the built-in shell (line editor, parser, commands), host-tested
+userspace/rt/    runtime for user programs: entry point, system calls, printing
+userspace/programs/  sample user programs, shipped in the initial ramdisk
 tools/xtask/     build / image / run / test driver
 docs/adr/        architecture decision records
 .github/         CI
@@ -315,7 +334,8 @@ products.
    ACPI and the I/O APIC, serial input, and finally a page-table audit.
 5. Only if every step succeeded does it print
    `Omit OS — Kernel initialized successfully.`
-6. It then mounts a RAM filesystem and runs the shell on the serial console.
+6. It then mounts a RAM filesystem, unpacks the initial ramdisk (user
+   programs) into `/bin`, and runs the shell on the console.
 
 The exact contract between loader and kernel is documented in
 [`libs/bootproto`](libs/bootproto/src/lib.rs). Design rationale is in the ADRs:
@@ -327,6 +347,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0005 — Interrupts and timekeeping](docs/adr/0005-interrupts-and-timekeeping.md)
 - [ADR 0006 — Terminal, virtual filesystem and built-in shell](docs/adr/0006-terminal-filesystem-and-shell.md)
 - [ADR 0007 — Framebuffer console, keyboard input and releases](docs/adr/0007-display-keyboard-and-releases.md)
+- [ADR 0008 — Threads, processes and system calls](docs/adr/0008-threads-processes-and-system-calls.md)
 
 ## Testing
 
@@ -336,7 +357,7 @@ checks both QEMU's exit status and the serial log:
 | Test | Checks |
 | --- | --- |
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
-| `shell-session` | Boots into the shell and types 26 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing |
+| `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`) |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
@@ -354,9 +375,10 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step (Milestone 4):** kernel threads and a scheduler, then user mode:
-per-process address spaces, a system call interface, an ELF loader and a
-first userspace program.
+**Next step:** make programs useful — file and memory system calls, program
+arguments and standard input — so that real utilities can be ported
+(Milestone 5: coreutils and storage, starting with a VirtIO block driver and
+a persistent filesystem).
 
 ## Licence
 

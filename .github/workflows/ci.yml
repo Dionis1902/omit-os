@@ -32,6 +32,8 @@ jobs:
         run: cargo clippy --locked -p omit-kernel --target x86_64-unknown-none -- -D warnings
       - name: Clippy (boot loader)
         run: cargo clippy --locked -p omit-boot --target x86_64-unknown-uefi -- -D warnings
+      - name: Clippy (userspace)
+        run: cargo clippy --locked -p omit-user-programs -p omit-rt --target x86_64-unknown-none -- -D warnings
       - name: Host unit tests
         run: cargo test --locked
 
