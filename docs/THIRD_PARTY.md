@@ -2,8 +2,8 @@
 
 Omit OS itself is licensed under **GPL-2.0-only** (see [`LICENSE`](../LICENSE)).
 The licence choice is provisional; it was made with future reuse of GPLv2
-Linux driver code in mind. No Linux, Windows, Wine or Proton code is present
-in this repository.
+Linux driver code in mind. The repository contains no Windows, Wine or Proton code, and no
+Linux code other than the individual drivers listed below.
 
 This file lists every third-party crate in `Cargo.lock`, where it ends up, and
 its licence. Regenerate the list with `cargo metadata` when dependencies
@@ -31,6 +31,20 @@ Build-time only (procedural macros, not linked into any shipped binary):
 | Crate | Licence | Notes |
 | --- | --- | --- |
 | `noto-sans-mono-bitmap` | MIT (crate); SIL Open Font License 1.1 (the embedded Noto Sans Mono glyph data) | Font for the framebuffer console. The OFL permits bundling and embedding the font in software under any licence; the font data itself stays under the OFL. |
+
+## Linux kernel code linked into the kernel
+
+Individual Linux device drivers are compiled, unmodified, against the Omit
+OS LinuxKPI layer. The authoritative list, with upstream paths, versions and
+checksums, is [`drivers/linux/README.md`](../drivers/linux/README.md).
+
+| File | Licence | Copyright |
+| --- | --- | --- |
+| `drivers/linux/watchdog/i6300esb.c` | GPL-2.0-or-later | (c) 2004 Google Inc.; (c) 2005 David Härdeman; see the file header |
+
+The LinuxKPI headers and runtime in `compat/linux-kpi/` are original Omit OS
+code under GPL-2.0-only. They declare interfaces compatible with Linux's but
+contain no Linux source.
 
 ## Host tooling only (`xtask`; never part of the OS image)
 

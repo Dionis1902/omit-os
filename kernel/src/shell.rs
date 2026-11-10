@@ -41,7 +41,30 @@ impl Host for KernelHost {
     fn pci_devices(&mut self) -> Vec<String> {
         crate::pci::devices()
             .iter()
-            .map(|device| format!("{device}"))
+            .map(|device| {
+                // Name and support status from the hardware database; class
+                // name for devices it does not know.
+                match omit_hwdb::lookup(device.vendor_id, device.device_id) {
+                    Some(known) => {
+                        let (status, driver) = omit_hwdb::describe(known.support);
+                        let driver = if driver.is_empty() {
+                            String::new()
+                        } else {
+                            format!(": {driver}")
+                        };
+                        format!(
+                            "{:02x}:{:02x}.{} {:04x}:{:04x} {} [{status}{driver}]",
+                            device.bus,
+                            device.device,
+                            device.function,
+                            device.vendor_id,
+                            device.device_id,
+                            known.name
+                        )
+                    }
+                    None => format!("{device} [unknown device, no driver]"),
+                }
+            })
             .collect()
     }
 
@@ -62,6 +85,73 @@ impl Host for KernelHost {
         match omit_ext2::Ext2::mount(disk) {
             Ok(filesystem) => Ok(Box::new(filesystem)),
             Err(error) => Err(format!("{error}")),
+        }
+    }
+
+    fn drivers(&mut self) -> Vec<String> {
+        crate::drivers::registry::bindings()
+            .iter()
+            .map(|binding| {
+                format!(
+                    "{:<8} {:<10} {}",
+                    binding.device,
+                    binding.origin.label(),
+                    binding.driver
+                )
+            })
+            .collect()
+    }
+
+    fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
+        if crate::linuxkpi::unbind(device) {
+            Ok(())
+        } else {
+            Err("no removable driver is bound to that device".into())
+        }
+    }
+
+    fn watchdog(&mut self, args: &[String]) -> Result<String, String> {
+        use crate::linuxkpi::watchdog;
+        let describe = || {
+            watchdog::status()
+                .map(|status| {
+                    format!(
+                        "{}: {}, timeout {} s (range {}-{} s){}\n",
+                        status.identity,
+                        if status.active { "running" } else { "stopped" },
+                        status.timeout,
+                        status.limits.0,
+                        status.limits.1,
+                        if status.caused_last_reset {
+                            ", caused the last reset"
+                        } else {
+                            ""
+                        }
+                    )
+                })
+                .ok_or_else(|| String::from("no watchdog device"))
+        };
+        let done = |result: Result<(), &'static str>, message: &str| {
+            result
+                .map(|()| format!("watchdog: {message}\n"))
+                .map_err(String::from)
+        };
+        match args {
+            [] => describe(),
+            [command] if command == "status" => describe(),
+            [command] if command == "start" => done(watchdog::start(), "started"),
+            [command] if command == "stop" => done(watchdog::stop(), "stopped"),
+            [command] if command == "ping" => done(watchdog::ping(), "keep-alive sent"),
+            [command, seconds] if command == "timeout" => {
+                let seconds: u32 = seconds
+                    .parse()
+                    .map_err(|_| format!("{seconds}: not a number of seconds"))?;
+                done(
+                    watchdog::set_timeout(seconds),
+                    &format!("timeout set to {seconds} s"),
+                )
+            }
+            _ => Err("usage: watchdog [status|start|stop|ping|timeout SECONDS]".into()),
         }
     }
 

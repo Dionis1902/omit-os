@@ -134,6 +134,52 @@ impl PciDevice {
         (address != 0).then_some(MemoryBar { address })
     }
 
+    /// Size in bytes of the region decoded by memory BAR `index`, found by
+    /// the standard probe: write all ones, read back which address bits
+    /// the device implements, restore.
+    ///
+    /// # Safety
+    ///
+    /// The device must not be in use while its BAR is being rewritten, so
+    /// this may only be called by its driver before it starts using the
+    /// device.
+    pub unsafe fn memory_bar_size(&self, index: u8) -> Option<u64> {
+        self.memory_bar(index)?;
+        let offset = REG_BAR0 + 4 * index;
+        let original = self.read(offset);
+        // SAFETY: forwarded from this function's contract; the original
+        // value is restored immediately.
+        let probed = unsafe {
+            pci_config::write(self.bus, self.device, self.function, offset, u32::MAX);
+            let probed = self.read(offset);
+            pci_config::write(self.bus, self.device, self.function, offset, original);
+            probed
+        };
+        // For a 64-bit BAR only the low half is probed: regions of 4 GiB
+        // or more are not supported.
+        let size = u64::from(!(probed & !0xF)) + 1;
+        (size > 1 && size <= u64::from(u32::MAX)).then_some(size)
+    }
+
+    /// Writes an 8-, 16- or 32-bit configuration register.
+    ///
+    /// # Safety
+    ///
+    /// The caller must be the driver for this device and write a value
+    /// that is valid for the register.
+    pub unsafe fn write_config(&self, offset: u8, width: u8, value: u32) {
+        // SAFETY: forwarded from this function's contract.
+        unsafe {
+            match width {
+                1 => pci_config::write8(self.bus, self.device, self.function, offset, value as u8),
+                2 => {
+                    pci_config::write16(self.bus, self.device, self.function, offset, value as u16)
+                }
+                _ => pci_config::write(self.bus, self.device, self.function, offset, value),
+            }
+        }
+    }
+
     /// Iterates over the offsets of the device's capabilities, with their
     /// IDs.
     pub fn capabilities(&self) -> impl Iterator<Item = (u8, u8)> + '_ {

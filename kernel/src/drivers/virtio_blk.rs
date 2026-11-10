@@ -18,6 +18,7 @@ use core::fmt;
 use core::sync::atomic::{Ordering, fence};
 
 use super::block::{self, BlockDevice, BlockError, SECTOR_SIZE};
+use super::registry::{self, Origin};
 use crate::arch::paging::{self, MapError};
 use crate::mm::{self, PAGE_SIZE, frame};
 use crate::pci::{self, COMMAND_BUS_MASTER, COMMAND_MEMORY, PciDevice};
@@ -419,5 +420,10 @@ pub fn init() -> Result<Option<u64>, VirtioError> {
     let device = VirtioBlk::new(&pci)?;
     let sectors = device.sectors;
     block::register("vda", Box::new(device));
+    registry::bind(
+        "virtio-blk",
+        Origin::Native,
+        &alloc::format!("{:02x}:{:02x}.{}", pci.bus, pci.device, pci.function),
+    );
     Ok(Some(sectors))
 }

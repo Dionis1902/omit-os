@@ -88,6 +88,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "omit-hwdb"
+version = "0.1.0"
+
+[[package]]
 name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
@@ -97,6 +101,7 @@ dependencies = [
  "omit-bootproto",
  "omit-elf",
  "omit-ext2",
+ "omit-hwdb",
  "omit-mm",
  "omit-shell",
  "omit-term",

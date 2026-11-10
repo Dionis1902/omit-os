@@ -66,3 +66,17 @@ pub unsafe fn inl(port: u16) -> u32 {
     }
     value
 }
+
+/// Writes a 16-bit `value` to I/O port `port`.
+///
+/// # Safety
+///
+/// Same contract as [`outb`].
+#[inline]
+pub unsafe fn outw(port: u16, value: u16) {
+    // SAFETY: see `outb`.
+    unsafe {
+        asm!("out dx, ax", in("dx") port, in("ax") value,
+             options(nomem, nostack, preserves_flags));
+    }
+}

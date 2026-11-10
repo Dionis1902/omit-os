@@ -378,6 +378,10 @@ fn qemu_command(
             data_disk.display()
         ))
         .args(["-device", "virtio-blk-pci,drive=data"])
+        // A hardware watchdog, driven by a reused Linux driver. When it
+        // expires it resets the machine (which, with -no-reboot, ends QEMU).
+        .args(["-device", "i6300esb"])
+        .args(["-action", "watchdog=reset"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
@@ -484,6 +488,10 @@ struct BootTest {
     /// same data disk. Used to test that data persists. When non-empty,
     /// the data disk is also checked with `e2fsck` afterwards.
     reboot_script: &'static [(&'static str, &'static str)],
+    /// The test ends with the machine being reset rather than with the
+    /// shell exiting: after the script, wait for QEMU to terminate instead
+    /// of typing `exit`.
+    ends_with_reset: bool,
     /// Also test the screen and keyboard: after the script, type a command
     /// on the emulated PS/2 keyboard, check that it runs, then take a
     /// screenshot and check what the framebuffer console drew.
@@ -514,6 +522,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
     BootTest {
@@ -636,6 +645,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
     BootTest {
@@ -650,6 +660,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[("echo typed-on-serial", "\ntyped-on-serial\n")],
         reboot_script: &[],
+        ends_with_reset: false,
         display: true,
     },
     BootTest {
@@ -664,7 +675,10 @@ const BOOT_TESTS: &[BootTest] = &[
         // First boot: create a filesystem on the blank disk and fill it.
         script: &[
             ("lsblk", "\nvda       32 MiB\n"),
-            ("lspci", " 1af4:1001 SCSI storage controller\n"),
+            (
+                "lspci",
+                " 1af4:1001 VirtIO block device (transitional) [native driver: virtio-blk]\n",
+            ),
             ("mkdir /mnt", ""),
             ("mount vda /mnt", "\nmount: vda: not an ext2 filesystem\n"),
             ("mkfs vda", "\nmkfs: created an ext2 filesystem on vda\n"),
@@ -701,6 +715,108 @@ const BOOT_TESTS: &[BootTest] = &[
             ("/mnt/hello", "\nHello from user mode! I am process 1 "),
             ("umount /mnt", ""),
         ],
+        ends_with_reset: false,
+        display: false,
+    },
+    BootTest {
+        name: "linux-driver-watchdog",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] linux: 00:03.0: initialized. heartbeat=30 sec (nowayout=0)",
+            "[INFO ] linuxkpi: 1 device(s) bound to Linux drivers",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            (
+                "lspci",
+                "\n00:03.0 8086:25ab Intel 6300ESB watchdog timer [Linux driver: i6300esb]\n",
+            ),
+            (
+                "lsdrv",
+                "\n00:02.0  native     virtio-blk\n00:03.0  linux-kpi  i6300ESB timer\n",
+            ),
+            (
+                "watchdog",
+                "\ni6300ESB timer: stopped, timeout 30 s (range 1-2046 s)\n",
+            ),
+            (
+                "watchdog timeout 9999",
+                "\nwatchdog: timeout outside the range",
+            ),
+            ("watchdog timeout 6", "\nwatchdog: timeout set to 6 s\n"),
+            ("watchdog start", "\nwatchdog: started\n"),
+            ("watchdog", "\ni6300ESB timer: running, timeout 6 s"),
+            // Stay alive past the 6 s timeout by sending keep-alives: each
+            // `sleeper` run takes at least half a second, so fourteen rounds
+            // take longer than the timeout, while a single round stays well
+            // below it even in slow, unoptimised builds.
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("watchdog ping", "\nwatchdog: keep-alive sent\n"),
+            // Stopped, the machine must survive without keep-alives, even
+            // with the shortest timeout programmed.
+            ("watchdog stop", "\nwatchdog: stopped\n"),
+            ("watchdog timeout 1", "\nwatchdog: timeout set to 1 s\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            ("sleeper", "sleeper: tick 5\n"),
+            // Unbinding calls the driver's remove function.
+            ("unbind 00:03.0", "unbind 00:03.0\nomit:/# "),
+            ("watchdog", "\nwatchdog: no watchdog device\n"),
+            ("lsdrv", "virtio-blk\nomit:/# "),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+    },
+    BootTest {
+        name: "linux-driver-watchdog-expiry",
+        cmdline: "",
+        // The watchdog resets the machine; with -no-reboot QEMU then exits
+        // normally instead of through the kernel's debug-exit device.
+        expected_exit: 0,
+        must_contain: &["watchdog: started"],
+        must_not_contain: &[
+            "KERNEL PANIC",
+            "KERNEL EXCEPTION",
+            "[ERROR]",
+            "[INFO ] shell exited",
+        ],
+        script: &[
+            ("watchdog timeout 1", "\nwatchdog: timeout set to 1 s\n"),
+            // Started and never pinged: the hardware must reset the machine.
+            ("watchdog start", "\nwatchdog: started\n"),
+        ],
+        reboot_script: &[],
+        ends_with_reset: true,
         display: false,
     },
     BootTest {
@@ -717,6 +833,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL EXCEPTION"],
         script: &[],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
     BootTest {
@@ -731,6 +848,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
     BootTest {
@@ -745,6 +863,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC", "[ERROR]"],
         script: &[],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
     BootTest {
@@ -758,6 +877,7 @@ const BOOT_TESTS: &[BootTest] = &[
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
         reboot_script: &[],
+        ends_with_reset: false,
         display: false,
     },
 ];
@@ -973,6 +1093,7 @@ fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
 fn run_qemu_captured(
     mut command: Command,
     script: &[(&str, &str)],
+    ends_with_reset: bool,
     display: Option<&DisplayCheck>,
     timeout: Duration,
     failures: &mut Vec<String>,
@@ -1079,9 +1200,13 @@ fn run_qemu_captured(
                 Err(error) => failures.push(format!("cannot take a screenshot: {error}")),
             }
         }
-        let _ = stdin.write_all(b"exit\r");
+        if !ends_with_reset {
+            let _ = stdin.write_all(b"exit\r");
+        }
     }
-    drop(stdin);
+    // Keep stdin open until QEMU exits: closing it early makes QEMU's
+    // serial backend see end-of-file.
+    let stdin = stdin;
 
     // The reader finishes when QEMU closes its stdout, i.e. when it exits.
     while !reader.is_finished() && Instant::now() < deadline {
@@ -1092,6 +1217,7 @@ fn run_qemu_captured(
         let _ = child.kill();
     }
     let status = child.wait()?;
+    drop(stdin);
     reader.join().expect("reader thread");
     let serial = String::from_utf8_lossy(&output.lock().expect("output lock")).into_owned();
     let stderr = stderr_reader.join().expect("stderr thread");
@@ -1142,6 +1268,7 @@ fn run_boot_test(
             options,
         )?,
         test.script,
+        test.ends_with_reset,
         display.as_ref(),
         timeout,
         &mut failures,
@@ -1155,6 +1282,7 @@ fn run_boot_test(
         let second = run_qemu_captured(
             qemu_command(&image, &vars, &data_disk, None, options)?,
             test.reboot_script,
+            false,
             None,
             timeout,
             &mut failures,

@@ -3,16 +3,17 @@
 > Everything you need. Nothing you don't.
 
 Omit OS is a from-scratch operating system for x86-64 with its own kernel,
-written in Rust. It is not a Linux distribution and contains no Linux or
-Windows code.
+written in Rust. It is not a Linux distribution: the kernel is independent,
+and the only Linux code in the tree is individual device drivers reused
+unmodified (currently one; see `drivers/linux/`). It contains no Windows code.
 
 **This is an early-stage kernel.** Today it boots under UEFI, takes control of
 the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
 (with a PS/2 keyboard) and on the serial console, and can format, mount and
-use an ext2 filesystem on a VirtIO disk. There is no installer and no general
-driver model yet. See [Status](#status) for exactly what exists and what
+use an ext2 filesystem on a VirtIO disk. One unmodified Linux driver runs
+on a compatibility layer. There is no installer yet. See [Status](#status) for exactly what exists and what
 has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -63,12 +64,14 @@ hello from omit
 | Tool | Purpose | Debian/Ubuntu |
 | --- | --- | --- |
 | [rustup](https://rustup.rs) | Rust toolchain (version, components and targets are pinned in `rust-toolchain.toml` and installed automatically) | — |
+| clang or gcc | compiling the reused Linux driver into the kernel | `apt install clang` |
 | QEMU (x86-64 system emulator) | running and testing | `apt install qemu-system-x86` |
+| e2fsprogs (optional) | independent check of the ext2 driver in the tests | `apt install e2fsprogs` |
 | OVMF | UEFI firmware for QEMU | `apt install ovmf` |
 | GDB (optional) | kernel debugging | `apt install gdb` |
 
 No other host tools are needed; the disk image is produced by the build driver
-itself.
+itself. Set `OMIT_CC` to choose the C compiler.
 
 ### Build, run, test
 
@@ -223,6 +226,10 @@ addition from Milestone 8: a framebuffer text console.
 | PCI device discovery (`lspci`) | Working, tested in QEMU |
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
 | ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
+| Hardware database: device names and support status in `lspci` | Working, host-tested |
+| Driver registry (`lsdrv`), unbinding of Linux drivers (`unbind`) | Working, tested |
+| LinuxKPI: one unmodified Linux driver (Intel 6300ESB watchdog, Linux v6.12) | Working **in QEMU only**: probe, start/stop, keep-alives prevent the reset, expiry resets the machine, unbind. Not a general Linux driver layer; see ADR 0010 |
+| Loadable drivers, driver packages, automatic driver installation | Not started |
 | Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
 | Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
 | SMP | Not started |
@@ -233,14 +240,14 @@ addition from Milestone 8: a framebuffer text console.
 On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 (TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 124 host unit tests (`cargo test`): boot protocol validation, memory map
+- 128 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
   input, the buddy allocator and the heap (each including a randomised test
   against an independent model), ACPI table parsing, the VFS and RAM
   filesystem, the shell's parser, line editor and every command, the terminal
   emulator and keyboard decoder, the ext2 driver (checked against
-  e2fsprogs), GPT and ISO writers.
-- 8 QEMU integration tests (`cargo xtask test`), in debug and release builds,
+  e2fsprogs), the hardware database, GPT and ISO writers.
+- 10 QEMU integration tests (`cargo xtask test`), in debug and release builds,
   with `-cpu max` and with `-cpu qemu64` (no 1 GiB pages, SMEP, SMAP or UMIP),
   with 96 MiB to 6 GiB of guest RAM, and booted from both the disk image and
   the ISO.
@@ -306,6 +313,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Only the boot CPU is used.
 - No Secure Boot support; the loader does not authenticate the kernel.
 - No kernel address-space randomisation.
+- Linux driver reuse is demonstrated for a single small driver without
+  interrupts or DMA, in emulation. It says little about how hard network,
+  storage or graphics drivers will be.
 - No performance measurements have been made, and no performance claims are
   made.
 
@@ -319,6 +329,9 @@ libs/bootproto/  loader <-> kernel contract: BootInfo, memory map, command line
 libs/abi/        system call numbers and error codes shared by kernel and userspace
 libs/acpi/       ACPI static table parser (RSDP, RSDT/XSDT, MADT), host-tested
 libs/elf/        safe ELF64 program-header parser
+compat/linux-kpi/  our implementation of the Linux kernel API subset used by reused drivers
+drivers/linux/   Linux driver sources, unmodified, with provenance
+libs/hwdb/       hardware compatibility database
 libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
 libs/term/       terminal emulator and keyboard scancode decoder, host-tested
@@ -368,6 +381,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0007 — Framebuffer console, keyboard input and releases](docs/adr/0007-display-keyboard-and-releases.md)
 - [ADR 0008 — Threads, processes and system calls](docs/adr/0008-threads-processes-and-system-calls.md)
 - [ADR 0009 — Storage: PCI, VirtIO block and ext2](docs/adr/0009-storage-and-persistent-filesystem.md)
+- [ADR 0010 — Reusing Linux drivers through a LinuxKPI layer](docs/adr/0010-driver-reuse-through-linuxkpi.md)
 
 ## Testing
 
@@ -380,6 +394,8 @@ checks both QEMU's exit status and the serial log:
 | `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`), and `echo`/`cat`/`tee` exercising arguments, relative paths, file reads and writes, error reporting and typed standard input |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
+| `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
+| `linux-driver-watchdog-expiry` | The same driver, started and never pinged: the emulated hardware must reset the machine |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
 | `page-fault-diagnostics` | Reading address `0x1000` raises a page fault with the right address and cause — which also proves the identity map is gone |
@@ -396,10 +412,10 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step:** Milestone 6 — a driver framework with device matching and
-lifecycle, and a first look at reusing a Linux driver through a
-compatibility layer. Also still open from Milestone 5: an installer, and a
-Rust `std` port so that uutils coreutils can be built.
+**Next step:** Milestone 7 — a PE32+ loader and the first pieces of a native
+Windows compatibility layer, aiming at a simple console executable. Still
+open from earlier milestones: interrupts for device drivers (MSI-X), an
+installer, loadable drivers and packages, a Rust `std` port for coreutils.
 
 ## Licence
 

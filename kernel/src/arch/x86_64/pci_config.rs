@@ -8,7 +8,7 @@
 //! table) is required for PCI Express extended capabilities and will be
 //! added when something needs those.
 
-use super::port::{inl, outl};
+use super::port::{inl, outb, outl, outw};
 use crate::sync::SpinLock;
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
@@ -54,5 +54,37 @@ pub unsafe fn write(bus: u8, device: u8, function: u8, offset: u8, value: u32) {
     unsafe {
         outl(CONFIG_ADDRESS, address(bus, device, function, offset));
         outl(CONFIG_DATA, value);
+    }
+}
+
+/// Writes the 8-bit configuration register at `offset`.
+///
+/// Narrow writes address the byte directly, so neighbouring registers
+/// (some of which clear bits when written) are not touched.
+///
+/// # Safety
+///
+/// Same contract as [`write`].
+pub unsafe fn write8(bus: u8, device: u8, function: u8, offset: u8, value: u8) {
+    let _guard = PORTS.lock();
+    // SAFETY: as in `write`; the data port is byte-addressable.
+    unsafe {
+        outl(CONFIG_ADDRESS, address(bus, device, function, offset));
+        outb(CONFIG_DATA + u16::from(offset & 3), value);
+    }
+}
+
+/// Writes the 16-bit configuration register at `offset` (which must be
+/// even).
+///
+/// # Safety
+///
+/// Same contract as [`write`].
+pub unsafe fn write16(bus: u8, device: u8, function: u8, offset: u8, value: u16) {
+    let _guard = PORTS.lock();
+    // SAFETY: as in `write8`.
+    unsafe {
+        outl(CONFIG_ADDRESS, address(bus, device, function, offset));
+        outw(CONFIG_DATA + u16::from(offset & 2), value);
     }
 }

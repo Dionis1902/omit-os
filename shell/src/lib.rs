@@ -95,6 +95,16 @@ pub trait Host {
     /// its contents.
     fn format_device(&mut self, device: &str) -> Result<(), String>;
 
+    /// One line per driver-to-device binding.
+    fn drivers(&mut self) -> Vec<String>;
+
+    /// Detaches the driver from the device at `device`
+    /// (`bus:device.function`).
+    fn unbind_driver(&mut self, device: &str) -> Result<(), String>;
+
+    /// Runs a watchdog subcommand and returns what to print.
+    fn watchdog(&mut self, args: &[String]) -> Result<String, String>;
+
     /// Opens the filesystem on block device `device` for mounting.
     fn open_filesystem(&mut self, device: &str) -> Result<Box<dyn FileSystem>, String>;
 }
@@ -140,7 +150,8 @@ type CommandResult = Result<(), Failure>;
 /// Names handled by the shell itself (`exit` is handled before dispatch).
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
-    "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount",
+    "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
+    "watchdog",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -169,6 +180,9 @@ Built-in commands:
   free                 show memory usage
   lspci                list PCI devices
   lsblk                list block devices
+  lsdrv                list drivers and the devices they control
+  unbind DEVICE        detach the driver from a device (e.g. 00:03.0)
+  watchdog [COMMAND]   status, start, stop, ping, timeout SECONDS
   mkfs DEVICE          create an empty ext2 filesystem (erases the device)
   mount [DEVICE DIR]   mount a filesystem, or list what is mounted
   umount DIR           unmount a filesystem
@@ -346,6 +360,21 @@ impl Shell {
                 }
                 Ok(())
             }
+            "lsdrv" => {
+                writeln!(out, "DEVICE   ORIGIN     DRIVER")?;
+                for line in host.drivers() {
+                    writeln!(out, "{line}")?;
+                }
+                Ok(())
+            }
+            "unbind" => {
+                let [device] = args else {
+                    return Err(Failure("usage: unbind DEVICE".into()));
+                };
+                host.unbind_driver(device)
+                    .map_err(|error| Failure(format!("{device}: {error}")))
+            }
+            "watchdog" => Ok(out.write_str(&host.watchdog(args).map_err(Failure)?)?),
             "lsblk" => {
                 writeln!(out, "NAME        SIZE")?;
                 for (device, bytes) in host.block_devices() {
@@ -820,6 +849,25 @@ mod tests {
             pid as usize <= self.spawned.len()
         }
 
+        fn drivers(&mut self) -> Vec<String> {
+            alloc::vec!["00:02.0  native     virtio-blk".into()]
+        }
+
+        fn unbind_driver(&mut self, device: &str) -> Result<(), String> {
+            if device == "00:03.0" {
+                Ok(())
+            } else {
+                Err("no removable driver is bound to that device".into())
+            }
+        }
+
+        fn watchdog(&mut self, args: &[String]) -> Result<String, String> {
+            match args {
+                [] => Ok("test watchdog: stopped\n".into()),
+                _ => Err("usage".into()),
+            }
+        }
+
         fn pci_devices(&mut self) -> Vec<String> {
             alloc::vec!["00:00.0 8086:29c0 Host bridge".into()]
         }
@@ -1160,6 +1208,17 @@ mod tests {
         let mut s = Session::new();
         assert_eq!(s.ok("lspci"), "00:00.0 8086:29c0 Host bridge\n");
         assert_eq!(s.ok("lsblk"), "NAME        SIZE\nvda       32 MiB\n");
+        assert_eq!(
+            s.ok("lsdrv"),
+            "DEVICE   ORIGIN     DRIVER\n00:02.0  native     virtio-blk\n"
+        );
+        assert_eq!(s.ok("watchdog"), "test watchdog: stopped\n");
+        assert_eq!(s.err("watchdog bogus"), "watchdog: usage\n");
+        s.ok("unbind 00:03.0");
+        assert_eq!(
+            s.err("unbind 00:09.0"),
+            "unbind: 00:09.0: no removable driver is bound to that device\n"
+        );
         assert_eq!(s.ok("mount"), "ramfs on /\n");
 
         s.ok("mkdir /mnt");

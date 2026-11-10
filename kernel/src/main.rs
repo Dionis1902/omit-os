@@ -14,6 +14,7 @@ mod console;
 mod drivers;
 mod fbcon;
 mod fs;
+mod linuxkpi;
 mod log;
 mod mm;
 mod panic;
@@ -392,6 +393,11 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         }
         Ok(None) => info!("virtio-blk: no device"),
         Err(error) => warn!("virtio-blk: cannot initialise device: {error}"),
+    }
+    // Linux drivers running on the compatibility layer.
+    match linuxkpi::init() {
+        Ok(devices) => info!("linuxkpi: {devices} device(s) bound to Linux drivers"),
+        Err(error) => warn!("linuxkpi: disabled: {error}"),
     }
 
     // 10. Audit the final address space, including the mappings made above.
