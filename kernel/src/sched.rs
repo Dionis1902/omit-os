@@ -179,6 +179,8 @@ pub struct ThreadInfo {
     pub cpu_ticks: u64,
     /// The process ID, for threads that run a user process.
     pub pid: Option<u64>,
+    /// This is the thread that runs when no other can.
+    pub idle: bool,
 }
 
 struct Scheduler {
@@ -534,6 +536,7 @@ pub fn threads() -> Vec<ThreadInfo> {
                     state: thread.state,
                     cpu_ticks: thread.cpu_ticks,
                     pid: thread.pid,
+                    idle: id == scheduler.idle,
                 })
                 .collect()
         })

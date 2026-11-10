@@ -90,6 +90,10 @@ fn main() -> i32 {
         let (width, height) = calculator::SIZE;
         context.open(Box::new(calculator::Window::new()), width, height);
     });
+    desktop.add_launcher("System Monitor", "mon", |context| {
+        let (width, height) = omit_gfx::monitor::SIZE;
+        context.open(Box::new(apps::monitor()), width, height);
+    });
     desktop.add_launcher("About", "info", move |context| {
         context.open(Box::new(apps::About::new(width, height)), 470, 230);
     });

@@ -229,6 +229,15 @@ pub mod nr {
     /// `tcp_shutdown(fd) -> 0`: tells the other side that nothing more
     /// will be sent on the connection `fd`. Reading goes on.
     pub const TCP_SHUTDOWN: u64 = 47;
+    /// `system_info(out) -> 0`: writes a [`crate::system::Info`]: memory,
+    /// uptime and how much of it the processor was idle.
+    pub const SYSTEM_INFO: u64 = 48;
+    /// `task_list(out, capacity) -> count`: writes one
+    /// [`crate::system::Task`] per thread in the system, ordered by
+    /// thread ID, to the array of `capacity` entries (at most
+    /// [`crate::system::TASKS_MAX`]) at `out`, and returns how many
+    /// threads there are — which can be more than were written.
+    pub const TASK_LIST: u64 = 49;
 }
 
 /// Largest shared memory segment, in bytes.
@@ -570,6 +579,91 @@ impl Errno {
             _ => None,
         }
     }
+}
+
+/// What the system reports about itself: `system_info` and `task_list`.
+pub mod system {
+    /// Most entries one `task_list` call writes.
+    pub const TASKS_MAX: u64 = 256;
+    /// Bytes of a thread's name that [`Task`] has room for.
+    pub const NAME_MAX: usize = 32;
+
+    /// [`Task::state`]: executing at the moment of the call.
+    pub const STATE_RUNNING: u32 = 0;
+    /// [`Task::state`]: waiting for its turn on the processor.
+    pub const STATE_READY: u32 = 1;
+    /// [`Task::state`]: waiting for an event or a timeout.
+    pub const STATE_BLOCKED: u32 = 2;
+    /// [`Task::state`]: finished, not yet cleared away.
+    pub const STATE_DEAD: u32 = 3;
+
+    /// [`Task::flags`]: the thread that runs when no other can; its
+    /// processor time is the time the processor was idle.
+    pub const TASK_IDLE: u32 = 1 << 0;
+
+    /// The system as a whole, as `system_info` describes it.
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+    pub struct Info {
+        /// Bytes of physical memory the kernel manages.
+        pub memory_total: u64,
+        /// Bytes of it that are not in use.
+        pub memory_free: u64,
+        /// Bytes the kernel's own heap has handed out.
+        pub kernel_heap: u64,
+        /// Milliseconds since the system started.
+        pub uptime_ms: u64,
+        /// Milliseconds of them in which the processor had nothing to
+        /// run.
+        pub idle_ms: u64,
+        /// Threads in the system.
+        pub threads: u32,
+        /// Processes among them.
+        pub processes: u32,
+    }
+
+    /// One thread, as `task_list` describes it.
+    #[repr(C)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct Task {
+        /// The thread's ID.
+        pub thread: u64,
+        /// The ID of the process it belongs to; 0 for a thread of the
+        /// kernel itself.
+        pub pid: u64,
+        /// Milliseconds of processor time it has used.
+        pub cpu_ms: u64,
+        /// One of the `STATE_*` values.
+        pub state: u32,
+        /// How many bytes of `name` are used.
+        pub name_len: u32,
+        /// `TASK_*` bits.
+        pub flags: u32,
+        /// Zero.
+        pub reserved: u32,
+        /// The thread's name (for a process, its program), cut off at
+        /// [`NAME_MAX`] bytes; UTF-8 except possibly for a character
+        /// cut in the middle.
+        pub name: [u8; NAME_MAX],
+    }
+
+    impl Default for Task {
+        fn default() -> Self {
+            Self {
+                thread: 0,
+                pid: 0,
+                cpu_ms: 0,
+                state: STATE_DEAD,
+                name_len: 0,
+                flags: 0,
+                reserved: 0,
+                name: [0; NAME_MAX],
+            }
+        }
+    }
+
+    const _: () = assert!(size_of::<Info>() == 48);
+    const _: () = assert!(size_of::<Task>() == 72);
 }
 
 /// Networking structures and limits.

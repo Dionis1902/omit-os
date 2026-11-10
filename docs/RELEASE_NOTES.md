@@ -112,7 +112,7 @@ On the desktop, the icons on the task bar start programs — hold the
 pointer over one to see its name — and the mark at the left lists them
 all; type there to search. Settings switches between light and dark and
 chooses the accent colour; Files browses the folders (click a row to
-select it, again to open it). Drag a window by its title to the left or right edge of the screen to give it that half, to the top edge to maximise it. The Calculator takes the mouse or the keyboard. Some have windows of their own (Scribble, Clock, the game Pop), and
+select it, again to open it). Drag a window by its title to the left or right edge of the screen to give it that half, to the top edge to maximise it. The Calculator takes the mouse or the keyboard. System Monitor lists what is running — select a process and press End task (or Delete) to end it — and draws the processor's and memory's last minute. Some have windows of their own (Scribble, Clock, the game Pop), and
 the Run window starts anything by
 name — try `wingui.exe`, a graphical Windows program: click in its
 window, type, press `m` for a message box, `x` for a timer, `q` to quit.

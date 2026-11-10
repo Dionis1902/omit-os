@@ -69,11 +69,20 @@ this ADR records how the system implements it and how far it has got.
   back; and what Settings chooses is **remembered**, in a small text
   file (`desktop.conf`: on the data partition of an installed system,
   where it survives a restart; otherwise in memory until the machine
-  is switched off).
+  is switched off). The fourth: a **System Monitor** — a list of the
+  processes (the kernel's threads as one line) with the share of the
+  processor each used in the last second and its time in all, of
+  which one can be selected and ended; and a page with the last
+  minute of processor and memory use. It reads two new system calls,
+  `system_info` (memory, uptime, idle time) and `task_list` (every
+  thread: process, state, processor time, name), which any program
+  may use; like the other windows it lives in the library and gets
+  its figures through a trait, so the arithmetic is tested on the
+  host with made-up systems.
 
 ## What works
 
-- 94 host tests in `libs/gfx`: the font and icon files (every
+- 106 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -94,6 +103,9 @@ this ADR records how the system implements it and how far it has got.
   found in the settings file afterwards, the Files window dragged to
   the right edge and found filling the right half, and 7 × 6 = on the
   Calculator's keys followed by − 2 Enter on the keyboard.
+  Since the fourth, the System Monitor is opened and must list the
+  kernel's line and the desktop itself, and show its graphs' page.
+  Ending a process from it is tested on the host only.
   That the settings file is read back at the next start is tested on
   the host only (the parser), not across a restart in QEMU.
 
@@ -110,14 +122,18 @@ halved that.) Debug builds are slower by the same factor as before.
 - **Most of the design's screens**: lock screen and sign-in (there are
   no users yet), the separate search screen, the window switcher and
   the picker that offers a second window for the other half after one
-  was arranged, the quick panel and notifications, System
-  Monitor, Market; all pages of Settings but one. In
+  was arranged, the quick panel and notifications,
+  Market; all pages of Settings but one. In
   Files: tabs, search, the preview pane, the context menu, renaming,
   deleting and the Recycle Bin, sorting, and scrolling with the mouse
   (there are no wheel events yet); a row is opened by clicking it a
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
+- The System Monitor does not show memory per process (the kernel
+  does not account for it yet), nor disks, network or sorting; its
+  processor figure is for the one processor the kernel uses, counted
+  in timer ticks of 10 ms.
 - The Calculator has no history, memory keys or scientific page, and
   shows at most twelve digits.
 - **Glass is tinted, not blurred** (and the Start panel nearly opaque,

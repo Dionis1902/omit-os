@@ -2168,6 +2168,7 @@ const DESKTOP_LAUNCHERS: &[&str] = &[
     "Run",
     "Settings",
     "Calculator",
+    "System Monitor",
     "About",
     "Scribble",
     "Clock",
@@ -2247,6 +2248,7 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     let (run_x, run_y) = button("Run").ok_or("no Run button")?;
     let (settings_x, settings_y) = button("Settings").ok_or("no Settings button")?;
     let (calculator_x, calculator_y) = button("Calculator").ok_or("no Calculator button")?;
+    let (monitor_x, monitor_y) = button("System Monitor").ok_or("no System Monitor button")?;
     let (files_x, files_y) = button("Files").ok_or("no Files button")?;
     debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
     let start = layout.start_button();
@@ -2829,6 +2831,68 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         wait_for_screen(check, "the result of 42 - 2", patience, |image| {
             screen_writes(image, "40", SEMIBOLD_32, theme.text, theme.window)
         })?;
+    }
+
+    // System Monitor: the tenth window. Its list has the kernel's line
+    // and the desktop itself; the other page says how much memory is in
+    // use.
+    {
+        use omit_gfx::font::{MEDIUM_13, REGULAR_13};
+        use omit_gfx::monitor::{self, Monitor};
+        // Only the geometry is asked of this copy.
+        struct Nothing;
+        impl monitor::Source for Nothing {
+            fn now_ms(&mut self) -> u64 {
+                0
+            }
+            fn sample(&mut self) -> monitor::Sample {
+                monitor::Sample::default()
+            }
+            fn end(&mut self, _: u64) -> bool {
+                false
+            }
+        }
+        let window = layout.open(Box::new(Blank), monitor::SIZE.0, monitor::SIZE.1);
+        let frame = layout
+            .window_frame(window)
+            .ok_or("no frame for the System Monitor window")?;
+        let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+        mouse.click(monitor_x, monitor_y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the System Monitor's list", patience, |image| {
+            title(image, "System Monitor")
+                && screen_writes(
+                    image,
+                    monitor::KERNEL_NAME,
+                    REGULAR_13,
+                    theme.text,
+                    theme.window,
+                )
+                && screen_writes(image, "desktop", REGULAR_13, theme.text, theme.window)
+        })?;
+        let page = Monitor::<Nothing>::page_frame(1).ok_or("no second page")?;
+        mouse.click(left + page.x + page.w / 2, top + page.y + page.h / 2)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the System Monitor's graphs", patience, |image| {
+            screen_writes(
+                image,
+                "Memory",
+                MEDIUM_13,
+                theme.text_2,
+                theme.window_raised,
+            ) && screen_writes(
+                image,
+                "Processor",
+                MEDIUM_13,
+                theme.text_2,
+                theme.window_raised,
+            )
+        })?;
+        // Kept next to the serial log: the desktop with the monitor.
+        let _ = fs::copy(
+            &check.screenshot,
+            check.screenshot.with_extension("monitor.ppm"),
+        );
     }
 
     // The Start mark opens the list of programs; the row under the

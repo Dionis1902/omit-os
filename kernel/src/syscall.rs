@@ -139,6 +139,8 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         nr::UDP_SEND => udp_send(a0, a1, a2, a3),
         nr::UDP_RECEIVE => udp_receive(a0, a1, a2, a3, a4),
         nr::NET_INFO => net_info(a0),
+        nr::SYSTEM_INFO => system_info(a0),
+        nr::TASK_LIST => task_list(a0, a1),
         nr::TCP_CONNECT => tcp_connect(a0, a1),
         nr::TCP_LISTEN => tcp_listen(a0),
         nr::TCP_ACCEPT => tcp_accept(a0, a1, a2),
@@ -601,6 +603,72 @@ fn net_info(out: u64) -> SysResult {
     bytes[20..26].copy_from_slice(&info.mac);
     copy_out(out, &bytes)?;
     Ok(0)
+}
+
+/// Milliseconds of processor time for a count of timer ticks.
+fn ticks_to_ms(ticks: u64) -> u64 {
+    ticks * 1000 / u64::from(time::TICK_HZ)
+}
+
+fn system_info(out: u64) -> SysResult {
+    let threads = sched::threads();
+    let (total, free) = crate::mm::frame::stats().map_or((0, 0), |stats| {
+        let bytes = |frames: usize| frames as u64 * crate::mm::PAGE_SIZE;
+        (bytes(stats.managed), bytes(stats.free))
+    });
+    let idle = threads
+        .iter()
+        .find(|thread| thread.idle)
+        .map_or(0, |thread| ticks_to_ms(thread.cpu_ticks));
+    let mut processes: Vec<u64> = threads.iter().filter_map(|thread| thread.pid).collect();
+    processes.sort_unstable();
+    processes.dedup();
+    // The layout of `omit_abi::system::Info`.
+    let mut bytes = [0u8; size_of::<omit_abi::system::Info>()];
+    bytes[..8].copy_from_slice(&total.to_le_bytes());
+    bytes[8..16].copy_from_slice(&free.to_le_bytes());
+    let heap = crate::mm::heap::stats().allocated_bytes as u64;
+    bytes[16..24].copy_from_slice(&heap.to_le_bytes());
+    bytes[24..32].copy_from_slice(&(time::monotonic_ns() / 1_000_000).to_le_bytes());
+    bytes[32..40].copy_from_slice(&idle.to_le_bytes());
+    bytes[40..44].copy_from_slice(&(threads.len() as u32).to_le_bytes());
+    bytes[44..48].copy_from_slice(&(processes.len() as u32).to_le_bytes());
+    copy_out(out, &bytes)?;
+    Ok(0)
+}
+
+fn task_list(out: u64, capacity: u64) -> SysResult {
+    use omit_abi::system::{
+        NAME_MAX, STATE_BLOCKED, STATE_DEAD, STATE_READY, STATE_RUNNING, TASK_IDLE, TASKS_MAX, Task,
+    };
+    if capacity > TASKS_MAX {
+        return Err(Errno::InvalidArgument);
+    }
+    let threads = sched::threads();
+    // The layout of `omit_abi::system::Task`, one after another.
+    let mut bytes = Vec::with_capacity(threads.len().min(capacity as usize) * size_of::<Task>());
+    for thread in threads.iter().take(capacity as usize) {
+        let name = thread.name.as_bytes();
+        let name = &name[..name.len().min(NAME_MAX)];
+        bytes.extend_from_slice(&thread.id.to_le_bytes());
+        bytes.extend_from_slice(&thread.pid.unwrap_or(0).to_le_bytes());
+        bytes.extend_from_slice(&ticks_to_ms(thread.cpu_ticks).to_le_bytes());
+        let state = match thread.state {
+            sched::ThreadState::Running => STATE_RUNNING,
+            sched::ThreadState::Ready => STATE_READY,
+            sched::ThreadState::Blocked => STATE_BLOCKED,
+            sched::ThreadState::Dead => STATE_DEAD,
+        };
+        bytes.extend_from_slice(&state.to_le_bytes());
+        bytes.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        let flags = if thread.idle { TASK_IDLE } else { 0 };
+        bytes.extend_from_slice(&flags.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(name);
+        bytes.resize(bytes.len() + NAME_MAX - name.len(), 0);
+    }
+    copy_out(out, &bytes)?;
+    Ok(threads.len() as u64)
 }
 
 fn poll_descriptors(address: u64, count: u64, timeout_ms: u64, flags: u64) -> SysResult {

@@ -542,3 +542,49 @@ impl App for Run {
         changed
     }
 }
+
+/// The system's own figures, for the System Monitor.
+pub struct SystemSource;
+
+impl omit_gfx::monitor::Source for SystemSource {
+    fn now_ms(&mut self) -> u64 {
+        omit_rt::uptime_ms()
+    }
+
+    fn sample(&mut self) -> omit_gfx::monitor::Sample {
+        use omit_gfx::monitor::{Sample, State, Task};
+        use omit_rt::system;
+        let info = system::info();
+        let tasks = system::tasks()
+            .into_iter()
+            .map(|task| Task {
+                thread: task.thread,
+                pid: task.pid,
+                state: match task.state {
+                    system::STATE_RUNNING => State::Running,
+                    system::STATE_READY => State::Ready,
+                    system::STATE_BLOCKED => State::Waiting,
+                    _ => State::Ended,
+                },
+                cpu_ms: task.cpu_ms,
+                idle: task.idle,
+                name: task.name,
+            })
+            .collect();
+        Sample {
+            memory_total: info.memory_total,
+            memory_free: info.memory_free,
+            uptime_ms: info.uptime_ms,
+            tasks,
+        }
+    }
+
+    fn end(&mut self, pid: u64) -> bool {
+        omit_rt::kill(pid).is_ok()
+    }
+}
+
+/// A System Monitor window.
+pub fn monitor() -> omit_gfx::monitor::Monitor<SystemSource> {
+    omit_gfx::monitor::Monitor::new(SystemSource)
+}
