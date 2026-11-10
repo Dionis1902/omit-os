@@ -108,6 +108,9 @@ fn errno(error: FsError) -> Errno {
         FsError::AlreadyExists => Errno::Exists,
         FsError::NoSpace => Errno::NoSpace,
         FsError::DirectoryNotEmpty => Errno::NotEmpty,
+        FsError::Io => Errno::Io,
+        FsError::Busy => Errno::Busy,
+        FsError::CrossDevice => Errno::CrossDevice,
         FsError::InvalidName | FsError::InvalidArgument => Errno::InvalidArgument,
     }
 }

@@ -17,6 +17,7 @@ bench = false
 omit-abi.workspace = true
 omit-acpi.workspace = true
 omit-elf.workspace = true
+omit-ext2.workspace = true
 omit-bootproto.workspace = true
 omit-mm.workspace = true
 omit-shell.workspace = true

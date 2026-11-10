@@ -81,6 +81,13 @@ name = "omit-elf"
 version = "0.1.0"
 
 [[package]]
+name = "omit-ext2"
+version = "0.1.0"
+dependencies = [
+ "omit-vfs",
+]
+
+[[package]]
 name = "omit-kernel"
 version = "0.1.0"
 dependencies = [
@@ -89,6 +96,7 @@ dependencies = [
  "omit-acpi",
  "omit-bootproto",
  "omit-elf",
+ "omit-ext2",
  "omit-mm",
  "omit-shell",
  "omit-term",

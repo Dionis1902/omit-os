@@ -10,9 +10,9 @@ Windows code.
 the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
-(with a PS/2 keyboard) and on the serial console. There is no persistent
-storage and no driver model yet. Programs can use files, directories,
-dynamic memory and start other programs, but there are no pipes yet. See [Status](#status) for exactly what exists and what
+(with a PS/2 keyboard) and on the serial console, and can format, mount and
+use an ext2 filesystem on a VirtIO disk. There is no installer and no general
+driver model yet. See [Status](#status) for exactly what exists and what
 has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -106,7 +106,9 @@ All `xtask` commands:
 
 Options: `--release`, `--cmdline "<text>"` (image/run), `--cpu <model>`,
 `--memory <size>`, `--accel <name>` (e.g. `kvm`), `--iso` (use an ISO instead of
-a disk image), `--gdb` (run). Environment: `QEMU`, `OVMF_CODE` +
+a disk image), `--gdb` (run). `xtask run` also attaches a 32 MiB VirtIO data
+disk (`target/omit/<profile>/omit-data.img`) that persists between runs; try
+`mkfs vda`, `mkdir /mnt`, `mount vda /mnt`. Environment: `QEMU`, `OVMF_CODE` +
 `OVMF_VARS` (if the firmware is not in a standard location),
 `OMIT_TEST_TIMEOUT`.
 
@@ -218,7 +220,11 @@ addition from Milestone 8: a framebuffer text console.
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
+| PCI device discovery (`lspci`) | Working, tested in QEMU |
+| VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
+| ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
 | Pipes, input redirection, environment variables, signals, multi-threaded processes | Not started |
+| Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
 | SMP | Not started |
 | Persistent storage, drivers, Windows/Linux compatibility | Not started |
 
@@ -227,13 +233,14 @@ addition from Milestone 8: a framebuffer text console.
 On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 (TCG), and in CI additionally under KVM on the runner's host CPU:
 
-- 111 host unit tests (`cargo test`): boot protocol validation, memory map
+- 124 host unit tests (`cargo test`): boot protocol validation, memory map
   validation/merging, command line parsing, ELF parsing including malformed
   input, the buddy allocator and the heap (each including a randomised test
   against an independent model), ACPI table parsing, the VFS and RAM
   filesystem, the shell's parser, line editor and every command, the terminal
-  emulator and keyboard decoder, GPT and ISO writers.
-- 7 QEMU integration tests (`cargo xtask test`), in debug and release builds,
+  emulator and keyboard decoder, the ext2 driver (checked against
+  e2fsprogs), GPT and ISO writers.
+- 8 QEMU integration tests (`cargo xtask test`), in debug and release builds,
   with `-cpu max` and with `-cpu qemu64` (no 1 GiB pages, SMEP, SMAP or UMIP),
   with 96 MiB to 6 GiB of guest RAM, and booted from both the disk image and
   the ISO.
@@ -258,8 +265,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - The screen is a text console only: fixed font, ASCII, no graphics or
   windows. Debug builds draw noticeably slowly under emulation.
 - Only PS/2 keyboards with a US layout. No USB, no mouse.
-- There is no installer and no persistent storage: every boot starts from an
-  empty RAM filesystem.
+- There is no installer: the system always boots from the live image into
+  a RAM filesystem. A disk filesystem has to be mounted by hand.
+- The disk filesystem has no journal and no cache: it is slow, and a crash
+  mid-operation can leave it needing `e2fsck`. Only VirtIO disks are
+  supported, without partition tables.
 - Clock calibration needs the legacy PIT. On hardware without one the kernel
   reports a calibration timeout and stops; CPUID- or HPET-based calibration
   is future work. The TSC is used as the clock even when the CPU does not
@@ -309,6 +319,7 @@ libs/bootproto/  loader <-> kernel contract: BootInfo, memory map, command line
 libs/abi/        system call numbers and error codes shared by kernel and userspace
 libs/acpi/       ACPI static table parser (RSDP, RSDT/XSDT, MADT), host-tested
 libs/elf/        safe ELF64 program-header parser
+libs/ext2/       ext2 filesystem driver and formatter, verified against e2fsprogs
 libs/mm/         memory-management algorithms (buddy frame allocator), host-tested
 libs/term/       terminal emulator and keyboard scancode decoder, host-tested
 libs/vfs/        virtual filesystem layer and RAM filesystem, host-tested
@@ -356,6 +367,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0006 — Terminal, virtual filesystem and built-in shell](docs/adr/0006-terminal-filesystem-and-shell.md)
 - [ADR 0007 — Framebuffer console, keyboard input and releases](docs/adr/0007-display-keyboard-and-releases.md)
 - [ADR 0008 — Threads, processes and system calls](docs/adr/0008-threads-processes-and-system-calls.md)
+- [ADR 0009 — Storage: PCI, VirtIO block and ext2](docs/adr/0009-storage-and-persistent-filesystem.md)
 
 ## Testing
 
@@ -367,6 +379,7 @@ checks both QEMU's exit status and the serial log:
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`), and `echo`/`cat`/`tee` exercising arguments, relative paths, file reads and writes, error reporting and typed standard input |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
+| `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |
 | `use-after-unmap-faults` | A page is mapped, used, unmapped and read again: the read must fault, proving the mapping and its TLB entry are gone |
 | `page-fault-diagnostics` | Reading address `0x1000` raises a page fault with the right address and cause — which also proves the identity map is gone |
@@ -383,8 +396,10 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — are research-heavy and far away; nothing in
 this repository implements them yet.
 
-**Next step (Milestone 5):** PCI device discovery, a VirtIO block driver and
-a persistent filesystem, which is also what an installer needs.
+**Next step:** Milestone 6 — a driver framework with device matching and
+lifecycle, and a first look at reusing a Linux driver through a
+compatibility layer. Also still open from Milestone 5: an installer, and a
+Rust `std` port so that uutils coreutils can be built.
 
 ## Licence
 

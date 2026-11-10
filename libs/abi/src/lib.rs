@@ -159,6 +159,12 @@ pub enum Errno {
     NotEmpty = 39,
     /// No such process.
     NoSuchProcess = 3,
+    /// The storage device failed, or on-disk data is corrupt.
+    Io = 5,
+    /// The object is in use.
+    Busy = 16,
+    /// The operation would cross from one filesystem to another.
+    CrossDevice = 18,
     /// The file is not an executable program.
     NotExecutable = 8,
     /// Unknown system call number.
@@ -179,6 +185,9 @@ impl core::fmt::Display for Errno {
             Self::NoSpace => "No space left on device",
             Self::NotEmpty => "Directory not empty",
             Self::NoSuchProcess => "No such process",
+            Self::Io => "Input/output error",
+            Self::Busy => "Device or resource busy",
+            Self::CrossDevice => "Invalid cross-device link",
             Self::NotExecutable => "Exec format error",
             Self::NoSuchSyscall => "Function not implemented",
         })
@@ -205,6 +214,9 @@ impl Errno {
             28 => Some(Self::NoSpace),
             39 => Some(Self::NotEmpty),
             3 => Some(Self::NoSuchProcess),
+            5 => Some(Self::Io),
+            16 => Some(Self::Busy),
+            18 => Some(Self::CrossDevice),
             8 => Some(Self::NotExecutable),
             38 => Some(Self::NoSuchSyscall),
             _ => None,
@@ -245,6 +257,9 @@ mod tests {
             Errno::NoSpace,
             Errno::NotEmpty,
             Errno::NoSuchProcess,
+            Errno::Io,
+            Errno::Busy,
+            Errno::CrossDevice,
             Errno::NotExecutable,
             Errno::BadFileDescriptor,
             Errno::Fault,

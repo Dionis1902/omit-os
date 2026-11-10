@@ -11,11 +11,13 @@ extern crate alloc;
 
 mod arch;
 mod console;
+mod drivers;
 mod fbcon;
 mod fs;
 mod log;
 mod mm;
 mod panic;
+mod pci;
 mod process;
 mod sched;
 mod shell;
@@ -371,6 +373,26 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     sched::spawn("status-bar", ui::status_thread, 0).map_err(InitError::Scheduler)?;
     arch::syscall::init();
     info!("syscall: user mode and system call entry enabled");
+
+    // Devices. Storage is optional: the system runs from RAM without it.
+    let functions = pci::init();
+    info!("pci: {functions} function(s) found");
+    match drivers::virtio_blk::init() {
+        Ok(Some(sectors)) => {
+            // Reading the first sector proves the request path end to end
+            // without modifying the disk.
+            let mut sector = [0u8; drivers::block::SECTOR_SIZE];
+            match drivers::block::with_device("vda", |device| device.read(0, &mut sector)) {
+                Ok(()) => info!(
+                    "virtio-blk: vda ready, {} MiB; read test passed",
+                    (sectors * drivers::block::SECTOR_SIZE as u64) >> 20
+                ),
+                Err(error) => warn!("virtio-blk: vda read test failed: {error}"),
+            }
+        }
+        Ok(None) => info!("virtio-blk: no device"),
+        Err(error) => warn!("virtio-blk: cannot initialise device: {error}"),
+    }
 
     // 10. Audit the final address space, including the mappings made above.
     // SAFETY: `boot_info` is validated and describes the active address

@@ -1,0 +1,14 @@
+[package]
+name = "omit-ext2"
+description = "ext2 filesystem driver (read/write) and formatter for Omit OS (no_std + alloc)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+omit-vfs.workspace = true
+
+[lints]
+workspace = true

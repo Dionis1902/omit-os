@@ -26,7 +26,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::fmt::{self, Write};
 
-use omit_vfs::{FileType, FsError, Vfs, WriteMode, path};
+use alloc::boxed::Box;
+use omit_vfs::{FileSystem, FileType, FsError, Vfs, WriteMode, path};
 
 pub use line::LineEditor;
 
@@ -83,6 +84,19 @@ pub trait Host {
 
     /// Current memory usage.
     fn memory(&mut self) -> MemoryInfo;
+
+    /// One line of description per PCI device.
+    fn pci_devices(&mut self) -> Vec<String>;
+
+    /// Names and sizes in bytes of the block devices.
+    fn block_devices(&mut self) -> Vec<(String, u64)>;
+
+    /// Creates an empty filesystem on block device `device`, destroying
+    /// its contents.
+    fn format_device(&mut self, device: &str) -> Result<(), String>;
+
+    /// Opens the filesystem on block device `device` for mounting.
+    fn open_filesystem(&mut self, device: &str) -> Result<Box<dyn FileSystem>, String>;
 }
 
 /// Memory usage figures for `free`, in KiB.
@@ -126,7 +140,7 @@ type CommandResult = Result<(), Failure>;
 /// Names handled by the shell itself (`exit` is handled before dispatch).
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
-    "ps", "kill", "free",
+    "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -153,6 +167,11 @@ Built-in commands:
   ps                   list threads and processes
   kill PID             terminate a process
   free                 show memory usage
+  lspci                list PCI devices
+  lsblk                list block devices
+  mkfs DEVICE          create an empty ext2 filesystem (erases the device)
+  mount [DEVICE DIR]   mount a filesystem, or list what is mounted
+  umount DIR           unmount a filesystem
   uname [-a]           print system information
   clear                clear the screen
   exit                 leave the shell
@@ -171,6 +190,9 @@ pub struct Shell {
     foreground: Option<String>,
     /// Set by `run_program` when the caller has to wait for a process.
     pending_wait: Option<u64>,
+    /// What is mounted at each mount point, in the VFS's order; the first
+    /// is the root filesystem.
+    mount_sources: Vec<String>,
 }
 
 impl Shell {
@@ -182,6 +204,7 @@ impl Shell {
             last_status: 0,
             foreground: None,
             pending_wait: None,
+            mount_sources: alloc::vec!["ramfs".into()],
         }
     }
 
@@ -317,6 +340,65 @@ impl Shell {
             "clear" => Ok(out.write_str("\x1b[2J\x1b[H")?),
             "ps" => self.ps(args, host, out),
             "kill" => self.kill(args, host),
+            "lspci" => {
+                for line in host.pci_devices() {
+                    writeln!(out, "{line}")?;
+                }
+                Ok(())
+            }
+            "lsblk" => {
+                writeln!(out, "NAME        SIZE")?;
+                for (device, bytes) in host.block_devices() {
+                    writeln!(out, "{device:<6} {:>5} MiB", bytes >> 20)?;
+                }
+                Ok(())
+            }
+            "mkfs" => {
+                let [device] = args else {
+                    return Err(Failure("usage: mkfs DEVICE".into()));
+                };
+                host.format_device(device)
+                    .map_err(|error| Failure(format!("{device}: {error}")))?;
+                Ok(writeln!(
+                    out,
+                    "mkfs: created an ext2 filesystem on {device}"
+                )?)
+            }
+            "mount" => match args {
+                [] => {
+                    for (point, source) in vfs.mount_points().iter().zip(&self.mount_sources) {
+                        writeln!(out, "{source} on {point}")?;
+                    }
+                    Ok(())
+                }
+                [device, directory] => {
+                    let target = self.resolve(directory)?;
+                    let filesystem = host
+                        .open_filesystem(device)
+                        .map_err(|error| Failure(format!("{device}: {error}")))?;
+                    vfs.mount(&target, filesystem)
+                        .map_err(|e| fs_failure(directory, e))?;
+                    self.mount_sources.push(device.clone());
+                    Ok(())
+                }
+                _ => Err(Failure("usage: mount [DEVICE DIR]".into())),
+            },
+            "umount" => {
+                let [directory] = args else {
+                    return Err(Failure("usage: umount DIR".into()));
+                };
+                let target = self.resolve(directory)?;
+                if target == self.cwd || path::is_inside(&self.cwd, &target) {
+                    return Err(fs_failure(directory, FsError::Busy));
+                }
+                let index = vfs.mount_points().iter().position(|point| *point == target);
+                // Dropping the filesystem releases its device.
+                drop(vfs.unmount(&target).map_err(|e| fs_failure(directory, e))?);
+                if let Some(index) = index {
+                    self.mount_sources.remove(index);
+                }
+                Ok(())
+            }
             _ if !BUILTINS.contains(&name) => Err(Failure(NOT_BUILTIN.into())),
             "free" => {
                 let memory = host.memory();
@@ -711,6 +793,7 @@ mod tests {
         last_args: Vec<String>,
         last_cwd: String,
         last_stdout: Option<(String, bool)>,
+        formatted: u32,
     }
 
     impl Host for MockHost {
@@ -735,6 +818,31 @@ mod tests {
         fn kill(&mut self, pid: u64) -> bool {
             self.killed.push(pid);
             pid as usize <= self.spawned.len()
+        }
+
+        fn pci_devices(&mut self) -> Vec<String> {
+            alloc::vec!["00:00.0 8086:29c0 Host bridge".into()]
+        }
+
+        fn block_devices(&mut self) -> Vec<(String, u64)> {
+            alloc::vec![("vda".into(), 32 << 20)]
+        }
+
+        fn format_device(&mut self, device: &str) -> Result<(), String> {
+            if device == "vda" {
+                self.formatted += 1;
+                Ok(())
+            } else {
+                Err("no such block device".into())
+            }
+        }
+
+        fn open_filesystem(&mut self, device: &str) -> Result<Box<dyn FileSystem>, String> {
+            match (device, self.formatted) {
+                ("vda", 0) => Err("not an ext2 filesystem".into()),
+                ("vda", _) => Ok(Box::new(RamFs::new())),
+                _ => Err("no such block device".into()),
+            }
         }
 
         fn memory(&mut self) -> MemoryInfo {
@@ -1045,6 +1153,57 @@ mod tests {
             s.err("a & b"),
             "omsh: syntax error: '&' is only allowed at the end of a command\n"
         );
+    }
+
+    #[test]
+    fn devices_and_mounting() {
+        let mut s = Session::new();
+        assert_eq!(s.ok("lspci"), "00:00.0 8086:29c0 Host bridge\n");
+        assert_eq!(s.ok("lsblk"), "NAME        SIZE\nvda       32 MiB\n");
+        assert_eq!(s.ok("mount"), "ramfs on /\n");
+
+        s.ok("mkdir /mnt");
+        assert_eq!(
+            s.err("mount vda /mnt"),
+            "mount: vda: not an ext2 filesystem\n"
+        );
+        assert_eq!(s.err("mkfs sdz"), "mkfs: sdz: no such block device\n");
+        assert_eq!(
+            s.ok("mkfs vda"),
+            "mkfs: created an ext2 filesystem on vda\n"
+        );
+        assert_eq!(
+            s.err("mount vda /nope"),
+            "mount: /nope: No such file or directory\n"
+        );
+        s.ok("mount vda /mnt");
+        assert_eq!(s.ok("mount"), "ramfs on /\nvda on /mnt\n");
+        assert_eq!(
+            s.err("mount vda /mnt"),
+            "mount: /mnt: Device or resource busy\n"
+        );
+
+        s.ok("echo persistent > /mnt/file");
+        assert_eq!(s.ok("cat /mnt/file"), "persistent\n");
+        assert_eq!(
+            s.err("mv /mnt/file /file"),
+            "mv: /file: Invalid cross-device link\n"
+        );
+        s.ok("cp /mnt/file /copy");
+        assert_eq!(s.err("rm -r /mnt"), "rm: /mnt: Device or resource busy\n");
+
+        s.ok("cd /mnt");
+        assert_eq!(
+            s.err("umount /mnt"),
+            "umount: /mnt: Device or resource busy\n"
+        );
+        s.ok("cd /");
+        s.ok("umount /mnt");
+        assert_eq!(s.ok("mount"), "ramfs on /\n");
+        assert_eq!(s.ok("ls /mnt"), "");
+        assert_eq!(s.err("umount /mnt"), "umount: /mnt: Invalid argument\n");
+        assert_eq!(s.err("umount /"), "umount: /: Device or resource busy\n");
+        assert_eq!(s.err("mount vda"), "mount: usage: mount [DEVICE DIR]\n");
     }
 
     #[test]

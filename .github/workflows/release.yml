@@ -27,7 +27,7 @@ jobs:
       - name: Install QEMU and OVMF
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf
+          sudo apt-get install -y --no-install-recommends qemu-system-x86 ovmf e2fsprogs
 
       - name: Determine version
         id: version

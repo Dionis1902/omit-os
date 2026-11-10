@@ -14,6 +14,7 @@ pub mod idt;
 pub mod interrupts;
 pub mod ioapic;
 pub mod paging;
+pub mod pci_config;
 pub mod pic;
 mod pit;
 mod port;

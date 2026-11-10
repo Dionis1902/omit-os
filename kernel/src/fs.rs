@@ -57,3 +57,71 @@ pub fn root() -> Option<RootGuard> {
     let guard = ROOT.lock();
     guard.is_some().then(|| RootGuard(guard))
 }
+
+/// Names of block devices that currently hold a mounted filesystem.
+static IN_USE: crate::sync::SpinLock<alloc::vec::Vec<alloc::string::String>> =
+    crate::sync::SpinLock::new(alloc::vec::Vec::new());
+
+/// A block device seen as a byte-addressed store, for filesystem drivers.
+/// While one exists, its device counts as in use.
+pub struct Disk {
+    name: alloc::string::String,
+    size: u64,
+}
+
+impl Disk {
+    /// Claims the block device `name`. Fails if it does not exist or is
+    /// already claimed (for example because it is mounted).
+    pub fn open(name: &str) -> Result<Self, &'static str> {
+        use crate::drivers::block::{self, SECTOR_SIZE};
+        let sectors = block::list()
+            .into_iter()
+            .find(|(device, _)| device == name)
+            .map(|(_, sectors)| sectors)
+            .ok_or("no such block device")?;
+        let mut in_use = IN_USE.lock();
+        if in_use.iter().any(|device| device == name) {
+            return Err("device is in use");
+        }
+        in_use.push(name.into());
+        Ok(Self {
+            name: name.into(),
+            size: sectors * SECTOR_SIZE as u64,
+        })
+    }
+}
+
+impl Drop for Disk {
+    fn drop(&mut self) {
+        IN_USE.lock().retain(|device| *device != self.name);
+    }
+}
+
+impl omit_ext2::BlockIo for Disk {
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn read(&mut self, offset: u64, buffer: &mut [u8]) -> Result<(), omit_ext2::IoError> {
+        use crate::drivers::block::{self, SECTOR_SIZE};
+        // Filesystem drivers only issue sector-aligned requests.
+        if !offset.is_multiple_of(SECTOR_SIZE as u64) || !buffer.len().is_multiple_of(SECTOR_SIZE) {
+            return Err(omit_ext2::IoError);
+        }
+        block::with_device(&self.name, |device| {
+            device.read(offset / SECTOR_SIZE as u64, buffer)
+        })
+        .map_err(|_| omit_ext2::IoError)
+    }
+
+    fn write(&mut self, offset: u64, data: &[u8]) -> Result<(), omit_ext2::IoError> {
+        use crate::drivers::block::{self, SECTOR_SIZE};
+        if !offset.is_multiple_of(SECTOR_SIZE as u64) || !data.len().is_multiple_of(SECTOR_SIZE) {
+            return Err(omit_ext2::IoError);
+        }
+        block::with_device(&self.name, |device| {
+            device.write(offset / SECTOR_SIZE as u64, data)
+        })
+        .map_err(|_| omit_ext2::IoError)
+    }
+}

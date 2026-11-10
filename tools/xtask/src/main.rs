@@ -268,6 +268,17 @@ fn build_iso(artifacts: &Artifacts, cmdline: &str, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Size of the data disk attached to the virtual machine.
+const DATA_DISK_SIZE: u64 = 32 << 20;
+
+/// Creates an empty (all-zero) data disk image at `path`, replacing any
+/// existing file.
+fn create_data_disk(path: &Path) -> Result<()> {
+    let file = fs::File::create(path)?;
+    file.set_len(DATA_DISK_SIZE)?;
+    Ok(())
+}
+
 /// Locates the OVMF firmware code and variable-store images.
 fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
     if let (Ok(code), Ok(vars)) = (std::env::var("OVMF_CODE"), std::env::var("OVMF_VARS")) {
@@ -326,6 +337,7 @@ fn find_ovmf() -> Result<(PathBuf, PathBuf)> {
 fn qemu_command(
     image: &Path,
     vars: &Path,
+    data_disk: &Path,
     monitor: Option<&Path>,
     options: &Options,
 ) -> Result<Command> {
@@ -359,6 +371,13 @@ fn qemu_command(
         ))
         .arg("-drive")
         .arg(media)
+        // A VirtIO disk for persistent data, separate from the boot medium.
+        .arg("-drive")
+        .arg(format!(
+            "if=none,id=data,format=raw,file={}",
+            data_disk.display()
+        ))
+        .args(["-device", "virtio-blk-pci,drive=data"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
@@ -424,7 +443,12 @@ fn cmd_dist(options: &Options) -> Result<()> {
 fn cmd_run(options: &Options) -> Result<ExitCode> {
     let image = cmd_image(options)?;
     let vars = out_dir(options)?.join("ovmf-vars.fd");
-    let mut command = qemu_command(&image, &vars, None, options)?;
+    // The data disk of `xtask run` persists between runs.
+    let data_disk = out_dir(options)?.join("omit-data.img");
+    if !data_disk.exists() {
+        create_data_disk(&data_disk)?;
+    }
+    let mut command = qemu_command(&image, &vars, &data_disk, None, options)?;
     if options.gdb {
         command.args(["-s", "-S"]);
         eprintln!("xtask: QEMU is paused; attach with `gdb -ex 'target remote :1234'`");
@@ -456,6 +480,10 @@ struct BootTest {
     /// appears, and `exit` is sent at the end. Output is matched with line
     /// endings normalised to `\n`.
     script: &'static [(&'static str, &'static str)],
+    /// A second shell session, run after rebooting the machine with the
+    /// same data disk. Used to test that data persists. When non-empty,
+    /// the data disk is also checked with `e2fsck` afterwards.
+    reboot_script: &'static [(&'static str, &'static str)],
     /// Also test the screen and keyboard: after the script, type a command
     /// on the emulated PS/2 keyboard, check that it runs, then take a
     /// screenshot and check what the framebuffer console drew.
@@ -480,10 +508,12 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] console: serial input enabled",
             "[INFO ] sched: round-robin scheduler started; preemption self-test passed",
             "[INFO ] syscall: user mode and system call entry enabled",
+            "[INFO ] virtio-blk: vda ready, 32 MiB; read test passed",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[],
+        reboot_script: &[],
         display: false,
     },
     BootTest {
@@ -605,6 +635,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Line editing: the typo is erased with backspace before Enter.
             ("echo line-edix\x7fting", "\nline-editing\n"),
         ],
+        reboot_script: &[],
         display: false,
     },
     BootTest {
@@ -618,7 +649,59 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
         script: &[("echo typed-on-serial", "\ntyped-on-serial\n")],
+        reboot_script: &[],
         display: true,
+    },
+    BootTest {
+        name: "disk-persistence",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] virtio-blk: vda ready, 32 MiB; read test passed",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        // First boot: create a filesystem on the blank disk and fill it.
+        script: &[
+            ("lsblk", "\nvda       32 MiB\n"),
+            ("lspci", " 1af4:1001 SCSI storage controller\n"),
+            ("mkdir /mnt", ""),
+            ("mount vda /mnt", "\nmount: vda: not an ext2 filesystem\n"),
+            ("mkfs vda", "\nmkfs: created an ext2 filesystem on vda\n"),
+            ("mount vda /mnt", "mount vda /mnt\nomit:/# "),
+            ("mount", "\nramfs on /\nvda on /mnt\n"),
+            ("ls /mnt", "\nlost+found\n"),
+            ("mkdir -p /mnt/home/user", ""),
+            (
+                "echo written before the reboot > /mnt/home/user/note.txt",
+                "",
+            ),
+            ("echo second line >> /mnt/home/user/note.txt", ""),
+            // A multi-block binary file, written by a program.
+            ("cp /bin/hello /mnt/hello", ""),
+            ("/bin/ls -l /bin > /mnt/listing.txt", ""),
+            ("fileops /mnt", "\nfileops: all checks passed\n"),
+            ("touch /mnt/doomed", ""),
+            ("rm /mnt/doomed", ""),
+            ("mkfs vda", "\nmkfs: vda: device is in use\n"),
+            ("umount /mnt", "umount /mnt\nomit:/# "),
+            ("ls /mnt", "ls /mnt\nomit:/# "),
+        ],
+        // Second boot, same disk: everything must still be there.
+        reboot_script: &[
+            ("mkdir /mnt", ""),
+            ("mount vda /mnt", "mount vda /mnt\nomit:/# "),
+            ("ls /mnt", "\nhello\nhome\nlisting.txt\nlost+found\n"),
+            (
+                "cat /mnt/home/user/note.txt",
+                "\nwritten before the reboot\nsecond line\n",
+            ),
+            ("cat /mnt/listing.txt", " hello\n"),
+            // A program loaded from the disk filesystem.
+            ("/mnt/hello", "\nHello from user mode! I am process 1 "),
+            ("umount /mnt", ""),
+        ],
+        display: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -633,6 +716,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL EXCEPTION"],
         script: &[],
+        reboot_script: &[],
         display: false,
     },
     BootTest {
@@ -646,6 +730,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
+        reboot_script: &[],
         display: false,
     },
     BootTest {
@@ -659,6 +744,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC", "[ERROR]"],
         script: &[],
+        reboot_script: &[],
         display: false,
     },
     BootTest {
@@ -671,6 +757,7 @@ const BOOT_TESTS: &[BootTest] = &[
         ],
         must_not_contain: &["KERNEL PANIC"],
         script: &[],
+        reboot_script: &[],
         display: false,
     },
 ];
@@ -842,6 +929,27 @@ fn check_screenshot(image: &Screenshot) -> Vec<String> {
     failures
 }
 
+/// Checks the ext2 filesystem in `image` with `e2fsck`, an implementation
+/// independent of the kernel's driver. Returns the problems found. If
+/// `e2fsck` is not installed the check is skipped with a note.
+fn check_ext2(image: &Path) -> Vec<String> {
+    let Some(e2fsck) = ["/usr/sbin/e2fsck", "/sbin/e2fsck", "/usr/bin/e2fsck"]
+        .iter()
+        .find(|path| Path::new(path).exists())
+    else {
+        eprintln!("xtask: note: e2fsck not found; skipping the check of the data disk");
+        return Vec::new();
+    };
+    match Command::new(e2fsck).arg("-fn").arg(image).output() {
+        Ok(output) if output.status.success() => Vec::new(),
+        Ok(output) => vec![format!(
+            "e2fsck found problems on the data disk:\n{}",
+            String::from_utf8_lossy(&output.stdout)
+        )],
+        Err(error) => vec![format!("cannot run e2fsck: {error}")],
+    }
+}
+
 /// Finds the first shell prompt (`omit:<cwd># `) at or after `from` and
 /// returns the offset just past it.
 fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
@@ -1009,6 +1117,8 @@ fn run_boot_test(
     let image = dir.join(format!("test-{}.img", test.name));
     let vars = dir.join(format!("test-{}.vars.fd", test.name));
     let log = dir.join(format!("test-{}.serial.log", test.name));
+    let data_disk = dir.join(format!("test-{}.data.img", test.name));
+    create_data_disk(&data_disk)?;
 
     // Tests without a script must not sit at the shell prompt forever.
     let shell = if test.script.is_empty() {
@@ -1027,6 +1137,7 @@ fn run_boot_test(
         qemu_command(
             &image,
             &vars,
+            &data_disk,
             display.as_ref().map(|d| d.monitor.as_path()),
             options,
         )?,
@@ -1037,6 +1148,27 @@ fn run_boot_test(
     )?;
     if let Some(display) = &display {
         let _ = fs::remove_file(&display.monitor);
+    }
+    let mut run = run;
+    if !test.reboot_script.is_empty() {
+        // Same machine, same data disk, fresh boot.
+        let second = run_qemu_captured(
+            qemu_command(&image, &vars, &data_disk, None, options)?,
+            test.reboot_script,
+            None,
+            timeout,
+            &mut failures,
+        )?;
+        if second.exit != Some(test.expected_exit) {
+            failures.push(format!(
+                "after reboot: QEMU exit status {:?}, expected {}",
+                second.exit, test.expected_exit
+            ));
+        }
+        run.serial.push_str("\n===== reboot =====\n");
+        run.serial.push_str(&second.serial);
+        run.elapsed += second.elapsed;
+        failures.extend(check_ext2(&data_disk));
     }
     fs::write(&log, &run.serial)?;
 
@@ -1067,6 +1199,7 @@ fn run_boot_test(
     }
     let _ = fs::remove_file(&image);
     let _ = fs::remove_file(&vars);
+    let _ = fs::remove_file(&data_disk);
     Ok((failures, run))
 }
 

@@ -8,6 +8,7 @@ members = [
     "libs/acpi",
     "libs/bootproto",
     "libs/elf",
+    "libs/ext2",
     "libs/mm",
     "libs/term",
     "libs/vfs",
@@ -22,6 +23,7 @@ default-members = [
     "libs/acpi",
     "libs/bootproto",
     "libs/elf",
+    "libs/ext2",
     "libs/mm",
     "libs/term",
     "libs/vfs",
@@ -41,6 +43,7 @@ omit-abi = { path = "libs/abi" }
 omit-acpi = { path = "libs/acpi" }
 omit-bootproto = { path = "libs/bootproto" }
 omit-elf = { path = "libs/elf" }
+omit-ext2 = { path = "libs/ext2" }
 omit-mm = { path = "libs/mm" }
 omit-rt = { path = "userspace/rt" }
 omit-shell = { path = "shell" }

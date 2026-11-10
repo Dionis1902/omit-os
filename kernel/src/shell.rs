@@ -5,11 +5,13 @@
 //! its environment: console input and output, the root filesystem, and the
 //! ability to run programs as processes.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use omit_shell::{Host, LineEditor, MemoryInfo, Outcome, Shell, SystemInfo, TaskInfo};
+use omit_vfs::FileSystem;
 
 use crate::console::{self, Writer};
 use crate::process::OpenFile;
@@ -34,6 +36,33 @@ impl Host for KernelHost {
             append,
         });
         process::spawn(name, image, args, cwd, stdout).map_err(|error| format!("{error}"))
+    }
+
+    fn pci_devices(&mut self) -> Vec<String> {
+        crate::pci::devices()
+            .iter()
+            .map(|device| format!("{device}"))
+            .collect()
+    }
+
+    fn block_devices(&mut self) -> Vec<(String, u64)> {
+        crate::drivers::block::list()
+            .into_iter()
+            .map(|(name, sectors)| (name, sectors * crate::drivers::block::SECTOR_SIZE as u64))
+            .collect()
+    }
+
+    fn format_device(&mut self, device: &str) -> Result<(), String> {
+        let mut disk = fs::Disk::open(device).map_err(String::from)?;
+        omit_ext2::format(&mut disk).map_err(|error| format!("{error}"))
+    }
+
+    fn open_filesystem(&mut self, device: &str) -> Result<Box<dyn FileSystem>, String> {
+        let disk = fs::Disk::open(device).map_err(String::from)?;
+        match omit_ext2::Ext2::mount(disk) {
+            Ok(filesystem) => Ok(Box::new(filesystem)),
+            Err(error) => Err(format!("{error}")),
+        }
     }
 
     fn kill(&mut self, pid: u64) -> bool {

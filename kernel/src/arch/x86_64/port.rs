@@ -50,3 +50,19 @@ pub unsafe fn outl(port: u16, value: u32) {
              options(nomem, nostack, preserves_flags));
     }
 }
+
+/// Reads a 32-bit value from I/O port `port`.
+///
+/// # Safety
+///
+/// Same contract as [`inb`].
+#[inline]
+pub unsafe fn inl(port: u16) -> u32 {
+    let value: u32;
+    // SAFETY: see `inb`.
+    unsafe {
+        asm!("in eax, dx", in("dx") port, out("eax") value,
+             options(nomem, nostack, preserves_flags));
+    }
+    value
+}

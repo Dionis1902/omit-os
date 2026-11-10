@@ -104,6 +104,16 @@ pub fn file_name(path: &str) -> Option<&str> {
     split(path).ok().flatten().map(|(_, name)| name)
 }
 
+/// Whether the normalised absolute path `path` lies strictly inside the
+/// directory `directory` (also normalised and absolute).
+pub fn is_inside(path: &str, directory: &str) -> bool {
+    if directory == "/" {
+        return path != "/";
+    }
+    path.strip_prefix(directory)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Joins a normalised absolute directory path and a single component.
 pub fn join(dir: &str, name: &str) -> String {
     let mut joined = String::from(dir);

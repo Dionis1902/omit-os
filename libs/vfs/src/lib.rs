@@ -30,6 +30,7 @@ pub mod tar;
 
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 /// Identifies a file or directory within one filesystem.
@@ -90,6 +91,12 @@ pub enum FsError {
     InvalidArgument,
     /// Out of memory or storage.
     NoSpace,
+    /// The storage device failed, or the on-disk data is corrupt.
+    Io,
+    /// The object is in use (for example, it is a mount point).
+    Busy,
+    /// The operation would move something between filesystems.
+    CrossDevice,
 }
 
 impl core::fmt::Display for FsError {
@@ -103,6 +110,9 @@ impl core::fmt::Display for FsError {
             Self::InvalidName => "Invalid file name",
             Self::InvalidArgument => "Invalid argument",
             Self::NoSpace => "No space left on device",
+            Self::Io => "Input/output error",
+            Self::Busy => "Device or resource busy",
+            Self::CrossDevice => "Invalid cross-device link",
         })
     }
 }
@@ -164,91 +174,202 @@ pub enum WriteMode {
     Append,
 }
 
-/// Path-based access to a mounted filesystem.
+/// One mounted filesystem.
+struct Mount {
+    /// Normalised absolute path of the mount point; `/` for the root.
+    path: String,
+    filesystem: Box<dyn FileSystem>,
+}
+
+/// Path-based access to the mounted filesystems.
 ///
 /// Every `path` argument must be absolute and normalised; use
 /// [`path::normalize`] to turn user input into that form.
+///
+/// One filesystem is the root; others can be mounted on existing
+/// directories. A path belongs to the filesystem with the longest mount
+/// point that is a prefix of it.
 pub struct Vfs {
-    root: Box<dyn FileSystem>,
+    /// The root filesystem is always first.
+    mounts: Vec<Mount>,
+}
+
+/// A location inside one mounted filesystem.
+#[derive(Clone, Copy)]
+struct Location {
+    mount: usize,
+    inode: InodeId,
 }
 
 impl Vfs {
     /// Creates a VFS with `root` mounted at `/`.
     pub fn new(root: Box<dyn FileSystem>) -> Self {
-        Self { root }
+        Self {
+            mounts: vec![Mount {
+                path: "/".into(),
+                filesystem: root,
+            }],
+        }
     }
 
-    /// Walks `path` from the root and returns the inode it names.
-    fn resolve(&self, path: &str) -> FsResult<InodeId> {
-        let mut inode = self.root.root();
-        for component in path::components(path)? {
-            if self.root.metadata(inode)?.file_type != FileType::Directory {
+    /// Mounts `filesystem` on the existing directory `path`. The directory's
+    /// own contents are hidden while the mount is in place.
+    pub fn mount(&mut self, path: &str, filesystem: Box<dyn FileSystem>) -> FsResult<()> {
+        if self.metadata(path)?.file_type != FileType::Directory {
+            return Err(FsError::NotADirectory);
+        }
+        if self.mounts.iter().any(|mount| mount.path == path) {
+            return Err(FsError::Busy);
+        }
+        self.mounts.push(Mount {
+            path: path.into(),
+            filesystem,
+        });
+        Ok(())
+    }
+
+    /// Unmounts the filesystem mounted at `path` and returns it. Fails with
+    /// [`FsError::Busy`] if another filesystem is mounted below it, and
+    /// with [`FsError::InvalidArgument`] for the root or a path that is not
+    /// a mount point.
+    pub fn unmount(&mut self, path: &str) -> FsResult<Box<dyn FileSystem>> {
+        let index = self
+            .mounts
+            .iter()
+            .position(|mount| mount.path == path)
+            .filter(|&index| index != 0)
+            .ok_or(FsError::InvalidArgument)?;
+        if self
+            .mounts
+            .iter()
+            .any(|mount| path::is_inside(&mount.path, path))
+        {
+            return Err(FsError::Busy);
+        }
+        Ok(self.mounts.remove(index).filesystem)
+    }
+
+    /// The mount points, root first.
+    pub fn mount_points(&self) -> Vec<String> {
+        self.mounts.iter().map(|mount| mount.path.clone()).collect()
+    }
+
+    fn is_mount_point(&self, path: &str) -> bool {
+        self.mounts.iter().any(|mount| mount.path == path)
+    }
+
+    /// Finds the filesystem `path` belongs to and the path within it.
+    fn locate<'p>(&self, path: &'p str) -> FsResult<(usize, &'p str)> {
+        // Validates the path as a side effect.
+        let _ = path::components(path)?;
+        let (index, mount) = self
+            .mounts
+            .iter()
+            .enumerate()
+            .filter(|(_, mount)| mount.path == path || path::is_inside(path, &mount.path))
+            .max_by_key(|(_, mount)| mount.path.len())
+            .ok_or(FsError::NotFound)?;
+        let inner = if mount.path == "/" {
+            path
+        } else if path.len() == mount.path.len() {
+            "/"
+        } else {
+            &path[mount.path.len()..]
+        };
+        Ok((index, inner))
+    }
+
+    fn fs(&self, mount: usize) -> &dyn FileSystem {
+        self.mounts[mount].filesystem.as_ref()
+    }
+
+    fn fs_mut(&mut self, mount: usize) -> &mut dyn FileSystem {
+        self.mounts[mount].filesystem.as_mut()
+    }
+
+    /// Walks `path` and returns where it leads.
+    fn resolve(&self, path: &str) -> FsResult<Location> {
+        let (mount, inner) = self.locate(path)?;
+        let filesystem = self.fs(mount);
+        let mut inode = filesystem.root();
+        for component in path::components(inner)? {
+            if filesystem.metadata(inode)?.file_type != FileType::Directory {
                 return Err(FsError::NotADirectory);
             }
-            inode = self.root.lookup(inode, component)?;
+            inode = filesystem.lookup(inode, component)?;
         }
-        Ok(inode)
+        Ok(Location { mount, inode })
     }
 
     /// Resolves the parent directory of `path` and returns it with the final
-    /// component. Fails for `/`, which has no parent.
-    fn resolve_parent<'p>(&self, path: &'p str) -> FsResult<(InodeId, &'p str)> {
+    /// component. Fails for `/` and for mount points, which have no entry
+    /// in a parent directory of their own filesystem.
+    fn resolve_parent<'p>(&self, path: &'p str) -> FsResult<(Location, &'p str)> {
         let (parent, name) = path::split(path)?.ok_or(FsError::InvalidArgument)?;
-        let dir = self.resolve(parent)?;
-        if self.root.metadata(dir)?.file_type != FileType::Directory {
+        if self.is_mount_point(path) {
+            return Err(FsError::Busy);
+        }
+        let location = self.resolve(parent)?;
+        if self.fs(location.mount).metadata(location.inode)?.file_type != FileType::Directory {
             return Err(FsError::NotADirectory);
         }
-        Ok((dir, name))
+        Ok((location, name))
     }
 
     /// Describes the file or directory at `path`.
     pub fn metadata(&self, path: &str) -> FsResult<Metadata> {
-        self.root.metadata(self.resolve(path)?)
+        let location = self.resolve(path)?;
+        self.fs(location.mount).metadata(location.inode)
     }
 
     /// Lists the directory at `path`, sorted by name.
     pub fn read_dir(&self, path: &str) -> FsResult<Vec<DirEntry>> {
-        let inode = self.resolve(path)?;
-        if self.root.metadata(inode)?.file_type != FileType::Directory {
+        let location = self.resolve(path)?;
+        let filesystem = self.fs(location.mount);
+        if filesystem.metadata(location.inode)?.file_type != FileType::Directory {
             return Err(FsError::NotADirectory);
         }
-        self.root.read_dir(inode)
+        filesystem.read_dir(location.inode)
     }
 
     /// Creates the directory `path`. Its parent must exist.
     pub fn create_dir(&mut self, path: &str) -> FsResult<()> {
-        if path == "/" {
+        if path == "/" || self.is_mount_point(path) {
             return Err(FsError::AlreadyExists);
         }
-        let (dir, name) = self.resolve_parent(path)?;
-        self.root.create(dir, name, FileType::Directory).map(|_| ())
+        let (parent, name) = self.resolve_parent(path)?;
+        self.fs_mut(parent.mount)
+            .create(parent.inode, name, FileType::Directory)
+            .map(|_| ())
     }
 
     /// Creates the directory `path` and any missing ancestors. Succeeds if
     /// it already exists as a directory.
     pub fn create_dir_all(&mut self, path: &str) -> FsResult<()> {
-        let mut inode = self.root.root();
-        for component in path::components(path)? {
-            inode = match self.root.lookup(inode, component) {
-                Ok(existing) => {
-                    if self.root.metadata(existing)?.file_type != FileType::Directory {
-                        return Err(FsError::NotADirectory);
-                    }
-                    existing
-                }
-                Err(FsError::NotFound) => {
-                    self.root.create(inode, component, FileType::Directory)?
-                }
+        // Validate first, then create one prefix at a time so that mount
+        // points along the way are honoured.
+        let _ = path::components(path)?;
+        let mut end = 0;
+        while end < path.len() {
+            end = path[end + 1..]
+                .find('/')
+                .map_or(path.len(), |offset| end + 1 + offset);
+            let prefix = &path[..end];
+            match self.metadata(prefix) {
+                Ok(metadata) if metadata.file_type == FileType::Directory => {}
+                Ok(_) => return Err(FsError::NotADirectory),
+                Err(FsError::NotFound) => self.create_dir(prefix)?,
                 Err(other) => return Err(other),
-            };
+            }
         }
         Ok(())
     }
 
     /// Reads the whole file at `path`.
     pub fn read_file(&self, path: &str) -> FsResult<Vec<u8>> {
-        let inode = self.resolve(path)?;
-        let metadata = self.root.metadata(inode)?;
+        let location = self.resolve(path)?;
+        let filesystem = self.fs(location.mount);
+        let metadata = filesystem.metadata(location.inode)?;
         if metadata.file_type != FileType::File {
             return Err(FsError::IsADirectory);
         }
@@ -256,34 +377,35 @@ impl Vfs {
         let mut data = Vec::new();
         data.try_reserve_exact(size).map_err(|_| FsError::NoSpace)?;
         data.resize(size, 0);
-        let read = self.root.read(inode, 0, &mut data)?;
+        let read = filesystem.read(location.inode, 0, &mut data)?;
         data.truncate(read);
         Ok(data)
     }
 
     /// Writes `data` to the file at `path`, creating it if necessary.
     pub fn write_file(&mut self, path: &str, data: &[u8], mode: WriteMode) -> FsResult<()> {
-        if path == "/" {
+        if path == "/" || self.is_mount_point(path) {
             return Err(FsError::IsADirectory);
         }
-        let (dir, name) = self.resolve_parent(path)?;
-        let inode = match self.root.lookup(dir, name) {
+        let (parent, name) = self.resolve_parent(path)?;
+        let filesystem = self.fs_mut(parent.mount);
+        let inode = match filesystem.lookup(parent.inode, name) {
             Ok(inode) => inode,
-            Err(FsError::NotFound) => self.root.create(dir, name, FileType::File)?,
+            Err(FsError::NotFound) => filesystem.create(parent.inode, name, FileType::File)?,
             Err(other) => return Err(other),
         };
-        let metadata = self.root.metadata(inode)?;
+        let metadata = filesystem.metadata(inode)?;
         if metadata.file_type != FileType::File {
             return Err(FsError::IsADirectory);
         }
         let offset = match mode {
             WriteMode::Truncate => {
-                self.root.truncate(inode, 0)?;
+                filesystem.truncate(inode, 0)?;
                 0
             }
             WriteMode::Append => metadata.size,
         };
-        let written = self.root.write(inode, offset, data)?;
+        let written = filesystem.write(inode, offset, data)?;
         if written != data.len() {
             return Err(FsError::NoSpace);
         }
@@ -293,64 +415,91 @@ impl Vfs {
     /// Reads from the file at `path` starting at `offset` into `buffer`;
     /// returns the number of bytes read (0 at or past the end).
     pub fn read_at(&self, path: &str, offset: u64, buffer: &mut [u8]) -> FsResult<usize> {
-        let inode = self.resolve(path)?;
-        if self.root.metadata(inode)?.file_type != FileType::File {
+        let location = self.resolve(path)?;
+        let filesystem = self.fs(location.mount);
+        if filesystem.metadata(location.inode)?.file_type != FileType::File {
             return Err(FsError::IsADirectory);
         }
-        self.root.read(inode, offset, buffer)
+        filesystem.read(location.inode, offset, buffer)
     }
 
     /// Writes `data` to the existing file at `path` starting at `offset`
     /// (or at its end, with `offset` of `None`); returns the offset just
     /// past the written data.
     pub fn write_at(&mut self, path: &str, offset: Option<u64>, data: &[u8]) -> FsResult<u64> {
-        let inode = self.resolve(path)?;
-        let metadata = self.root.metadata(inode)?;
+        let location = self.resolve(path)?;
+        let filesystem = self.fs_mut(location.mount);
+        let metadata = filesystem.metadata(location.inode)?;
         if metadata.file_type != FileType::File {
             return Err(FsError::IsADirectory);
         }
         let offset = offset.unwrap_or(metadata.size);
-        let written = self.root.write(inode, offset, data)?;
+        let written = filesystem.write(location.inode, offset, data)?;
         if written != data.len() {
             return Err(FsError::NoSpace);
         }
         Ok(offset + written as u64)
     }
 
-    /// Removes the file or empty directory at `path`.
+    /// Removes the file or empty directory at `path`. Mount points cannot
+    /// be removed.
     pub fn remove(&mut self, path: &str) -> FsResult<()> {
-        let (dir, name) = self.resolve_parent(path)?;
-        self.root.remove(dir, name)
+        let (parent, name) = self.resolve_parent(path)?;
+        self.fs_mut(parent.mount).remove(parent.inode, name)
     }
 
     /// Removes `path` and, if it is a directory, everything below it.
+    /// Fails with [`FsError::Busy`] if a filesystem is mounted at or below
+    /// `path`.
     pub fn remove_all(&mut self, path: &str) -> FsResult<()> {
-        let (dir, name) = self.resolve_parent(path)?;
-        let inode = self.root.lookup(dir, name)?;
-        self.remove_tree(dir, name, inode)
+        if self
+            .mounts
+            .iter()
+            .any(|mount| path::is_inside(&mount.path, path))
+        {
+            return Err(FsError::Busy);
+        }
+        let (parent, name) = self.resolve_parent(path)?;
+        let inode = self.fs(parent.mount).lookup(parent.inode, name)?;
+        self.remove_tree(parent.mount, parent.inode, name, inode)
     }
 
-    /// Depth-first removal. Recursion depth equals directory depth, which
-    /// path-length limits keep small.
-    fn remove_tree(&mut self, dir: InodeId, name: &str, inode: InodeId) -> FsResult<()> {
-        if self.root.metadata(inode)?.file_type == FileType::Directory {
-            for entry in self.root.read_dir(inode)? {
-                self.remove_tree(inode, &entry.name, entry.inode)?;
+    /// Depth-first removal within one filesystem. Recursion depth equals
+    /// directory depth, which path-length limits keep small.
+    fn remove_tree(
+        &mut self,
+        mount: usize,
+        dir: InodeId,
+        name: &str,
+        inode: InodeId,
+    ) -> FsResult<()> {
+        if self.fs(mount).metadata(inode)?.file_type == FileType::Directory {
+            for entry in self.fs(mount).read_dir(inode)? {
+                self.remove_tree(mount, inode, &entry.name, entry.inode)?;
             }
         }
-        self.root.remove(dir, name)
+        self.fs_mut(mount).remove(dir, name)
     }
 
-    /// Moves or renames `from` to `to`. `to` must not exist, and a directory
-    /// cannot be moved into itself.
+    /// Moves or renames `from` to `to`. `to` must not exist, a directory
+    /// cannot be moved into itself, and both must be on the same
+    /// filesystem.
     pub fn rename(&mut self, from: &str, to: &str) -> FsResult<()> {
-        let (from_dir, from_name) = self.resolve_parent(from)?;
-        let (to_dir, to_name) = self.resolve_parent(to)?;
-        self.root.rename(from_dir, from_name, to_dir, to_name)
+        let (from_parent, from_name) = self.resolve_parent(from)?;
+        let (to_parent, to_name) = self.resolve_parent(to)?;
+        if from_parent.mount != to_parent.mount {
+            return Err(FsError::CrossDevice);
+        }
+        self.fs_mut(from_parent.mount).rename(
+            from_parent.inode,
+            from_name,
+            to_parent.inode,
+            to_name,
+        )
     }
 
     /// Copies the regular file `from` to `to`, replacing `to` if it is an
-    /// existing file.
+    /// existing file. Works across filesystems.
     pub fn copy_file(&mut self, from: &str, to: &str) -> FsResult<()> {
         let data = self.read_file(from)?;
         self.write_file(to, &data, WriteMode::Truncate)
@@ -496,6 +645,80 @@ mod tests {
         v.create_dir("/dir").unwrap();
         assert_eq!(v.copy_file("/dir", "/x"), Err(FsError::IsADirectory));
         assert_eq!(v.copy_file("/src", "/dir"), Err(FsError::IsADirectory));
+    }
+
+    #[test]
+    fn mounts() {
+        let mut v = vfs();
+        v.create_dir_all("/mnt/disk").unwrap();
+        v.write_file("/mnt/disk/hidden", b"under", WriteMode::Truncate)
+            .unwrap();
+        v.write_file("/file", b"x", WriteMode::Truncate).unwrap();
+
+        assert_eq!(
+            v.mount("/nope", Box::new(RamFs::new())).err(),
+            Some(FsError::NotFound)
+        );
+        assert_eq!(
+            v.mount("/file", Box::new(RamFs::new())).err(),
+            Some(FsError::NotADirectory)
+        );
+        v.mount("/mnt/disk", Box::new(RamFs::new())).unwrap();
+        assert_eq!(
+            v.mount("/mnt/disk", Box::new(RamFs::new())).err(),
+            Some(FsError::Busy)
+        );
+        assert_eq!(v.mount_points(), ["/", "/mnt/disk"]);
+
+        // The mounted filesystem is empty and separate from the root.
+        assert!(v.read_dir("/mnt/disk").unwrap().is_empty());
+        v.create_dir_all("/mnt/disk/a/b").unwrap();
+        v.write_file("/mnt/disk/a/f", b"on disk", WriteMode::Truncate)
+            .unwrap();
+        assert_eq!(v.read_file("/mnt/disk/a/f").unwrap(), b"on disk");
+        assert_eq!(names(&v, "/mnt"), ["disk"]);
+        assert_eq!(names(&v, "/mnt/disk"), ["a"]);
+        assert_eq!(
+            v.metadata("/mnt/disk").unwrap().file_type,
+            FileType::Directory
+        );
+
+        // Mount points are pinned, and renames do not cross filesystems.
+        assert_eq!(v.remove("/mnt/disk"), Err(FsError::Busy));
+        assert_eq!(v.remove_all("/mnt"), Err(FsError::Busy));
+        assert_eq!(v.rename("/mnt/disk", "/elsewhere"), Err(FsError::Busy));
+        assert_eq!(
+            v.rename("/file", "/mnt/disk/file"),
+            Err(FsError::CrossDevice)
+        );
+        v.copy_file("/file", "/mnt/disk/file").unwrap();
+        assert_eq!(v.read_file("/mnt/disk/file").unwrap(), b"x");
+        v.rename("/mnt/disk/file", "/mnt/disk/a/b/moved").unwrap();
+        assert_eq!(v.create_dir("/mnt/disk"), Err(FsError::AlreadyExists));
+        assert_eq!(
+            v.write_file("/mnt/disk", b"", WriteMode::Truncate),
+            Err(FsError::IsADirectory)
+        );
+
+        // A nested mount blocks unmounting its parent.
+        v.mount("/mnt/disk/a", Box::new(RamFs::new())).unwrap();
+        assert_eq!(v.unmount("/mnt/disk").err(), Some(FsError::Busy));
+        assert!(v.read_dir("/mnt/disk/a").unwrap().is_empty());
+        v.unmount("/mnt/disk/a").unwrap();
+        assert_eq!(names(&v, "/mnt/disk/a"), ["b", "f"]);
+
+        assert_eq!(v.unmount("/").err(), Some(FsError::InvalidArgument));
+        assert_eq!(v.unmount("/mnt").err(), Some(FsError::InvalidArgument));
+        let detached = v.unmount("/mnt/disk").unwrap();
+        assert_eq!(
+            names(&v, "/mnt/disk"),
+            ["hidden"],
+            "the directory reappears"
+        );
+
+        // The unmounted filesystem kept its contents.
+        let other = Vfs::new(detached);
+        assert_eq!(other.read_file("/a/b/moved").unwrap(), b"x");
     }
 
     #[test]
