@@ -1811,6 +1811,12 @@ const BOOT_TESTS: &[BootTest] = &[
                 "cmp /big.http /big.https",
                 "cmp /big.http /big.https\nomit:/# ",
             ),
+            // A program whose file is larger than that: `hello` with
+            // six megabytes after it. The loader reads what it needs of
+            // the file, not all of it.
+            ("/bin/cat /bin/hello /big.http > /bigprog", ""),
+            ("/bigprog", "\nHello from user mode! I am process "),
+            ("rm /bigprog", ""),
             ("rm /big.http", ""),
             ("rm /big.https", ""),
             // A connection that stops without the server saying it has

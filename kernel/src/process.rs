@@ -19,6 +19,7 @@ use omit_abi::{
     USER_STACK_TOP,
 };
 use omit_elf::{EM_X86_64, ET_EXEC, Elf64, ElfError};
+use omit_shell::Image;
 
 use crate::arch::gdt::{USER_CS, USER_DS};
 use crate::arch::paging::MapError;
@@ -206,8 +207,23 @@ fn push_arguments(space: &mut AddressSpace, args: &[String]) -> Result<u64, Exec
 }
 
 /// Builds a user address space from an ELF image.
-fn load(image: &[u8], args: &[String]) -> Result<(AddressSpace, Start), ExecError> {
-    let elf = Elf64::parse(image).map_err(ExecError::Elf)?;
+/// How much of a program's file is read to find its headers.
+const HEAD_MAX: u64 = 64 * 1024;
+/// How much of a segment is read from the file at a time.
+const LOAD_PART: usize = 64 * 1024;
+
+/// Builds the address space of a new process from the program in
+/// `image`. The file is read a part at a time, so it can be larger than
+/// any one allocation.
+fn load(image: &dyn Image, args: &[String]) -> Result<(AddressSpace, Start), ExecError> {
+    let truncated = ExecError::Elf(ElfError::Truncated);
+    let length = image.len();
+    let mut head = alloc::vec![0u8; length.min(HEAD_MAX) as usize];
+    if image.read_at(0, &mut head) != head.len() {
+        return Err(truncated);
+    }
+    let elf = Elf64::parse_head(&head, length).map_err(ExecError::Elf)?;
+    let mut part = alloc::vec![0u8; LOAD_PART];
     if elf.machine() != EM_X86_64 {
         return Err(ExecError::Unsupported("not an x86-64 program"));
     }
@@ -233,19 +249,29 @@ fn load(image: &[u8], args: &[String]) -> Result<(AddressSpace, Start), ExecErro
             entry_is_code = true;
         }
 
-        let data = elf.segment_data(&segment);
-        for page in 0..segment.memsz.div_ceil(PAGE_SIZE) {
-            let start = (page * PAGE_SIZE) as usize;
-            let chunk = data
-                .get(start..)
-                .map_or(&[][..], |rest| &rest[..rest.len().min(PAGE_SIZE as usize)]);
-            map_page(
-                &mut space,
-                segment.vaddr + page * PAGE_SIZE,
-                chunk,
-                segment.is_writable(),
-                segment.is_executable(),
-            )?;
+        // The segment's pages, a part of the file at a time; beyond
+        // what the file holds of it, pages are empty.
+        let pages_per_part = (LOAD_PART as u64) / PAGE_SIZE;
+        let pages = segment.memsz.div_ceil(PAGE_SIZE);
+        let mut first = 0;
+        while first < pages {
+            let start = first * PAGE_SIZE;
+            let in_file = segment.filesz.saturating_sub(start).min(LOAD_PART as u64) as usize;
+            if image.read_at(segment.offset + start, &mut part[..in_file]) != in_file {
+                return Err(truncated);
+            }
+            for page in 0..pages_per_part.min(pages - first) {
+                let from = ((page * PAGE_SIZE) as usize).min(in_file);
+                let to = (from + PAGE_SIZE as usize).min(in_file);
+                map_page(
+                    &mut space,
+                    segment.vaddr + start + page * PAGE_SIZE,
+                    &part[from..to],
+                    segment.is_writable(),
+                    segment.is_executable(),
+                )?;
+            }
+            first += pages_per_part;
         }
     }
     if !entry_is_code {
@@ -317,7 +343,7 @@ static EXIT_FLAGS: SpinLock<BTreeMap<ThreadId, u64>> = SpinLock::new(BTreeMap::n
 /// instead of the console.
 pub fn spawn(
     name: &str,
-    image: &[u8],
+    image: &dyn Image,
     args: &[String],
     cwd: &str,
     stdio: Stdio,

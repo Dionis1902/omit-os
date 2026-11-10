@@ -58,6 +58,77 @@ pub struct TaskInfo {
     pub name: String,
 }
 
+/// A program's file, read where the loader needs it rather than held in
+/// memory whole (which limits how large it can be).
+pub trait Image: fmt::Debug {
+    /// The size of the file in bytes.
+    fn len(&self) -> u64;
+
+    /// Whether the file is empty.
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// Reads from `offset` on into `buffer`; returns how many bytes,
+    /// which is fewer than the buffer holds only at the end of the file
+    /// (or if the file cannot be read any more).
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> usize;
+}
+
+impl Image for [u8] {
+    fn len(&self) -> u64 {
+        <[u8]>::len(self) as u64
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> usize {
+        let rest = usize::try_from(offset)
+            .ok()
+            .and_then(|start| self.get(start..))
+            .unwrap_or(&[]);
+        let count = rest.len().min(buffer.len());
+        buffer[..count].copy_from_slice(&rest[..count]);
+        count
+    }
+}
+
+/// A file of a filesystem as an [`Image`].
+pub struct FileImage<'a> {
+    vfs: &'a Vfs,
+    path: &'a str,
+    len: u64,
+}
+
+impl fmt::Debug for FileImage<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "FileImage({:?}, {} bytes)", self.path, self.len)
+    }
+}
+
+impl<'a> FileImage<'a> {
+    /// The file at `path` (absolute, normalised) of `vfs`.
+    pub fn open(vfs: &'a Vfs, path: &'a str) -> Result<Self, FsError> {
+        let metadata = vfs.metadata(path)?;
+        if metadata.file_type != FileType::File {
+            return Err(FsError::IsADirectory);
+        }
+        Ok(Self {
+            vfs,
+            path,
+            len: metadata.size,
+        })
+    }
+}
+
+impl Image for FileImage<'_> {
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn read_at(&self, offset: u64, buffer: &mut [u8]) -> usize {
+        self.vfs.read_at(self.path, offset, buffer).unwrap_or(0)
+    }
+}
+
 /// What the shell needs from the system it runs on, beyond the filesystem.
 pub trait Host {
     /// Starts the program whose executable image is `image` as a new
@@ -71,7 +142,7 @@ pub trait Host {
     fn spawn(
         &mut self,
         name: &str,
-        image: &[u8],
+        image: &dyn Image,
         args: &[String],
         cwd: &str,
         stdout: Option<(&str, bool)>,
@@ -215,7 +286,8 @@ const BUILTINS: &[&str] = &[
 /// A program found and read by the shell.
 struct Program {
     display_name: String,
-    image: Vec<u8>,
+    /// The file to load: the program itself, or the loader that runs it.
+    file: String,
     argv: Vec<String>,
 }
 
@@ -224,8 +296,8 @@ struct Program {
 pub struct Stage<'a> {
     /// Name to show for the process.
     pub name: &'a str,
-    /// The executable file's contents.
-    pub image: &'a [u8],
+    /// The executable file.
+    pub image: &'a dyn Image,
     /// Arguments, starting with the name the program was invoked by.
     pub args: &'a [String],
 }
@@ -692,8 +764,10 @@ impl Shell {
         } else {
             path::join("/bin", name)
         };
-        let image = match vfs.read_file(&path) {
-            Ok(image) => image,
+        // How the file starts says what kind of program it is.
+        let mut start = [0u8; 2];
+        let start = match vfs.read_at(&path, 0, &mut start) {
+            Ok(count) => &start[..count],
             Err(FsError::NotFound | FsError::NotADirectory) if !name.contains('/') => {
                 return Err(Failure("command not found".into()));
             }
@@ -706,21 +780,22 @@ impl Shell {
         argv.push(String::from(name));
         // Windows executables are run by the Windows program loader, which
         // gets the file's path as its first argument.
-        let image = if image.starts_with(WINDOWS_MAGIC) {
+        let file = if start.starts_with(WINDOWS_MAGIC) {
             argv[0] = WINDOWS_LOADER.into();
             argv.push(path.clone());
-            vfs.read_file(WINDOWS_LOADER).map_err(|error| {
+            FileImage::open(vfs, WINDOWS_LOADER).map_err(|error| {
                 Failure(format!(
                     "this is a Windows program, but {WINDOWS_LOADER} cannot be read: {error}"
                 ))
-            })?
+            })?;
+            WINDOWS_LOADER.into()
         } else {
-            image
+            path
         };
         argv.extend_from_slice(args);
         Ok(Program {
             display_name,
-            image,
+            file,
             argv,
         })
     }
@@ -766,10 +841,12 @@ impl Shell {
         let stdout = target
             .as_ref()
             .map(|(path, append)| (path.as_str(), *append));
+        let image =
+            FileImage::open(vfs, &program.file).map_err(|error| Failure(format!("{error}")))?;
         let pid = host
             .spawn(
                 &program.display_name,
-                &program.image,
+                &image,
                 &program.argv,
                 &self.cwd,
                 stdout,
@@ -837,11 +914,17 @@ impl Shell {
             .as_ref()
             .map(|(path, append)| (path.as_str(), *append));
 
+        let images = programs
+            .iter()
+            .map(|program| FileImage::open(vfs, &program.file))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| Failure(format!("{error}")))?;
         let stages: Vec<Stage<'_>> = programs
             .iter()
-            .map(|program| Stage {
+            .zip(&images)
+            .map(|(program, image)| Stage {
                 name: &program.display_name,
-                image: &program.image,
+                image,
                 args: &program.argv,
             })
             .collect();
@@ -1222,20 +1305,35 @@ mod tests {
         now: Option<i64>,
     }
 
+    /// All of a program's file, read the way a loader would: in parts.
+    fn whole(image: &dyn Image) -> Vec<u8> {
+        let mut all = Vec::new();
+        let mut part = [0u8; 5];
+        loop {
+            let count = image.read_at(all.len() as u64, &mut part);
+            all.extend_from_slice(&part[..count]);
+            if count < part.len() {
+                assert_eq!(all.len() as u64, image.len());
+                return all;
+            }
+        }
+    }
+
     impl Host for MockHost {
         fn spawn(
             &mut self,
             name: &str,
-            image: &[u8],
+            image: &dyn Image,
             args: &[String],
             cwd: &str,
             stdout: Option<(&str, bool)>,
         ) -> Result<u64, String> {
             self.last_stdout = stdout.map(|(path, append)| (path.into(), append));
+            let image = whole(image);
             if image.starts_with(b"bad") {
                 return Err("not an executable".into());
             }
-            self.spawned.push((name.into(), image.to_vec()));
+            self.spawned.push((name.into(), image));
             self.last_args = args.to_vec();
             self.last_cwd = cwd.into();
             Ok(self.spawned.len() as u64)
@@ -1248,7 +1346,10 @@ mod tests {
             stdin: Option<&str>,
             stdout: Option<(&str, bool)>,
         ) -> Result<Vec<u64>, String> {
-            if stages.iter().any(|stage| stage.image.starts_with(b"bad")) {
+            if stages
+                .iter()
+                .any(|stage| whole(stage.image).starts_with(b"bad"))
+            {
                 return Err("not an executable".into());
             }
             self.last_stdout = stdout.map(|(path, append)| (path.into(), append));
@@ -1260,7 +1361,7 @@ mod tests {
                 .collect();
             let mut pids = Vec::new();
             for stage in stages {
-                self.spawned.push((stage.name.into(), stage.image.to_vec()));
+                self.spawned.push((stage.name.into(), whole(stage.image)));
                 pids.push(self.spawned.len() as u64);
             }
             Ok(pids)

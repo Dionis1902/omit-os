@@ -40,7 +40,7 @@ impl Host for KernelHost {
     fn spawn(
         &mut self,
         name: &str,
-        image: &[u8],
+        image: &dyn omit_shell::Image,
         args: &[String],
         cwd: &str,
         stdout: Option<(&str, bool)>,

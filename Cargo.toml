@@ -109,9 +109,8 @@ opt-level = 1
 
 # Third-party crates are lightly optimised in debug builds too. The
 # reason is the cryptography behind TLS: unoptimised, a handshake takes
-# far longer and `fetch` is 4.8 MB — more than the program loader can
-# read (4 MiB, the largest single allocation of the kernel), so the
-# debug build could not start it. The project's own crates stay
+# far longer and `fetch` is 4.8 MB instead of 2 MB, in an image that
+# is unpacked into memory. The project's own crates stay
 # unoptimised, the kernel and the boot loader included; of what they
 # link, this touches only the font data and the UEFI bindings.
 [profile.dev.package."*"]

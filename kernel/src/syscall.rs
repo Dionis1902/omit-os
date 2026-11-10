@@ -850,17 +850,19 @@ fn spawn(
         }
     }
 
-    let mut image = fs::root()
+    // How the file starts says what kind of program it is.
+    let mut start = [0u8; 2];
+    let count = fs::root()
         .ok_or(Errno::NotFound)?
-        .read_file(&path)
+        .read_at(&path, 0, &mut start)
         .map_err(errno)?;
-    if image.starts_with(omit_shell::WINDOWS_MAGIC) {
+    // The file that is loaded: the program itself, or the loader that
+    // runs it.
+    let mut file = path.clone();
+    if start[..count].starts_with(omit_shell::WINDOWS_MAGIC) {
         // A Windows executable: run the Windows program loader on it, as
         // the shell does.
-        image = fs::root()
-            .ok_or(Errno::NotFound)?
-            .read_file(omit_shell::WINDOWS_LOADER)
-            .map_err(|_| Errno::NotExecutable)?;
+        file = omit_shell::WINDOWS_LOADER.into();
         if args.is_empty() {
             args.push(String::new());
         }
@@ -896,6 +898,17 @@ fn spawn(
             _ => return Err(Errno::BadFileDescriptor),
         });
     }
+    // The filesystem stays locked while the program is read from it,
+    // part by part; nothing on the way needs it otherwise.
+    let root = fs::root().ok_or(Errno::NotFound)?;
+    let image = omit_shell::FileImage::open(&root, &file).map_err(|error| {
+        if file == path {
+            errno(error)
+        } else {
+            // The Windows program loader is missing.
+            Errno::NotExecutable
+        }
+    })?;
     process::spawn(name, &image, &args, &cwd, stdio).map_err(|error| match error {
         process::ExecError::Elf(_) | process::ExecError::Unsupported(_) => Errno::NotExecutable,
         process::ExecError::ArgumentsTooLong => Errno::InvalidArgument,

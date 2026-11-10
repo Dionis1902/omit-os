@@ -395,8 +395,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   tested with QEMU's emulated ones; there is no USB storage driver. An installed system still runs from memory; only `/data`
   persists.
 - A file in the RAM filesystem (everything outside a mounted disk) can be
-  as large as memory allows, up to 1 GiB; but a **program** larger than
-  4 MiB cannot be started, because the loader reads it in one piece.
+  as large as memory allows, up to 1 GiB, and so can a program's file
+  (the loader reads it part by part). The shell's own `cat` still reads
+  a whole file at once and is limited to 4 MiB; `/bin/cat` is not.
 - The disk filesystem has no journal and no cache: it is slow, and a crash
   mid-operation can leave it needing `e2fsck`.
 - Clock calibration needs the legacy PIT or, where that does not count,

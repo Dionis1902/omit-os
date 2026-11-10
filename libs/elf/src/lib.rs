@@ -145,6 +145,18 @@ fn u64_at(data: &[u8], off: usize) -> u64 {
 impl<'a> Elf64<'a> {
     /// Validates the file header and every program header.
     pub fn parse(data: &'a [u8]) -> Result<Self, ElfError> {
+        Self::parse_head(data, data.len() as u64)
+    }
+
+    /// Like [`Elf64::parse`], for a file of `file_len` bytes of which
+    /// only the beginning, `data`, is at hand: enough when the file is
+    /// then read segment by segment rather than held in memory whole.
+    /// The file header and the whole program header table must lie
+    /// within `data` ([`ElfError::Truncated`] otherwise); segments must
+    /// lie within the file. [`Elf64::segment_data`] gives only what
+    /// `data` holds of a segment: use the header's `offset` and `filesz`
+    /// to read the file instead.
+    pub fn parse_head(data: &'a [u8], file_len: u64) -> Result<Self, ElfError> {
         if data.len() < EHDR_SIZE {
             return Err(if data.len() >= 4 && data[..4] != *b"\x7fELF" {
                 ElfError::BadMagic
@@ -193,7 +205,7 @@ impl<'a> Elf64<'a> {
             let file_end = ph.offset.checked_add(ph.filesz);
             let ok = ph.filesz <= ph.memsz
                 && ph.vaddr.checked_add(ph.memsz).is_some()
-                && file_end.is_some_and(|end| end <= data.len() as u64);
+                && file_end.is_some_and(|end| end <= file_len);
             if !ok {
                 return Err(ElfError::BadSegment { index });
             }
@@ -242,7 +254,9 @@ impl<'a> Elf64<'a> {
     /// The bytes of `ph` that are present in the file (`p_filesz` bytes).
     ///
     /// `ph` must come from this image; for a foreign header whose range does
-    /// not fit, an empty slice is returned.
+    /// not fit, an empty slice is returned. So it is for a segment that
+    /// lies beyond the part of the file this was parsed from
+    /// ([`Elf64::parse_head`]).
     pub fn segment_data(&self, ph: &ProgramHeader) -> &'a [u8] {
         let start = usize::try_from(ph.offset).ok();
         let len = usize::try_from(ph.filesz).ok();
@@ -421,6 +435,44 @@ mod tests {
             Elf64::parse(&bad).unwrap_err(),
             ElfError::BadSegment { index: 0 }
         );
+    }
+
+    #[test]
+    fn the_head_of_a_file_is_enough_when_its_length_is_known() {
+        let image = sample();
+        let whole = Elf64::parse(&image).unwrap();
+        // Just the headers: the file header and three program headers.
+        let headers = EHDR_SIZE + 3 * PHDR_SIZE;
+        let head = Elf64::parse_head(&image[..headers], image.len() as u64).unwrap();
+        assert_eq!(head.entry(), whole.entry());
+        let segments: Vec<ProgramHeader> = head.program_headers().collect();
+        assert_eq!(segments, whole.program_headers().collect::<Vec<_>>());
+        // Where each segment's bytes are in the file is what a loader
+        // then reads; the head itself holds none of them.
+        let first = segments[0];
+        assert_eq!(
+            &image[first.offset as usize..][..first.filesz as usize],
+            b"\x90\x90\xc3"
+        );
+        assert_eq!(head.segment_data(&first), b"");
+        // A head that stops inside the program header table is not
+        // enough.
+        assert_eq!(
+            Elf64::parse_head(&image[..headers - 1], image.len() as u64).err(),
+            Some(ElfError::Truncated)
+        );
+        // A file shorter than its segments claim is refused, however
+        // much of it is at hand.
+        assert_eq!(
+            Elf64::parse_head(&image[..headers], image.len() as u64 - 1).err(),
+            Some(ElfError::BadSegment { index: 2 })
+        );
+        assert_eq!(
+            Elf64::parse_head(&image, headers as u64).err(),
+            Some(ElfError::BadSegment { index: 0 })
+        );
+        // A file longer than what its segments use is fine.
+        assert!(Elf64::parse_head(&image[..headers], 1 << 40).is_ok());
     }
 
     #[test]
