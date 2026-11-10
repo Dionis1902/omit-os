@@ -203,8 +203,8 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x8086,
         0x2922,
         "Intel ICH9 SATA controller (AHCI)",
-        Support::Unsupported,
-        Validation::None,
+        Support::Native { driver: "ahci" },
+        Validation::Emulation,
     ),
     entry(
         0x8086,

@@ -648,6 +648,9 @@ struct BootTest {
     /// `boot_installed`, it is the disk the system is expected to have
     /// been installed on.
     nvme: bool,
+    /// Like `nvme`, with a SATA disk on port 2 of the machine's AHCI
+    /// controller (`sdc`).
+    sata: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -680,6 +683,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "shell-session",
@@ -857,6 +861,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -876,6 +881,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     // The same with a USB keyboard on an xHCI controller, and the PS/2
     // devices switched off, so the typed line can only have come by USB.
@@ -902,6 +908,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: USB_INPUT,
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     // And the whole desktop scenario — pointer movement, clicks, drags,
     // typing — with USB mouse and keyboard only.
@@ -923,6 +930,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: USB_INPUT,
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "desktop",
@@ -942,6 +950,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "disk-persistence",
@@ -1001,6 +1010,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     // The installer: the system writes itself to the VirtIO disk, the
     // machine is restarted without the boot medium, and must come up from
@@ -1063,6 +1073,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: true,
         nvme: false,
+        sata: false,
     },
     // The same on an NVMe disk, the kind most current machines have: the
     // native NVMe driver, installation, and booting from the result with
@@ -1112,6 +1123,58 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: true,
         nvme: true,
+        sata: false,
+    },
+    // And on a SATA disk, the kind virtual machines offer by default.
+    // (When the test boots from a disk image, that image is a SATA disk
+    // too, on port 0; the target is on port 2 either way.)
+    BootTest {
+        name: "install-to-sata",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] ahci: sdc ready, 128 MiB, model \"QEMU HARDDISK\"",
+            "[INFO ] block: sdc has 2 partition(s)",
+            "[INFO ] fs: data partition sdc2 mounted at /data",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("lsblk", "\nsdc      128 MiB\n"),
+            ("lsdrv", "native     ahci\n"),
+            (
+                "lspci",
+                " 8086:2922 Intel ICH9 SATA controller (AHCI) [native driver: ahci]\n",
+            ),
+            (
+                "install sdc --erase",
+                "\nsdc2: data partition, 78 MiB, empty ext2 filesystem (mounted at /data when the installed system starts)\ninstalled on sdc; remove the installation medium and restart\n",
+            ),
+            (
+                "lsblk",
+                "\nsdc      128 MiB\nsdc1      48 MiB\nsdc2      78 MiB\n",
+            ),
+            ("mkdir /data", ""),
+            ("mount sdc2 /data", "mount sdc2 /data\nomit:/# "),
+            ("echo kept on the SATA disk > /data/note", ""),
+            ("cp /bin/desktop /data/desktop", ""),
+            ("umount /data", "umount /data\nomit:/# "),
+        ],
+        // Second boot: from the SATA disk alone.
+        reboot_script: &[
+            ("mount", "\nramfs on /\nsdc2 on /data\n"),
+            ("cat /data/note", "\nkept on the SATA disk\n"),
+            ("cmp /bin/desktop /data/desktop", ""),
+            ("winhello.exe", "\nHello from a Windows executable!\r\n"),
+            ("umount /data", "umount /data\nomit:/# "),
+        ],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: true,
+        nvme: false,
+        sata: true,
     },
     BootTest {
         name: "windows-programs",
@@ -1220,6 +1283,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1238,7 +1302,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "lsdrv",
-                "\n00:02.0  native     virtio-blk\n00:03.0  linux-kpi  i6300ESB timer\n",
+                "\n00:02.0  native     virtio-blk\n00:1f.2  native     ahci\n00:03.0  linux-kpi  i6300ESB timer\n",
             ),
             (
                 "watchdog",
@@ -1294,7 +1358,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Unbinding calls the driver's remove function.
             ("unbind 00:03.0", "unbind 00:03.0\nomit:/# "),
             ("watchdog", "\nwatchdog: no watchdog device\n"),
-            ("lsdrv", "virtio-blk\nomit:/# "),
+            ("lsdrv", "ahci\nomit:/# "),
         ],
         reboot_script: &[],
         ends_with_reset: false,
@@ -1303,6 +1367,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1329,6 +1394,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1390,6 +1456,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &["-device", "pvpanic-pci"],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1414,6 +1481,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &["-device", "pvpanic-pci", "-action", "panic=exit-failure"],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1435,6 +1503,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1454,6 +1523,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1473,6 +1543,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1491,6 +1562,7 @@ const BOOT_TESTS: &[BootTest] = &[
         qemu_args: &[],
         boot_installed: false,
         nvme: false,
+        sata: false,
     },
 ];
 
@@ -2376,9 +2448,25 @@ fn run_boot_test(
             "nvme,drive=nvme,serial=omit-test".into(),
         ]);
     }
+    let sata_disk = dir.join(format!("test-{}.sata.img", test.name));
+    if test.sata {
+        create_data_disk(&sata_disk)?;
+        qemu_args.extend([
+            "-drive".into(),
+            format!("if=none,id=sata,format=raw,file={}", sata_disk.display()),
+            "-device".into(),
+            "ide-hd,drive=sata,bus=ide.2".into(),
+        ]);
+    }
     let qemu_args: Vec<&str> = qemu_args.iter().map(String::as_str).collect();
     // The disk an installation is expected on.
-    let target_disk = if test.nvme { &nvme_disk } else { &data_disk };
+    let target_disk = if test.nvme {
+        &nvme_disk
+    } else if test.sata {
+        &sata_disk
+    } else {
+        &data_disk
+    };
 
     // Tests without a script must not sit at the shell prompt forever.
     let shell = if test.script.is_empty() {
@@ -2476,6 +2564,7 @@ fn run_boot_test(
     let _ = fs::remove_file(&vars);
     let _ = fs::remove_file(&data_disk);
     let _ = fs::remove_file(&nvme_disk);
+    let _ = fs::remove_file(&sata_disk);
     Ok((failures, run))
 }
 

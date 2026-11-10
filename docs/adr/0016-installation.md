@@ -75,9 +75,9 @@ partitions together), and a disk smaller than 64 MiB.
 
 ## Limitations
 
-- **Only VirtIO and NVMe disks** (NVMe since ADR 0017; when this was
-  first written, only VirtIO). SATA disks and USB storage cannot be
-  accessed. Installation on a real machine has never been attempted.
+- **Only SATA, NVMe and VirtIO disks** (NVMe since ADR 0017, SATA since
+  ADR 0020; when this was first written, only VirtIO). USB storage
+  cannot be accessed. Installation on a real machine has never been attempted.
 - Tested only under QEMU with OVMF firmware, which boots the default
   loader path from the disk. Firmware boot entries are not created.
 - No dual boot, no resizing, no partitioning choices: the whole disk is

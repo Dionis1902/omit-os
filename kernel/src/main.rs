@@ -448,6 +448,27 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         Ok(None) => info!("virtio-blk: no device"),
         Err(error) => warn!("virtio-blk: cannot initialise device: {error}"),
     }
+    match drivers::ahci::init() {
+        Ok(Some(disks)) => {
+            for disk in &disks {
+                info!(
+                    "ahci: {} ready, {} MiB, model \"{}\"",
+                    disk.name,
+                    (disk.sectors * drivers::block::SECTOR_SIZE as u64) >> 20,
+                    disk.model
+                );
+                let partitions = drivers::block::scan_partitions(&disk.name);
+                if partitions != 0 {
+                    info!("block: {} has {partitions} partition(s)", disk.name);
+                }
+            }
+            if disks.is_empty() {
+                info!("ahci: no disks");
+            }
+        }
+        Ok(None) => info!("ahci: no controller"),
+        Err(error) => warn!("ahci: cannot use the controller: {error}"),
+    }
     match drivers::nvme::init() {
         Ok(Some(found)) => {
             let mut sector = [0u8; drivers::block::SECTOR_SIZE];

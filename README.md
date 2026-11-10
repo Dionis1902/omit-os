@@ -15,8 +15,8 @@ processes. You get an interactive shell with a RAM filesystem, on screen
 use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
-It can install itself onto a VirtIO or NVMe disk — tested only in virtual
-machines so far. See [Status](#status) for exactly what exists, how
+It can install itself onto a SATA, NVMe or VirtIO disk — tested only in
+virtual machines so far. See [Status](#status) for exactly what exists, how
 narrow each of those is, and what has been tested.
 
 ![Omit OS console: status bar, boot log and shell](docs/screenshot.png)
@@ -176,7 +176,7 @@ images and their checksums:
 | `omit-os-<version>-x86_64.img` | USB sticks (`dd`), virtual hard disks |
 
 Both are live systems: they run from memory and leave the machine's disks
-alone. `install DEVICE --erase` installs the system onto a VirtIO or NVMe
+alone. `install DEVICE --erase` installs the system onto a SATA, NVMe or VirtIO
 disk (see [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md)). That has
 been tested in virtual machines only; installing on a real computer has
 never been tried.
@@ -256,6 +256,7 @@ protocol for other programs' windows.
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
 | PCI device discovery (`lspci`) | Working, tested in QEMU |
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
+| AHCI driver for SATA disks (first controller, ATA disks with 48-bit addressing and 512-byte sectors, polling, one 4 KiB command at a time; disks named by port: `sda` is port 0) | Working against QEMU's emulated controller; **never run on real hardware**. No CD/DVD drives. See ADR 0020 |
 | NVMe driver (first controller, namespace 1, 512-byte sectors, polling, one 4 KiB command at a time) | Working against QEMU's emulated controller; **never run on a real NVMe disk**. See ADR 0017 |
 | ext2 filesystem: read/write, `mkfs`, mount/unmount at any directory | Working. Host tests verify images with `e2fsck` and exchange files with `debugfs`/`mke2fs`; the QEMU test formats and fills a disk, reboots, reads it back and runs `e2fsck` on the result |
 | Hardware database: device names and support status in `lspci` | Working, host-tested |
@@ -270,8 +271,8 @@ protocol for other programs' windows.
 | Threads within a process (shared address space, `thread_create`, process-wide exit), futex, user-space mutex and join | Working on one CPU; `/bin/threadtest` checks contention, the shared heap, futex semantics and process exit with threads still running |
 | Environment variables, signals, shared memory, more than one CPU | Not started |
 | GUID partition tables: partitions of the VirtIO disk as block devices (`vda1`, ...) | Working; library host-tested including damaged and hostile tables |
-| Installer (`install DEVICE --erase`): GPT, FAT16 system partition, ext2 data partition mounted at `/data` on the installed system | Working **on VirtIO and NVMe disks under QEMU**: the tests install, restarts from the disk alone, and verifies the disk on the host with independent tools. See ADR 0016 |
-| AHCI (SATA) and USB storage, root filesystem on disk, updates in place | Not started |
+| Installer (`install DEVICE --erase`): GPT, FAT16 system partition, ext2 data partition mounted at `/data` on the installed system | Working **on SATA, NVMe and VirtIO disks under QEMU**: the tests install, restarts from the disk alone, and verifies the disk on the host with independent tools. See ADR 0016 |
+| USB storage, root filesystem on disk, updates in place | Not started |
 | SMP | Not started |
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
 | PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
@@ -333,9 +334,8 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   under emulation.
 - Keyboards (US layout) and mice: PS/2, or USB plugged directly into an
   xHCI port — no hubs, and USB is untested outside QEMU.
-- Installation works onto VirtIO and NVMe disks and has only been tested
-  with QEMU's emulated ones; there is no SATA (AHCI) or USB storage
-  driver. An installed system still runs from memory; only `/data`
+- Installation works onto SATA, NVMe and VirtIO disks and has only been
+  tested with QEMU's emulated ones; there is no USB storage driver. An installed system still runs from memory; only `/data`
   persists.
 - A file in the RAM filesystem (everything outside a mounted disk) cannot
   be larger than 4 MiB.
@@ -468,6 +468,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0017 — NVMe driver](docs/adr/0017-nvme.md)
 - [ADR 0018 — Shared memory, channels, poll, and windows for other programs](docs/adr/0018-windows-for-programs.md)
 - [ADR 0019 — USB keyboards and mice (xHCI)](docs/adr/0019-usb-input.md)
+- [ADR 0020 — AHCI driver (SATA disks)](docs/adr/0020-ahci.md)
 
 ## Testing
 
@@ -483,6 +484,7 @@ checks both QEMU's exit status and the serial log:
 | `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
+| `install-to-sata` | The same on a SATA disk, with the native AHCI driver |
 | `install-to-nvme` | The native NVMe driver: install onto an emulated NVMe disk, write files (including one large enough to span many commands), restart from the NVMe disk alone, compare the files; the disk is then verified on the host like the VirtIO one |
 | `linux-driver-watchdog-expiry` | The same driver, started and never pinged: the emulated hardware must reset the machine |
 | `panic-diagnostics` | A deliberate panic prints message, source location and backtrace, and reports failure |

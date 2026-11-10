@@ -15,17 +15,21 @@ touch the machine's disks unless you tell it to.
 
 ## Installing (tested in virtual machines only)
 
-Omit OS can install itself onto a **VirtIO** or **NVMe** disk. Both have
-been tested only with QEMU's emulated disks: the NVMe driver has never
-run on a real disk, so do not point it at a machine whose data you care
-about. SATA disks are not supported.
+Omit OS can install itself onto a **SATA**, **NVMe** or **VirtIO** disk.
+All three drivers have been tested only with QEMU's emulated disks and
+have never run on real hardware, so do not point the installer at a
+machine whose data you care about.
 Give the VM an empty disk of at least 64 MiB, boot the ISO, and at the
 prompt:
 
 ```text
-lsblk                    a VirtIO disk appears as vda, an NVMe disk as nvme0n1
-install vda --erase      writes the system; everything on vda is lost
+lsblk                    lists the disks: SATA disks are sda, sdb, ... (by
+                         port), an NVMe disk is nvme0n1, a VirtIO disk vda
+install sda --erase      writes the system; everything on sda is lost
 ```
+
+Check the name and size in `lsblk` first: if you started from a disk
+image rather than the ISO, that image is a disk in the list too.
 
 Then shut the VM down, detach the ISO and start it again: it boots from
 the disk. Files under `/data` are kept across restarts; everything else
@@ -38,10 +42,13 @@ qemu-img create -f raw omit-disk.img 256M
 ```
 
 ```bash
-qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-*-x86_64.iso -drive if=none,id=d,format=raw,file=omit-disk.img -device virtio-blk-pci,drive=d -serial stdio
+qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-*-x86_64.iso -drive format=raw,file=omit-disk.img -serial stdio
 ```
 
-After `install vda --erase`, start it again without `-cdrom ...`.
+After `install sda --erase`, start it again without `-cdrom ...`.
+
+In VirtualBox or VMware, the VM's default (SATA) disk works the same
+way; this has not been tried by the authors.
 
 ## Requirements
 

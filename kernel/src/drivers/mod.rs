@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! Native device drivers.
 
+pub mod ahci;
 pub mod block;
 pub mod nvme;
 pub mod registry;
