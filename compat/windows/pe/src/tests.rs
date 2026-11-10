@@ -107,6 +107,31 @@ fn sample() -> Vec<u8> {
     }
     put64(&mut data, file(0x20A0), 0x2140);
 
+    // .rdata, continued: an export table at 0x2180 with three functions
+    // (ordinals 5, 6, 7), of which the first and third have names and
+    // the third is forwarded to another library.
+    put32(&mut data, OPTIONAL + 112, 0x2180);
+    put32(&mut data, OPTIONAL + 112 + 4, 0x80);
+    let exports = file(0x2180);
+    put32(&mut data, exports + 12, 0x21D0); // library name
+    put32(&mut data, exports + 16, 5); // ordinal base
+    put32(&mut data, exports + 20, 3); // functions
+    put32(&mut data, exports + 24, 2); // names
+    put32(&mut data, exports + 28, 0x21A8);
+    put32(&mut data, exports + 32, 0x21B8);
+    put32(&mut data, exports + 36, 0x21C0);
+    put32(&mut data, file(0x21A8), 0x1000);
+    put32(&mut data, file(0x21A8) + 4, 0x1008);
+    put32(&mut data, file(0x21A8) + 8, 0x21F0); // inside the table: forwarder
+    put32(&mut data, file(0x21B8), 0x21DC);
+    put32(&mut data, file(0x21B8) + 4, 0x21E0);
+    put16(&mut data, file(0x21C0), 0);
+    put16(&mut data, file(0x21C0) + 2, 2);
+    data[file(0x21D0)..file(0x21D0) + 11].copy_from_slice(b"sample.dll\0");
+    data[file(0x21DC)..file(0x21DC) + 4].copy_from_slice(b"add\0");
+    data[file(0x21E0)..file(0x21E0) + 5].copy_from_slice(b"exit\0");
+    data[file(0x21F0)..file(0x21F0) + 13].copy_from_slice(b"NTDLL.RtlExit");
+
     // .data: a pointer to the entry point.
     put64(&mut data, file(0x3008), IMAGE_BASE + 0x1004);
 
@@ -182,6 +207,84 @@ fn lists_imports_by_name_and_ordinal() {
     for (found, expected) in imports.iter().zip(expected) {
         assert_eq!((found.0.as_str(), found.1.as_str(), found.2), expected);
     }
+}
+
+#[test]
+fn lists_exports_with_names_ordinals_and_forwarders() {
+    let data = sample();
+    let pe = Pe::parse(&data).unwrap();
+    assert_eq!(pe.export_name(), Some("sample.dll"));
+    let mut exports = Vec::new();
+    pe.exports(|export| exports.push(export)).unwrap();
+    assert_eq!(
+        exports,
+        [
+            Export {
+                name: Some("add"),
+                ordinal: 5,
+                target: ExportTarget::Rva(0x1000),
+            },
+            Export {
+                name: None,
+                ordinal: 6,
+                target: ExportTarget::Rva(0x1008),
+            },
+            Export {
+                name: Some("exit"),
+                ordinal: 7,
+                target: ExportTarget::Forwarder("NTDLL.RtlExit"),
+            },
+        ]
+    );
+}
+
+#[test]
+fn rejects_malformed_export_tables() {
+    let broken = |change: &dyn Fn(&mut Vec<u8>)| {
+        let mut data = sample();
+        change(&mut data);
+        let pe = Pe::parse(&data).unwrap();
+        pe.exports(|_| {}).unwrap_err()
+    };
+    let exports = file(0x2180);
+    assert_eq!(
+        broken(&|d| put32(d, OPTIONAL + 112, 0x9000)),
+        PeError::BadExport
+    );
+    assert_eq!(
+        broken(&|d| put32(d, exports + 20, 0x2_0000)),
+        PeError::BadExport
+    );
+    assert_eq!(broken(&|d| put32(d, exports + 20, 200)), PeError::BadExport);
+    assert_eq!(
+        broken(&|d| put32(d, exports + 28, 0x7000)),
+        PeError::BadExport
+    );
+    assert_eq!(
+        broken(&|d| put32(d, exports + 24, 0x4000)),
+        PeError::BadExport
+    );
+    // A function outside the image, and a name that is not text.
+    assert_eq!(
+        broken(&|d| put32(d, file(0x21A8), 0x6000)),
+        PeError::BadExport
+    );
+    assert_eq!(
+        broken(&|d| put32(d, file(0x21B8), 0x4800)),
+        PeError::BadExport
+    );
+    // An unused slot is skipped, not an error.
+    let mut data = sample();
+    put32(&mut data, file(0x21A8) + 4, 0);
+    let mut count = 0;
+    Pe::parse(&data).unwrap().exports(|_| count += 1).unwrap();
+    assert_eq!(count, 2);
+    // No export table: no exports.
+    let mut data = sample();
+    put32(&mut data, OPTIONAL + 112, 0);
+    let pe = Pe::parse(&data).unwrap();
+    assert_eq!(pe.export_name(), None);
+    pe.exports(|_| panic!("no exports expected")).unwrap();
 }
 
 #[test]
@@ -417,6 +520,8 @@ fn exercise(data: &[u8]) {
     if let Ok(pe) = Pe::parse(data) {
         let _ = imports_of(&pe);
         let _ = relocations_of(&pe);
+        let _ = pe.export_name();
+        let _ = pe.exports(|_| {});
         let mut image = vec![0u8; pe.size_of_image() as usize];
         if pe.build_image(&mut image).is_ok() {
             let _ = relocate(&pe, &mut image, 0x1000_0000_0000);

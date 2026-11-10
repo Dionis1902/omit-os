@@ -14,24 +14,6 @@ use core::ptr::null_mut;
 
 use omit_win_samples::*;
 
-/// Counts checks; a failed one reports itself and ends the program.
-struct Checks(u32);
-
-impl Checks {
-    #[track_caller]
-    fn check(&mut self, condition: bool, what: &str) {
-        if !condition {
-            let line = core::panic::Location::caller().line();
-            say!(
-                "wintest: FAILED: {what} (line {line}, last error {})",
-                GetLastError()
-            );
-            ExitProcess(1);
-        }
-        self.0 += 1;
-    }
-}
-
 fn double(value: u32) -> u32 {
     value * 2
 }
@@ -420,7 +402,7 @@ fn time(checks: &mut Checks) {
 /// Entry point.
 #[unsafe(no_mangle)]
 pub extern "C" fn mainCRTStartup() -> u32 {
-    let mut checks = Checks(0);
+    let mut checks = Checks::new("wintest");
     say!("wintest: command line: [{}]", command_line());
     relocations(&mut checks);
     environment_block(&mut checks);
@@ -428,6 +410,6 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     files(&mut checks);
     console(&mut checks);
     time(&mut checks);
-    say!("wintest: all {} checks passed", checks.0);
+    say!("wintest: all {} checks passed", checks.count());
     42
 }

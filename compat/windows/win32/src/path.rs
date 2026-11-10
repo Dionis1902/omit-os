@@ -85,6 +85,19 @@ pub fn translate(path: &str) -> Result<Target, u32> {
     Ok(Target::File(native))
 }
 
+/// The Windows form of an Omit OS path: `/a/b` becomes `C:\a\b`, a
+/// relative path only has its separators changed.
+pub fn to_windows(native: &str) -> String {
+    let mut windows = String::with_capacity(native.len() + 2);
+    if native.starts_with('/') {
+        windows.push_str("C:");
+    }
+    for c in native.chars() {
+        windows.push(if c == '/' { '\\' } else { c });
+    }
+    windows
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -108,6 +121,16 @@ mod tests {
         assert_eq!(translate(r"\\?\C:\a"), Ok(file("/a")));
         // Unix-style paths work too.
         assert_eq!(translate("/bin/ls"), Ok(file("/bin/ls")));
+    }
+
+    #[test]
+    fn converts_back_to_windows_form() {
+        assert_eq!(to_windows("/bin/tool.exe"), r"C:\bin\tool.exe");
+        assert_eq!(to_windows("/"), r"C:\");
+        assert_eq!(to_windows("dir/file"), r"dir\file");
+        for path in ["/a/b.txt", "/", "rel/x"] {
+            assert_eq!(translate(&to_windows(path)), Ok(file(path)));
+        }
     }
 
     #[test]

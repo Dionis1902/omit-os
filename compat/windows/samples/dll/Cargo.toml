@@ -1,0 +1,18 @@
+[package]
+name = "omit-win-sample-dll"
+description = "winsample.dll: a Windows library used to test DLL loading; built for x86_64-pc-windows-msvc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[lib]
+name = "winsample"
+crate-type = ["cdylib"]
+
+[dependencies]
+omit-win-samples = { path = ".." }
+
+[lints]
+workspace = true

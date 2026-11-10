@@ -5,6 +5,8 @@ members = [
     "kernel",
     "compat/windows/pe",
     "compat/windows/samples",
+    "compat/windows/samples/dll",
+    "compat/windows/samples/plugin",
     "compat/windows/win32",
     "libs/abi",
     "libs/acpi",

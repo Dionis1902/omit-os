@@ -33,6 +33,10 @@ pub const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 pub const ERROR_INVALID_NAME: u32 = 123;
 /// The specified module could not be found.
 pub const ERROR_MOD_NOT_FOUND: u32 = 126;
+/// The specified procedure could not be found.
+pub const ERROR_PROC_NOT_FOUND: u32 = 127;
+/// A dynamic link library (DLL) initialization routine failed.
+pub const ERROR_DLL_INIT_FAILED: u32 = 1114;
 /// The directory is not empty.
 pub const ERROR_DIR_NOT_EMPTY: u32 = 145;
 /// Cannot create a file when that file already exists.

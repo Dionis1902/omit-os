@@ -10,7 +10,8 @@
 //!   must be adjusted when the image is not loaded at its preferred
 //!   address;
 //! * [`Pe::imports`] lists the functions the program expects the system to
-//!   provide.
+//!   provide;
+//! * [`Pe::exports`] lists the functions a library offers to others.
 //!
 //! Everything is written from the public format description ("PE Format",
 //! Microsoft Learn). The parser never trusts the file: every offset and
@@ -51,6 +52,7 @@ const FILE_DLL: u16 = 0x2000;
 const SECTION_EXECUTE: u32 = 0x2000_0000;
 const SECTION_WRITE: u32 = 0x8000_0000;
 
+const DIRECTORY_EXPORT: usize = 0;
 const DIRECTORY_IMPORT: usize = 1;
 const DIRECTORY_BASE_RELOCATION: usize = 5;
 const DIRECTORY_TLS: usize = 9;
@@ -87,6 +89,8 @@ pub enum PeError {
     BadRva(u32),
     /// The import tables are malformed.
     BadImport,
+    /// The export tables are malformed.
+    BadExport,
     /// The relocation table is malformed.
     BadRelocation,
     /// A relocation type this loader does not implement.
@@ -116,6 +120,7 @@ impl fmt::Display for PeError {
             Self::BadSection => write!(f, "invalid section table"),
             Self::BadRva(rva) => write!(f, "address {rva:#x} is outside the image"),
             Self::BadImport => write!(f, "invalid import table"),
+            Self::BadExport => write!(f, "invalid export table"),
             Self::BadRelocation => write!(f, "invalid relocation table"),
             Self::UnsupportedRelocation(kind) => {
                 write!(f, "unsupported relocation type {kind}")
@@ -223,6 +228,26 @@ impl fmt::Display for Symbol<'_> {
             Self::Ordinal(ordinal) => write!(f, "#{ordinal}"),
         }
     }
+}
+
+/// A function a library exports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Export<'a> {
+    /// The function's name; `None` if it can only be imported by number.
+    pub name: Option<&'a str>,
+    /// The function's number.
+    pub ordinal: u32,
+    /// Where the function is.
+    pub target: ExportTarget<'a>,
+}
+
+/// What an export refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExportTarget<'a> {
+    /// Code or data in this image, at this address relative to the base.
+    Rva(u32),
+    /// A function in another library, named as `LIBRARY.Function`.
+    Forwarder(&'a str),
 }
 
 /// A validated PE32+ executable.
@@ -570,6 +595,82 @@ impl<'a> Pe<'a> {
             }
         }
         Err(PeError::BadImport)
+    }
+
+    /// The name the library gives itself in its export table, such as
+    /// `sample.dll`, if it has one.
+    pub fn export_name(&self) -> Option<&'a str> {
+        let (table_rva, table_size) = self.directories[DIRECTORY_EXPORT];
+        if table_rva == 0 || table_size == 0 {
+            return None;
+        }
+        let table = self.at(table_rva).ok()?;
+        self.string(read_u32(table, 12).ok()?).ok()
+    }
+
+    /// Calls `visit` for every function the image exports.
+    pub fn exports(&self, mut visit: impl FnMut(Export<'a>)) -> PeResult<()> {
+        let (table_rva, table_size) = self.directories[DIRECTORY_EXPORT];
+        if table_rva == 0 || table_size == 0 {
+            return Ok(());
+        }
+        let bad = |_| PeError::BadExport;
+        let table = self.at(table_rva).map_err(bad)?;
+        let ordinal_base = read_u32(table, 16).map_err(bad)?;
+        let function_count = read_u32(table, 20).map_err(bad)? as usize;
+        let name_count = read_u32(table, 24).map_err(bad)? as usize;
+        // Ordinals are 16 bits wide, which bounds both tables.
+        if function_count > 0x1_0000 || name_count > 0x1_0000 {
+            return Err(PeError::BadExport);
+        }
+        let array = |rva_offset: usize, count: usize, width: usize| -> PeResult<&'a [u8]> {
+            if count == 0 {
+                return Ok(&[]);
+            }
+            let rva = read_u32(table, rva_offset).map_err(bad)?;
+            self.at(rva)
+                .map_err(bad)?
+                .get(..count * width)
+                .ok_or(PeError::BadExport)
+        };
+        let functions = array(28, function_count, 4)?;
+        let names = array(32, name_count, 4)?;
+        let name_ordinals = array(36, name_count, 2)?;
+
+        let table_end = table_rva
+            .checked_add(table_size)
+            .ok_or(PeError::BadExport)?;
+        for index in 0..function_count {
+            let rva = read_u32(functions, index * 4)?;
+            if rva == 0 {
+                // An unused slot in the ordinal range.
+                continue;
+            }
+            // The first name that refers to this function, if any.
+            let mut name = None;
+            for position in 0..name_count {
+                if usize::from(read_u16(name_ordinals, position * 2)?) == index {
+                    let name_rva = read_u32(names, position * 4)?;
+                    name = Some(self.string(name_rva).map_err(bad)?);
+                    break;
+                }
+            }
+            // An address inside the export table itself is not code but
+            // the name of a function in another library.
+            let target = if rva >= table_rva && rva < table_end {
+                ExportTarget::Forwarder(self.string(rva).map_err(bad)?)
+            } else if rva < self.size_of_image {
+                ExportTarget::Rva(rva)
+            } else {
+                return Err(PeError::BadExport);
+            };
+            visit(Export {
+                name,
+                ordinal: ordinal_base.wrapping_add(index as u32),
+                target,
+            });
+        }
+        Ok(())
     }
 
     /// Checks that an 8-byte import slot lies inside a section.

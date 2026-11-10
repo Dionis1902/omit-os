@@ -45,23 +45,39 @@ are started like any other.
   Win32 error codes, path translation (`C:\a\b` is `/a/b`), command-line
   quoting, UTF-16 conversion, the handle table. Host-tested.
 - `userspace/programs/src/bin/winrun` — the loader and the implementation
-  of 43 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
+  of 47 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
   Omit OS system calls.
 - `compat/windows/samples` — test programs. They are real Windows console
   executables (target `x86_64-pc-windows-msvc`), built by `cargo xtask`
   with the LLVM linker that ships with Rust.
 
-**Loading.** `winrun` validates the file, resolves every import *before*
-mapping anything, maps the image at a 64 KiB-aligned address chosen by the
-kernel, applies base relocations, fills the import address table, applies
-per-section access rights, allocates a stack with a guard page, sets up a
-minimal thread environment block (stack bounds, self pointer, process ID,
-last-error slot, pointer to a process environment block holding the image
-base) and calls the entry point on the new stack.
+**Loading.** `winrun` validates the file, maps the image at a 64
+KiB-aligned address chosen by the kernel, applies base relocations, fills
+the import address table and applies per-section access rights. It then
+allocates a stack with a guard page, sets up a minimal thread environment
+block (stack bounds, self pointer, process ID, last-error slot, pointer to
+a process environment block holding the image base) and calls the entry
+point on the new stack. No code of the program runs before every import
+has been resolved.
+
+**Libraries (DLLs).** An import from `KERNEL32.dll` is bound to the
+built-in implementation. An import from any other library makes the
+loader look for a file of that name — next to the importing image, then
+in `/bin` — and load it the same way, recursively; its export table
+provides the addresses. Libraries are initialised (`DllMain` with
+`DLL_PROCESS_ATTACH`) after the libraries they depend on and before the
+program starts. `LoadLibraryA`, `GetProcAddress`, `GetModuleHandleA/W`,
+`GetModuleFileNameA` and `FreeLibrary` work on the same module list;
+`KERNEL32.dll` appears in it as a pseudo-module. Libraries are never
+unloaded, exports forwarded to another library are not followed, and a
+failed `LoadLibrary` leaves nothing mapped. No Microsoft library is, or
+may be, shipped: a program that needs `USER32.dll` or the C runtime DLLs
+is refused because those files do not exist here.
 
 **Honesty rules for the API.** A function is either implemented for the
 cases its comment states, or absent. A program that imports an absent
-function is refused before it starts, with every missing function named —
+function or library is refused before it starts, with every missing item
+named —
 it does not start and crash later. Within an implemented function,
 unsupported cases fail with a real Win32 error code. There are no stubs
 that return success without doing the work.
@@ -84,21 +100,27 @@ Verified in QEMU by the `windows-programs` test:
 - two Windows programs running at once keep their SSE registers apart
   (the test fails when the kernel's save/restore is disabled — this was
   checked);
-- a program needing unimplemented functions, a file that is not a PE
-  image, and a native program given to `winrun` are each refused with a
-  specific message.
+- a program imports functions from a DLL file, which is loaded,
+  relocated, bound to `KERNEL32` itself and initialised first; the
+  program then loads a second DLL on request, which in turn depends on
+  the first (33 self-checked operations);
+- a program needing unimplemented functions or a missing library, a file
+  that is not a PE image, a DLL started as a program, and a native
+  program given to `winrun` are each refused with a specific message.
 
 ## Limitations
 
 This is a proof that the approach works, not Windows compatibility.
 
-- **Only programs that import nothing but the 43 implemented functions
-  run.** That excludes practically all existing software: anything linked
-  against the C runtime, the Rust standard library, or any DLL other than
-  `KERNEL32.dll`. `winrun --list` prints the functions.
+- **Only programs whose imports are all satisfied by the 47 implemented
+  `KERNEL32.dll` functions, or by DLL files that are present and
+  themselves loadable, run.** That excludes practically all existing
+  software: anything linked against the C runtime, the Rust standard
+  library, or a Windows system DLL other than `KERNEL32.dll`.
+  `winrun --list` prints the functions.
 - Console programs only. No graphics, windows, messages, registry,
-  networking, threads, processes started by Windows programs, DLL loading,
-  structured exception handling, thread-local storage, or environment.
+  networking, threads, processes started by Windows programs, structured
+  exception handling, thread-local storage, or environment.
 - The test programs were built here and have **not been run on Windows**
   to confirm they behave identically there.
 - Images without relocation information are refused: the kernel cannot
@@ -130,5 +152,5 @@ This is a proof that the approach works, not Windows compatibility.
   crash without affecting anything but its own process.
 - Compatibility grows by adding functions to the loader, one documented
   API at a time, each with a test program. The next steps of real value
-  are threads, the functions the C runtime start-up code calls, and
-  loading several modules (the import of one DLL from another).
+  are threads and thread-local storage, and the functions the C runtime
+  start-up code calls.

@@ -93,6 +93,10 @@ unsafe extern "system" {
     pub safe fn GetCommandLineA() -> *const c_char;
     pub safe fn GetCurrentProcessId() -> u32;
     pub fn GetModuleHandleA(name: *const c_char) -> *mut c_void;
+    pub fn GetModuleFileNameA(module: *mut c_void, buffer: *mut u8, size: u32) -> u32;
+    pub fn LoadLibraryA(name: *const c_char) -> *mut c_void;
+    pub safe fn FreeLibrary(module: *mut c_void) -> Bool;
+    pub fn GetProcAddress(module: *mut c_void, name: *const c_char) -> *mut c_void;
     pub safe fn GetProcessHeap() -> Handle;
     pub safe fn HeapAlloc(heap: Handle, flags: u32, size: usize) -> *mut u8;
     pub fn HeapReAlloc(heap: Handle, flags: u32, pointer: *mut u8, size: usize) -> *mut u8;
@@ -145,6 +149,42 @@ macro_rules! say {
         let _ = write!(out, $($arg)*);
         let _ = out.write_str("\r\n");
     }};
+}
+
+/// Counts checks for a test program; a failed check reports itself, with
+/// the line it is on and the thread's last error code, and ends the
+/// program with exit code 1.
+pub struct Checks {
+    program: &'static str,
+    passed: u32,
+}
+
+impl Checks {
+    /// Starts counting for the program called `program`.
+    pub const fn new(program: &'static str) -> Self {
+        Self { program, passed: 0 }
+    }
+
+    /// Records that `condition`, described by `what`, holds — or ends the
+    /// program if it does not.
+    #[track_caller]
+    pub fn check(&mut self, condition: bool, what: &str) {
+        if !condition {
+            let line = core::panic::Location::caller().line();
+            say!(
+                "{}: FAILED: {what} (line {line}, last error {})",
+                self.program,
+                GetLastError()
+            );
+            ExitProcess(1);
+        }
+        self.passed += 1;
+    }
+
+    /// Number of checks passed so far.
+    pub const fn count(&self) -> u32 {
+        self.passed
+    }
 }
 
 /// The program's command line.

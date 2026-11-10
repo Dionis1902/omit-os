@@ -157,6 +157,20 @@ name = "omit-vfs"
 version = "0.1.0"
 
 [[package]]
+name = "omit-win-sample-dll"
+version = "0.1.0"
+dependencies = [
+ "omit-win-samples",
+]
+
+[[package]]
+name = "omit-win-sample-plugin"
+version = "0.1.0"
+dependencies = [
+ "omit-win-samples",
+]
+
+[[package]]
 name = "omit-win-samples"
 version = "0.1.0"
 

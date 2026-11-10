@@ -41,6 +41,8 @@ use omit_win32::path::{self, Target};
 use omit_win32::text::{self, CP_UTF8};
 use omit_win32::{cmdline, error};
 
+use crate::loader;
+
 type Bool = i32;
 const TRUE: Bool = 1;
 const FALSE: Bool = 0;
@@ -288,19 +290,203 @@ extern "win64" fn GetCommandLineW() -> *const u16 {
     with_state(|state| state.command_line_wide.as_ptr())
 }
 
-/// `GetModuleHandleA`: only for the program itself (a null name).
-extern "win64" fn GetModuleHandleA(name: *const c_char) -> usize {
-    if name.is_null() {
-        with_state(|state| state.image_base)
+// ---------------------------------------------------------------------
+// Modules (the program and its libraries)
+// ---------------------------------------------------------------------
+
+/// The module handle of `KERNEL32.dll`: the address of this marker. The
+/// library is part of this program rather than a loaded image.
+static KERNEL32_MODULE: u8 = 0;
+
+fn kernel32_module() -> usize {
+    &raw const KERNEL32_MODULE as usize
+}
+
+fn is_kernel32(name: &str) -> bool {
+    name.eq_ignore_ascii_case("kernel32.dll") || name.eq_ignore_ascii_case("kernel32")
+}
+
+/// Turns a library name as Windows programs write it into what the
+/// loader takes: a bare file name, or an Omit OS path if a directory was
+/// given.
+fn library_name(name: &str) -> Result<String, u32> {
+    if name.contains(['\\', '/', ':']) {
+        file_path(Ok(name))
     } else {
-        set_last_error(ERROR_MOD_NOT_FOUND);
-        0
+        Ok(name.into())
     }
 }
 
-/// `GetModuleHandleW`: only for the program itself (a null name).
-extern "win64" fn GetModuleHandleW(name: *const u16) -> usize {
-    GetModuleHandleA(name.cast())
+fn module_handle(name: Result<&str, u32>) -> usize {
+    let found = name.and_then(|name| {
+        if is_kernel32(name) {
+            return Ok(kernel32_module());
+        }
+        loader::find(&library_name(name)?).ok_or(ERROR_MOD_NOT_FOUND)
+    });
+    found.unwrap_or_else(|code| {
+        set_last_error(code);
+        0
+    })
+}
+
+/// `GetModuleHandleA`: the handle (base address) of the program itself
+/// for a null name, or of a library that is already loaded.
+///
+/// # Safety
+///
+/// `name` must be null or a NUL-terminated string.
+unsafe extern "win64" fn GetModuleHandleA(name: *const c_char) -> usize {
+    if name.is_null() {
+        return with_state(|state| state.image_base);
+    }
+    // SAFETY: guaranteed by the caller.
+    module_handle(unsafe { text_a(name) })
+}
+
+/// `GetModuleHandleW`: see [`GetModuleHandleA`].
+///
+/// # Safety
+///
+/// `name` must be null or a NUL-terminated UTF-16 string.
+unsafe extern "win64" fn GetModuleHandleW(name: *const u16) -> usize {
+    if name.is_null() {
+        return with_state(|state| state.image_base);
+    }
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { text_w(name) };
+    module_handle(name.as_deref().map_err(|&code| code))
+}
+
+/// `LoadLibraryA`: loads a library file and the libraries it needs, runs
+/// their initialisation routines, and returns the library's handle. A
+/// name without a directory is looked for in `/bin`; `.dll` is assumed if
+/// there is no extension. Loading an already loaded library returns the
+/// same handle.
+///
+/// # Safety
+///
+/// `name` must be null or a NUL-terminated string.
+unsafe extern "win64" fn LoadLibraryA(name: *const c_char) -> usize {
+    // SAFETY: guaranteed by the caller.
+    let name = unsafe { text_a(name) };
+    let loaded = name.and_then(|name| {
+        if is_kernel32(name) {
+            return Ok(kernel32_module());
+        }
+        let (base, initialisers) =
+            loader::load_library(&library_name(name)?).map_err(|error| match error {
+                loader::LoadError::Unusable(_) => ERROR_BAD_EXE_FORMAT,
+                loader::LoadError::Missing(items) => {
+                    if items
+                        .iter()
+                        .any(|item| item.ends_with("(library not found)"))
+                    {
+                        ERROR_MOD_NOT_FOUND
+                    } else {
+                        ERROR_PROC_NOT_FOUND
+                    }
+                }
+            })?;
+        for library in initialisers {
+            // SAFETY: the loader validated, mapped, relocated and bound
+            // the library; its entry point has the `DllMain` signature.
+            // The third argument is null for libraries loaded on request.
+            let ok = unsafe {
+                let entry: extern "win64" fn(usize, u32, usize) -> Bool =
+                    core::mem::transmute(library.entry);
+                entry(library.base, crate::DLL_PROCESS_ATTACH as u32, 0)
+            };
+            if ok == FALSE {
+                // The library stays mapped (libraries are never unloaded)
+                // but the caller is told it cannot be used.
+                return Err(ERROR_DLL_INIT_FAILED);
+            }
+        }
+        Ok(base)
+    });
+    loaded.unwrap_or_else(|code| {
+        set_last_error(code);
+        0
+    })
+}
+
+/// `FreeLibrary`: succeeds for a loaded library. Libraries stay loaded
+/// until the process ends.
+extern "win64" fn FreeLibrary(module: usize) -> Bool {
+    if module == kernel32_module() || loader::path_of(module).is_some() {
+        TRUE
+    } else {
+        fail(ERROR_MOD_NOT_FOUND)
+    }
+}
+
+/// `GetProcAddress`: the address of a function exported by a module, by
+/// name or (for loaded libraries) by ordinal.
+///
+/// # Safety
+///
+/// `name` must be an ordinal (a value below 65536) or a NUL-terminated
+/// string.
+unsafe extern "win64" fn GetProcAddress(module: usize, name: *const c_char) -> usize {
+    let symbol = if (name as usize) < 0x1_0000 {
+        Ok(Symbol::Ordinal(name as usize as u16))
+    } else {
+        // SAFETY: not an ordinal, so the caller guarantees a string.
+        unsafe { text_a(name) }.map(Symbol::Name)
+    };
+    let address = symbol.and_then(|symbol| {
+        if module == kernel32_module() {
+            resolve(symbol).ok_or(ERROR_PROC_NOT_FOUND)
+        } else if loader::path_of(module).is_none() {
+            Err(ERROR_MOD_NOT_FOUND)
+        } else {
+            loader::export(module, symbol).ok_or(ERROR_PROC_NOT_FOUND)
+        }
+    });
+    address.unwrap_or_else(|code| {
+        set_last_error(code);
+        0
+    })
+}
+
+/// `GetModuleFileNameA`: the path of a module's file, in Windows form
+/// (`C:\bin\tool.exe`); a null handle means the program. Returns the
+/// number of bytes stored, not counting the terminator; if the buffer is
+/// too small the path is truncated and the buffer size returned, with
+/// `ERROR_INSUFFICIENT_BUFFER`.
+///
+/// # Safety
+///
+/// `buffer` must be valid for writing `size` bytes.
+unsafe extern "win64" fn GetModuleFileNameA(module: usize, buffer: *mut u8, size: u32) -> u32 {
+    let base = if module == 0 {
+        with_state(|state| state.image_base)
+    } else {
+        module
+    };
+    let Some(native) = loader::path_of(base) else {
+        set_last_error(ERROR_MOD_NOT_FOUND);
+        return 0;
+    };
+    if buffer.is_null() || size == 0 {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return 0;
+    }
+    let path = path::to_windows(&native);
+    let size = size as usize;
+    let copied = path.len().min(size - 1);
+    // SAFETY: `copied + 1 <= size` bytes are written to a buffer the
+    // caller guarantees to be that large.
+    unsafe {
+        core::ptr::copy_nonoverlapping(path.as_ptr(), buffer, copied);
+        buffer.add(copied).write(0);
+    }
+    if copied < path.len() {
+        set_last_error(ERROR_INSUFFICIENT_BUFFER);
+        return size as u32;
+    }
+    copied as u32
 }
 
 /// `IsDebuggerPresent`: there is no debugger.
@@ -1164,6 +1350,7 @@ exports! {
     CreateFileW,
     DeleteFileA,
     ExitProcess,
+    FreeLibrary,
     GetACP,
     GetCommandLineA,
     GetCommandLineW,
@@ -1178,8 +1365,10 @@ exports! {
     GetFileSizeEx,
     GetFileType,
     GetLastError,
+    GetModuleFileNameA,
     GetModuleHandleA,
     GetModuleHandleW,
+    GetProcAddress,
     GetProcessHeap,
     GetStdHandle,
     GetTickCount,
@@ -1189,6 +1378,7 @@ exports! {
     HeapReAlloc,
     HeapSize,
     IsDebuggerPresent,
+    LoadLibraryA,
     MoveFileA,
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
@@ -1203,14 +1393,10 @@ exports! {
     WriteFile,
 }
 
-/// The address of the implementation of `symbol` in `library`, if there
-/// is one. Library names are compared without regard to case, as Windows
-/// does. Imports by ordinal are not supported: the ordinals of system
-/// libraries are not a documented interface.
-pub fn resolve(library: &str, symbol: Symbol<'_>) -> Option<usize> {
-    if !library.eq_ignore_ascii_case("kernel32.dll") {
-        return None;
-    }
+/// The address of the implementation of the `KERNEL32.dll` function
+/// `symbol`, if there is one. Imports by ordinal are not supported: the
+/// ordinals of system libraries are not a documented interface.
+pub fn resolve(symbol: Symbol<'_>) -> Option<usize> {
     match symbol {
         Symbol::Name(name) => lookup(name),
         Symbol::Ordinal(_) => None,

@@ -248,14 +248,15 @@ system library; a desktop that is a single program.
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
 | PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
 | Windows program loader `winrun`: mapping, relocation, import binding, W^X section rights, stack, TEB/PEB | Working, tested in QEMU |
-| Windows API: 43 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process information) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else can run**; see ADR 0011 |
+| Windows API: 47 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process and module information) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else from Windows can run**; see ADR 0011 |
+| Windows libraries (DLL files): export tables, loading with dependencies, initialisation order, `LoadLibraryA`, `GetProcAddress` | Working, tested with two DLLs built in this repository (33 checks). No Windows system DLL exists here |
 | Windows programs started by name from the shell or by `spawn`; missing functions reported before start | Working, tested |
 | PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
 | Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
 | Programs opening their own windows, a terminal emulator, resizing, USB input, graphics modes | Not started |
-| Windows: C runtime, threads, DLLs, exceptions, TLS, graphics, registry, networking, 32-bit programs | Not started |
+| Windows: C runtime, threads, exceptions, TLS, graphics, registry, networking, 32-bit programs | Not started |
 
 ### What has been verified, and how
 
@@ -340,9 +341,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Linux driver reuse is demonstrated for a single small driver without
   interrupts or DMA, in emulation. It says little about how hard network,
   storage or graphics drivers will be.
-- Windows compatibility covers console programs that import only the 43
-  implemented `KERNEL32.dll` functions (`winrun --list`). Practically no
-  existing Windows software fits that; the test programs are built in this
+- Windows compatibility covers console programs that import only the 47
+  implemented `KERNEL32.dll` functions (`winrun --list`) and DLLs that do
+  the same. Practically no existing Windows software fits that; the test programs are built in this
   repository and have not been run on Windows itself for comparison.
 - AVX is not enabled, and no memory can be writable and executable.
 - No performance measurements have been made, and no performance claims are

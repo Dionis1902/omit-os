@@ -136,9 +136,12 @@ const USER_PROGRAMS: &[&str] = &[
 
 /// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
 const WINDOWS_PROGRAMS: &[&str] = &[
+    "windll.exe",
     "winfloat.exe",
     "winhello.exe",
     "winmissing.exe",
+    "winplugin.dll",
+    "winsample.dll",
     "wintest.exe",
 ];
 
@@ -156,8 +159,6 @@ fn build_windows_programs() -> Result<()> {
         "-Clinker-flavor=lld-link",
         "-Cpanic=abort",
         "-Clink-arg=/NODEFAULTLIB",
-        "-Clink-arg=/ENTRY:mainCRTStartup",
-        "-Clink-arg=/SUBSYSTEM:CONSOLE",
         // Reproducible output; see the loader's flags in .cargo/config.toml.
         "-Clink-arg=/Brepro",
         "-Clink-arg=/DEBUG:NONE",
@@ -169,14 +170,12 @@ fn build_windows_programs() -> Result<()> {
             "CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS",
             flags.join(" "),
         )
-        .args([
-            "build",
-            "--package",
-            "omit-win-samples",
-            "--release",
-            "--target",
-            WINDOWS_TARGET,
-        ])
+        .args(["build", "--release", "--target", WINDOWS_TARGET])
+        // The entry point and subsystem are set by each package's build
+        // script: they differ between programs and libraries.
+        .args(["--package", "omit-win-samples"])
+        .args(["--package", "omit-win-sample-dll"])
+        .args(["--package", "omit-win-sample-plugin"])
         .status()?;
     if !status.success() {
         return Err("building the Windows test programs failed".into());
@@ -641,7 +640,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinrun\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\nrun\nsleeper\nspin\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -842,10 +841,21 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             // The directory the test created and removed is gone.
             ("ls /", "ls /\nbin\nwintest.log\nomit:/# "),
+            // Libraries: one imported by the program, one loaded on
+            // request that itself uses the first.
+            (
+                "windll.exe",
+                "[winsample.dll] printed by the library through its own imports\r\nwindll: program file: C:\\bin\\windll.exe\r\nwindll: all 33 checks passed\r\n",
+            ),
+            // A library is not a program.
+            (
+                "winrun /bin/winsample.dll",
+                "winrun: /bin/winsample.dll: this is a library, not a program\n",
+            ),
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateThread, which is not implemented\nwinrun: /bin/winmissing.exe: needs user32.dll!MessageBoxA, which is not implemented\nwinrun: /bin/winmissing.exe: 2 of the Windows functions it needs are not implemented\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateThread, which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: 2 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),
