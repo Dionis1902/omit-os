@@ -2800,6 +2800,42 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                     && title(image, "Files — bin")
             },
         )?;
+
+        // A new folder, made with the tool bar's button and named by
+        // typing over the name it starts with. (That it exists is
+        // looked at after the desktop has closed.)
+        use omit_gfx::desktop::App;
+        use omit_gfx::files::Action;
+        use omit_gfx::font::REGULAR_12;
+        let (width, height) = (half.w - 2 * BORDER, half.h - 2 * BORDER - TITLE_HEIGHT);
+        let mut arranged = Files::new(OneFolder, Vec::new(), "/", Box::new(|_, _| {}));
+        let mut scratch = omit_gfx::surface::Surface::new(width as usize, height as usize, 0);
+        arranged.draw(&mut scratch.canvas(), width, height, &theme);
+        let button = arranged.action_button(Action::NewFolder);
+        mouse.click(
+            half.x + BORDER + button.x + button.w / 2,
+            half.y + BORDER + TITLE_HEIGHT + button.y + button.h / 2,
+        )?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the new folder in Files", patience, |image| {
+            screen_writes(
+                image,
+                "New folder selected",
+                REGULAR_12,
+                theme.text_3,
+                theme.window,
+            )
+        })?;
+        type_on_keyboard(&check.monitor, &["s", "t", "u", "f", "f", "ret"])?;
+        wait_for_screen(check, "the folder named in Files", patience, |image| {
+            screen_writes(
+                image,
+                "stuff selected",
+                REGULAR_12,
+                theme.text_3,
+                theme.window,
+            )
+        })?;
     }
 
     // The Calculator: the ninth window. 7 × 6 = by mouse; the result is
@@ -3035,7 +3071,10 @@ fn check_screenshot(image: &Screenshot) -> Vec<String> {
     if image.count(text.clone(), SCREEN_BACKGROUND) < text_pixels / 2 {
         failures.push("text area does not have the console background".into());
     }
-    if image.count(text.clone(), SCREEN_FOREGROUND) < 500 {
+    // (A screen of short lines has few such pixels: a listing of forty
+    // names and a dozen other lines measured 397, 128 of them the
+    // cursor. An empty screen with only the cursor must not pass.)
+    if image.count(text.clone(), SCREEN_FOREGROUND) < 200 {
         failures.push("text area shows no text".into());
     }
     if image.count(text, SCREEN_STATUS_BACKGROUND) != 0 {
@@ -3344,25 +3383,30 @@ fn run_qemu_captured(
                 // And what was chosen in Settings (the teal accent, last)
                 // was written down for the next start of the desktop.
                 let mut from = after_desktop;
-                for (file, expected, failure) in [
+                for (command, expected, failure) in [
                     (
-                        "/typed",
+                        "cat /typed",
                         "\nkeyboard input\n",
                         "the line typed into tee is not in its file",
                     ),
                     (
-                        "/note-1.txt",
+                        "ls /bin",
+                        "stuff",
+                        "the folder made in Files does not exist",
+                    ),
+                    (
+                        "cat /note-1.txt",
                         "\nhello notes\nsecond\n",
                         "the note saved in Notes is not in its file",
                     ),
                     (
-                        "/desktop.conf",
+                        "cat /desktop.conf",
                         "\naccent=teal\n",
                         "the settings chosen were not kept",
                     ),
                 ] {
                     let Some(start) = from else { break };
-                    let _ = stdin.write_all(format!("cat {file}\r").as_bytes());
+                    let _ = stdin.write_all(format!("{command}\r").as_bytes());
                     from = wait_for_prompt(start);
                     let shown = from.map(|to| {
                         String::from_utf8_lossy(&output.lock().expect("output lock")[start..to])
@@ -3372,10 +3416,23 @@ fn run_qemu_captured(
                         failures.push(format!("desktop: {failure}"));
                     }
                 }
-                // The text console must be back on the screen.
-                match take_screenshot(&check.monitor, &check.screenshot) {
-                    Ok(image) => failures.extend(
-                        check_screenshot(&image)
+                // The text console must be back on the screen. (The
+                // screen is drawn after the serial line is written, so
+                // what was just printed may take a moment to be there.)
+                let mut seen = Err("no screenshot taken".to_string());
+                for _ in 0..20 {
+                    seen = match take_screenshot(&check.monitor, &check.screenshot) {
+                        Ok(image) => Ok(check_screenshot(&image)),
+                        Err(error) => Err(error.to_string()),
+                    };
+                    if seen.as_ref().is_ok_and(Vec::is_empty) {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(500));
+                }
+                match seen {
+                    Ok(wrong) => failures.extend(
+                        wrong
                             .into_iter()
                             .map(|failure| format!("after the desktop: {failure}")),
                     ),

@@ -55,6 +55,51 @@ pub trait Storage {
     /// What the folder at `path` (absolute, `/`-separated) holds, in any
     /// order; or why that cannot be told.
     fn list(&mut self, path: &str) -> Result<Vec<Entry>, String>;
+
+    /// Creates the folder `path`. (A storage that cannot be changed
+    /// keeps these three as they are: they say so.)
+    fn make_folder(&mut self, _path: &str) -> Result<(), String> {
+        Err("Nothing can be changed here".into())
+    }
+
+    /// Gives the file or folder `from` the path `to`.
+    fn rename(&mut self, _from: &str, _to: &str) -> Result<(), String> {
+        Err("Nothing can be changed here".into())
+    }
+
+    /// Removes the file or empty folder `path`.
+    fn remove(&mut self, _path: &str) -> Result<(), String> {
+        Err("Nothing can be changed here".into())
+    }
+}
+
+/// The longest name that can be typed.
+pub const NAME_MAX: usize = 64;
+/// What a new folder is called until it is given a name.
+pub const NEW_FOLDER: &str = "New folder";
+
+/// A name being typed over an entry's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Renaming {
+    /// Which entry.
+    index: usize,
+    /// What has been typed.
+    text: String,
+    /// Nothing has been typed yet: the old name is there, as if
+    /// selected, and the first key replaces all of it. (Right and End
+    /// keep it, to be changed at its end.)
+    untouched: bool,
+}
+
+/// The buttons at the right of the tool bar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    /// Makes a folder here and asks for its name.
+    NewFolder,
+    /// Asks for a new name for the selected entry.
+    Rename,
+    /// Removes the selected entry, when pressed a second time.
+    Delete,
 }
 
 /// A place in the sidebar.
@@ -139,6 +184,13 @@ pub struct Files<S: Storage> {
     error: Option<String>,
     selected: Option<usize>,
     first_row: usize,
+    /// The entry being given a new name.
+    renaming: Option<Renaming>,
+    /// The entry that Delete was pressed on once: a second time
+    /// removes it.
+    deleting: Option<usize>,
+    /// Why the last change did not happen.
+    message: Option<String>,
     /// Folders left by going somewhere else, most recent last.
     history: Vec<String>,
     /// The size of the content area, as of the last draw.
@@ -159,6 +211,9 @@ impl<S: Storage> Files<S> {
             error: None,
             selected: None,
             first_row: 0,
+            renaming: None,
+            deleting: None,
+            message: None,
             history: Vec::new(),
             size: SIZE,
         };
@@ -206,6 +261,181 @@ impl<S: Storage> Files<S> {
         self.path = path;
         self.selected = None;
         self.first_row = 0;
+        self.renaming = None;
+        self.deleting = None;
+    }
+
+    /// Reads the folder again after a change to it, and selects the
+    /// entry called `select` if there is one.
+    fn refresh(&mut self, select: Option<&str>) {
+        let first_row = self.first_row;
+        self.load(self.path.clone());
+        self.first_row = first_row.min(self.entries.len().saturating_sub(1));
+        self.selected =
+            select.and_then(|name| self.entries.iter().position(|entry| entry.name == name));
+        self.keep_selection_visible();
+    }
+
+    /// The name being typed, while an entry is being renamed.
+    pub fn renaming(&self) -> Option<&str> {
+        self.renaming
+            .as_ref()
+            .map(|renaming| renaming.text.as_str())
+    }
+
+    /// Whether Delete has been pressed once on the selected entry, and
+    /// a second time would remove it.
+    pub fn is_delete_armed(&self) -> bool {
+        self.deleting.is_some()
+    }
+
+    /// Why the last change did not happen, until something else is
+    /// done.
+    pub fn message(&self) -> Option<&str> {
+        self.message.as_deref()
+    }
+
+    /// Makes a folder with a name nothing here has, and asks for its
+    /// real name.
+    fn new_folder(&mut self) {
+        if self.error.is_some() {
+            return;
+        }
+        let taken = |name: &str| self.entries.iter().any(|entry| entry.name == name);
+        let name = core::iter::once(NEW_FOLDER.to_string())
+            .chain((2..).map(|number| format!("{NEW_FOLDER} {number}")))
+            .find(|name| !taken(name))
+            .unwrap_or_else(|| NEW_FOLDER.into());
+        match self.storage.make_folder(&join(&self.path, &name)) {
+            Ok(()) => {
+                self.refresh(Some(&name));
+                self.start_rename();
+            }
+            Err(reason) => self.message = Some(format!("No folder was made: {reason}")),
+        }
+    }
+
+    fn start_rename(&mut self) {
+        if let Some(index) = self.selected {
+            self.renaming = Some(Renaming {
+                index,
+                text: self.entries[index].name.clone(),
+                untouched: true,
+            });
+        }
+    }
+
+    /// Enter while renaming: gives the entry the name typed.
+    fn finish_rename(&mut self) {
+        let Some(Renaming { index, text, .. }) = self.renaming.take() else {
+            return;
+        };
+        let old = self.entries[index].name.clone();
+        let new = text.trim();
+        if new.is_empty() || new == old {
+            return;
+        }
+        if new == "." || new == ".." {
+            self.message = Some(format!("Nothing can be called {new}"));
+            return;
+        }
+        if self.entries.iter().any(|entry| entry.name == new) {
+            self.message = Some(format!("There is already something called {new}"));
+            return;
+        }
+        match self
+            .storage
+            .rename(&join(&self.path, &old), &join(&self.path, new))
+        {
+            Ok(()) => {
+                let new = new.to_string();
+                self.refresh(Some(&new));
+            }
+            Err(reason) => self.message = Some(format!("{old} was not renamed: {reason}")),
+        }
+    }
+
+    /// A key while a name is being typed.
+    fn rename_key(&mut self, code: i32) {
+        const ENTER: i32 = 13;
+        const ESCAPE: i32 = 27;
+        const BACKSPACE: i32 = 127;
+        const RIGHT: i32 = 0x104;
+        const END: i32 = 0x106;
+        let Some(renaming) = &mut self.renaming else {
+            return;
+        };
+        let untouched = core::mem::take(&mut renaming.untouched);
+        match code {
+            ENTER => self.finish_rename(),
+            ESCAPE => self.renaming = None,
+            RIGHT | END => {}
+            BACKSPACE if untouched => renaming.text.clear(),
+            BACKSPACE => {
+                renaming.text.pop();
+            }
+            // A name cannot contain the character that separates names.
+            0x20..=0x7E if code != i32::from(b'/') => {
+                if untouched {
+                    renaming.text.clear();
+                }
+                if renaming.text.chars().count() < NAME_MAX {
+                    renaming.text.push(char::from(code as u8));
+                }
+            }
+            // Any other key leaves the name as it is, still to be
+            // replaced by the first thing typed.
+            _ => renaming.untouched = untouched,
+        }
+    }
+
+    /// Delete: the first time asks, the second (`armed`: the entry it
+    /// was pressed on before) removes.
+    fn delete(&mut self, armed: Option<usize>) {
+        let Some(index) = self.selected else {
+            return;
+        };
+        if armed != Some(index) {
+            self.deleting = Some(index);
+            return;
+        }
+        let name = self.entries[index].name.clone();
+        match self.storage.remove(&join(&self.path, &name)) {
+            Ok(()) => {
+                // The entry that takes its place is selected, so that
+                // several can be removed one after another.
+                let next = self
+                    .entries
+                    .get(index + 1)
+                    .or_else(|| index.checked_sub(1).and_then(|i| self.entries.get(i)))
+                    .map(|entry| entry.name.clone());
+                self.refresh(next.as_deref());
+            }
+            Err(reason) => self.message = Some(format!("{name} was not deleted: {reason}")),
+        }
+    }
+
+    fn perform(&mut self, action: Action, armed: Option<usize>) {
+        match action {
+            Action::NewFolder => self.new_folder(),
+            Action::Rename => self.start_rename(),
+            Action::Delete => self.delete(armed),
+        }
+    }
+
+    /// Where the button for `action` is, in the tool bar.
+    pub fn action_button(&self, action: Action) -> Rect {
+        let from_right = match action {
+            Action::Delete => 1,
+            Action::Rename => 2,
+            Action::NewFolder => 3,
+        };
+        Rect::new(
+            self.size.0 - 6 - from_right * (BUTTON.0 + 4),
+            (TOOLBAR - BUTTON.1) / 2,
+            BUTTON.0,
+            BUTTON.1,
+        )
     }
 
     /// Goes to the folder `path`, remembering where it came from.
@@ -364,7 +594,8 @@ impl<S: Storage> App for Files<S> {
         glyph(canvas, self.up_button(), "up", 16, dim(self.path != "/"));
         let crumbs = self.crumbs();
         {
-            let mut bar = canvas.clipped(Rect::new(0, 0, width - 8, TOOLBAR));
+            let room = self.action_button(Action::NewFolder).x - 10;
+            let mut bar = canvas.clipped(Rect::new(0, 0, room, TOOLBAR));
             for (index, (area, _)) in crumbs.iter().enumerate() {
                 let last = index + 1 == crumbs.len();
                 let name = if index == 0 {
@@ -384,6 +615,30 @@ impl<S: Storage> App for Files<S> {
                     bar.write(area.right() + 4, y, "›", REGULAR_13, theme.text_3);
                 }
             }
+        }
+
+        // The buttons that change things: new folder, rename, delete.
+        let chosen = self.selected.is_some();
+        glyph(
+            canvas,
+            self.action_button(Action::NewFolder),
+            "folder",
+            16,
+            dim(self.error.is_none()),
+        );
+        glyph(
+            canvas,
+            self.action_button(Action::Rename),
+            "ren",
+            16,
+            dim(chosen),
+        );
+        let bin = self.action_button(Action::Delete);
+        if self.deleting.is_some() {
+            canvas.round_rect(bin, 7, theme.danger, 255);
+            glyph(canvas, bin, "trash", 16, 0xFF_FF_FF);
+        } else {
+            glyph(canvas, bin, "trash", 16, dim(chosen));
         }
 
         // The sidebar: places.
@@ -468,10 +723,43 @@ impl<S: Storage> App for Files<S> {
             }
             let text_y = area.y + (area.h - REGULAR_13.height()) / 2;
             let room = size_right - 70 - (area.x + 40);
-            let (name, cut) = REGULAR_13.fit(&entry.name, room);
-            let end = canvas.write(area.x + 40, text_y, name, REGULAR_13, theme.text);
-            if cut {
-                canvas.write(end, text_y, "…", REGULAR_13, theme.text);
+            match &self.renaming {
+                Some(renaming) if renaming.index == index => {
+                    // The name as a field being typed in: the end of
+                    // what was typed is what must be seen.
+                    let field = Rect::new(area.x + 34, area.y + 3, room + 8, area.h - 6);
+                    canvas.round_rect(field, 6, theme.control, 255);
+                    canvas.round_outline(field, 6, theme.accent, 255);
+                    let mut shown = renaming.text.as_str();
+                    while REGULAR_13.width(shown) > field.w - 14 {
+                        let mut characters = shown.chars();
+                        characters.next();
+                        shown = characters.as_str();
+                    }
+                    if renaming.untouched {
+                        // The old name, marked as what typing replaces.
+                        canvas.round_rect(
+                            Rect::new(
+                                area.x + 38,
+                                area.y + 6,
+                                REGULAR_13.width(shown) + 4,
+                                area.h - 12,
+                            ),
+                            3,
+                            theme.accent_soft.colour,
+                            theme.accent_soft.alpha,
+                        );
+                    }
+                    let end = canvas.write(area.x + 40, text_y, shown, REGULAR_13, theme.text);
+                    canvas.fill(Rect::new(end + 1, area.y + 7, 1, area.h - 14), theme.text);
+                }
+                _ => {
+                    let (name, cut) = REGULAR_13.fit(&entry.name, room);
+                    let end = canvas.write(area.x + 40, text_y, name, REGULAR_13, theme.text);
+                    if cut {
+                        canvas.write(end, text_y, "…", REGULAR_13, theme.text);
+                    }
+                }
             }
             let small_y = area.y + (area.h - REGULAR_12.height()) / 2;
             if !entry.is_dir {
@@ -500,9 +788,18 @@ impl<S: Storage> App for Files<S> {
             1 => "1 item".into(),
             count => format!("{count} items"),
         };
-        let text = match self.selected() {
-            Some(name) => format!("{count} · {name} selected"),
-            None => count,
+        let armed = self.deleting.and_then(|index| self.entries.get(index));
+        let (text, ink) = match (&self.message, armed, self.selected()) {
+            (Some(message), _, _) => (message.clone(), theme.danger),
+            (None, Some(entry), _) => (
+                format!(
+                    "Delete {}? Press Delete again to remove it for good, Esc to keep it",
+                    entry.name
+                ),
+                theme.danger,
+            ),
+            (None, None, Some(name)) => (format!("{count} · {name} selected"), theme.text_3),
+            (None, None, None) => (count, theme.text_3),
         };
         let (text, _) = REGULAR_12.fit(&text, status.w - 32);
         canvas.write(
@@ -510,12 +807,22 @@ impl<S: Storage> App for Files<S> {
             status.y + (STATUS - REGULAR_12.height()) / 2 + 1,
             text,
             REGULAR_12,
-            theme.text_3,
+            ink,
         );
     }
 
     fn click(&mut self, x: i32, y: i32, context: &mut Context) {
         let at = Point::new(x, y);
+        // A click anywhere drops a name being typed and a deletion
+        // being asked about (unless it is the second click on Delete).
+        self.renaming = None;
+        self.message = None;
+        let armed = self.deleting.take();
+        for action in [Action::NewFolder, Action::Rename, Action::Delete] {
+            if self.action_button(action).contains(at) {
+                return self.perform(action, armed);
+            }
+        }
         if self.back_button().contains(at) {
             return self.back();
         }
@@ -555,6 +862,19 @@ impl<S: Storage> App for Files<S> {
     }
 
     fn key(&mut self, code: i32, context: &mut Context) {
+        const F2: i32 = 0x112;
+        const DELETE: i32 = 0x10A;
+        if self.renaming.is_some() {
+            self.message = None;
+            return self.rename_key(code);
+        }
+        self.message = None;
+        let armed = self.deleting.take();
+        match code {
+            F2 => return self.perform(Action::Rename, armed),
+            DELETE => return self.perform(Action::Delete, armed),
+            _ => {}
+        }
         const ENTER: i32 = 13;
         const BACKSPACE: i32 = 127;
         const UP: i32 = 0x101;
@@ -671,6 +991,312 @@ mod tests {
             area.y + area.h / 2,
             &mut Context::default(),
         );
+    }
+
+    /// Storage that can be changed: paths of folders (`None`) and of
+    /// files (their size). `/full` refuses new folders, and a folder
+    /// that holds something refuses to be removed.
+    #[derive(Clone, Default)]
+    struct Disk(Rc<RefCell<alloc::collections::BTreeMap<String, Option<u64>>>>);
+
+    impl Disk {
+        fn with(paths: &[(&str, Option<u64>)]) -> Self {
+            let disk = Self::default();
+            for (path, size) in paths {
+                disk.0.borrow_mut().insert((*path).into(), *size);
+            }
+            disk
+        }
+
+        fn has(&self, path: &str) -> bool {
+            self.0.borrow().contains_key(path)
+        }
+    }
+
+    impl Storage for Disk {
+        fn list(&mut self, path: &str) -> Result<Vec<Entry>, String> {
+            let prefix = if path == "/" {
+                "/".to_string()
+            } else {
+                format!("{path}/")
+            };
+            Ok(self
+                .0
+                .borrow()
+                .iter()
+                .filter_map(|(full, size)| {
+                    let name = full.strip_prefix(&prefix)?;
+                    (!name.is_empty() && !name.contains('/')).then(|| Entry {
+                        name: name.into(),
+                        is_dir: size.is_none(),
+                        size: size.unwrap_or(0),
+                    })
+                })
+                .collect())
+        }
+
+        fn make_folder(&mut self, path: &str) -> Result<(), String> {
+            if path.starts_with("/full/") {
+                return Err("No space left".into());
+            }
+            self.0.borrow_mut().insert(path.into(), None);
+            Ok(())
+        }
+
+        fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+            let mut disk = self.0.borrow_mut();
+            let size = disk.remove(from).ok_or("No such file")?;
+            disk.insert(to.into(), size);
+            Ok(())
+        }
+
+        fn remove(&mut self, path: &str) -> Result<(), String> {
+            let inside = format!("{path}/");
+            let mut disk = self.0.borrow_mut();
+            if disk.keys().any(|other| other.starts_with(&inside)) {
+                return Err("The folder is not empty".into());
+            }
+            disk.remove(path).map(|_| ()).ok_or("No such file".into())
+        }
+    }
+
+    fn disk_window(disk: &Disk, path: &str) -> Files<Disk> {
+        Files::new(disk.clone(), Vec::new(), path, Box::new(|_, _| {}))
+    }
+
+    fn press<S: Storage>(window: &mut Files<S>, codes: &[i32]) {
+        for &code in codes {
+            window.key(code, &mut Context::default());
+        }
+    }
+
+    fn type_text<S: Storage>(window: &mut Files<S>, text: &str) {
+        let codes: Vec<i32> = text.chars().map(|character| character as i32).collect();
+        press(window, &codes);
+    }
+
+    const F2: i32 = 0x112;
+    const DELETE: i32 = 0x10A;
+    const DOWN: i32 = 0x102;
+
+    #[test]
+    fn a_new_folder_is_made_and_named_at_once() {
+        let disk = Disk::with(&[("/a.txt", Some(3)), ("/New folder", None)]);
+        let mut window = disk_window(&disk, "/");
+        let button = window.action_button(Action::NewFolder);
+        window.click(button.x + 5, button.y + 5, &mut Context::default());
+        // The usual name was taken: the next one is used, the folder
+        // exists already, and its name is being typed over.
+        assert!(disk.has("/New folder 2"));
+        assert_eq!(window.selected(), Some("New folder 2"));
+        assert_eq!(window.renaming(), Some("New folder 2"));
+        // Backspace over it, type another, Enter.
+        press(&mut window, &[127; 12]);
+        assert_eq!(window.renaming(), Some(""));
+        type_text(&mut window, "Letters");
+        press(&mut window, &[13]);
+        assert_eq!(window.renaming(), None);
+        assert!(disk.has("/Letters") && !disk.has("/New folder 2"));
+        assert_eq!(window.selected(), Some("Letters"));
+        assert_eq!(window.names(), ["Letters", "New folder", "a.txt"]);
+        // Where no folder can be made, that is said and nothing else
+        // happens.
+        let disk = Disk::with(&[("/full", None)]);
+        let mut window = disk_window(&disk, "/full");
+        window.click(button.x + 5, button.y + 5, &mut Context::default());
+        assert_eq!(window.message(), Some("No folder was made: No space left"));
+        assert_eq!(window.renaming(), None);
+        assert!(window.names().is_empty());
+    }
+
+    #[test]
+    fn renaming_takes_a_typed_name_or_is_given_up() {
+        let disk = Disk::with(&[("/a.txt", Some(3)), ("/b.txt", Some(4)), ("/docs", None)]);
+        let mut window = disk_window(&disk, "/");
+        // Nothing selected: nothing to rename.
+        press(&mut window, &[F2]);
+        assert_eq!(window.renaming(), None);
+        press(&mut window, &[DOWN, DOWN, F2]);
+        assert_eq!(window.renaming(), Some("a.txt"));
+        // While typing, keys are letters: Backspace does not go up a
+        // folder, the arrows do not move, `/` is not taken.
+        // (End first: the old name is kept and changed at its end.)
+        press(&mut window, &[0x106, 127, 127, 127, DOWN]);
+        type_text(&mut window, "md/");
+        assert_eq!(window.renaming(), Some("a.md"));
+        assert_eq!(window.path(), "/");
+        // Escape leaves the old name.
+        press(&mut window, &[27]);
+        // Typing straight away replaces the old name; so does the first
+        // Backspace, which empties the field. Keys that mean nothing
+        // here do not count as typing.
+        press(&mut window, &[F2, DOWN]);
+        type_text(&mut window, "q");
+        assert_eq!(window.renaming(), Some("q"));
+        press(&mut window, &[27, F2, 127]);
+        assert_eq!(window.renaming(), Some(""));
+        press(&mut window, &[27]);
+        assert_eq!(window.renaming(), None);
+        assert!(disk.has("/a.txt") && !disk.has("/a.md"));
+        assert_eq!(window.selected(), Some("a.txt"));
+        // A name something else has is refused, and said to be.
+        press(&mut window, &[F2, 127, 127, 127, 127, 127]);
+        type_text(&mut window, "b.txt");
+        press(&mut window, &[13]);
+        assert_eq!(
+            window.message(),
+            Some("There is already something called b.txt")
+        );
+        assert!(disk.has("/a.txt"));
+        // An empty name, the same name, and the two names that mean
+        // folders change nothing.
+        for name in ["", "a.txt", ".", ".."] {
+            press(&mut window, &[F2, 127, 127, 127, 127, 127]);
+            type_text(&mut window, name);
+            press(&mut window, &[13]);
+            assert!(disk.has("/a.txt"), "{name:?}");
+            assert_eq!(window.renaming(), None);
+        }
+        // The real thing; spaces around the name are dropped, and the
+        // entry stays selected under its new name, in its new place.
+        press(&mut window, &[F2, 127, 127, 127, 127, 127]);
+        type_text(&mut window, " zebra.txt ");
+        press(&mut window, &[13]);
+        assert!(disk.has("/zebra.txt") && !disk.has("/a.txt"));
+        assert_eq!(window.names(), ["docs", "b.txt", "zebra.txt"]);
+        assert_eq!(window.selected(), Some("zebra.txt"));
+        assert_eq!(window.message(), None);
+        // A name is at most NAME_MAX characters long.
+        press(&mut window, &[F2]);
+        type_text(&mut window, &"x".repeat(100));
+        assert_eq!(window.renaming().unwrap().len(), NAME_MAX);
+        // A click elsewhere gives the renaming up.
+        window.click(300, 300, &mut Context::default());
+        assert_eq!(window.renaming(), None);
+        assert!(disk.has("/zebra.txt"));
+    }
+
+    #[test]
+    fn deleting_asks_first_and_removes_on_the_second_press() {
+        let disk = Disk::with(&[
+            ("/a.txt", Some(3)),
+            ("/b.txt", Some(4)),
+            ("/c.txt", Some(5)),
+            ("/docs", None),
+            ("/docs/inside", Some(1)),
+        ]);
+        let mut window = disk_window(&disk, "/");
+        // Nothing selected: nothing happens.
+        press(&mut window, &[DELETE, DELETE]);
+        assert_eq!(window.names().len(), 4);
+        // Once: asked. Any other key: forgotten.
+        press(&mut window, &[DOWN, DOWN, DELETE]);
+        assert_eq!(window.selected(), Some("a.txt"));
+        assert!(window.is_delete_armed());
+        assert!(disk.has("/a.txt"));
+        press(&mut window, &[27]);
+        assert!(!window.is_delete_armed());
+        press(&mut window, &[DELETE, DOWN]);
+        assert!(!window.is_delete_armed());
+        assert_eq!(window.selected(), Some("b.txt"));
+        // Pressed on one entry, then on another: asked again, not
+        // removed.
+        press(&mut window, &[DELETE]);
+        assert!(window.is_delete_armed());
+        assert!(disk.has("/a.txt") && disk.has("/b.txt"));
+        // Twice: gone, and the next entry is selected.
+        press(&mut window, &[DELETE]);
+        assert!(!disk.has("/b.txt"));
+        assert_eq!(window.names(), ["docs", "a.txt", "c.txt"]);
+        assert_eq!(window.selected(), Some("c.txt"));
+        assert!(!window.is_delete_armed());
+        // The last one gone, the one before it is selected.
+        press(&mut window, &[DELETE, DELETE]);
+        assert_eq!(window.selected(), Some("a.txt"));
+        // By the button, too: two clicks.
+        let button = window.action_button(Action::Delete);
+        window.click(button.x + 5, button.y + 5, &mut Context::default());
+        assert!(window.is_delete_armed() && disk.has("/a.txt"));
+        window.click(button.x + 5, button.y + 5, &mut Context::default());
+        assert!(!disk.has("/a.txt"));
+        assert_eq!(window.selected(), Some("docs"));
+        // A folder with something in it stays, and why is said.
+        press(&mut window, &[DELETE, DELETE]);
+        assert!(disk.has("/docs"));
+        assert_eq!(
+            window.message(),
+            Some("docs was not deleted: The folder is not empty")
+        );
+        assert_eq!(window.selected(), Some("docs"));
+        // The next key clears the message.
+        press(&mut window, &[DOWN]);
+        assert_eq!(window.message(), None);
+    }
+
+    #[test]
+    fn storage_that_cannot_be_changed_says_so() {
+        let (mut window, _) = files("/");
+        press(&mut window, &[DOWN, DELETE, DELETE]);
+        assert_eq!(
+            window.message(),
+            Some("bin was not deleted: Nothing can be changed here")
+        );
+        assert_eq!(window.names().len(), 5);
+    }
+
+    #[test]
+    fn the_field_the_question_and_the_buttons_are_drawn() {
+        let disk = Disk::with(&[("/a.txt", Some(3)), ("/b.txt", Some(4))]);
+        let mut window = disk_window(&disk, "/");
+        let theme = Theme::default();
+        let draw = |window: &mut Files<Disk>| {
+            let mut surface = Surface::new(SIZE.0 as usize, SIZE.1 as usize, theme.window);
+            window.draw(&mut surface.canvas(), SIZE.0, SIZE.1, &theme);
+            surface
+        };
+        let count = |surface: &Surface, area: Rect, colour| {
+            (area.y..area.bottom())
+                .flat_map(|y| (area.x..area.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| surface.pixel(x, y) == Some(colour))
+                .count()
+        };
+        // The three buttons do not overlap each other or the path.
+        let buttons = [Action::NewFolder, Action::Rename, Action::Delete]
+            .map(|action| window.action_button(action));
+        assert!(buttons[0].right() <= buttons[1].x && buttons[1].right() <= buttons[2].x);
+        assert!(buttons[2].right() <= SIZE.0);
+        assert!(window.crumbs().last().unwrap().0.right() < buttons[0].x);
+
+        press(&mut window, &[DOWN, F2]);
+        let surface = draw(&mut window);
+        let row = window.row_frame(0).unwrap();
+        // The field's outline, in the accent colour.
+        assert!(count(&surface, row, theme.accent) > 200);
+        press(&mut window, &[27, DELETE]);
+        let surface = draw(&mut window);
+        assert_eq!(count(&surface, row, theme.accent), 0);
+        // The armed Delete button is filled with the danger colour, and
+        // the question is asked in it.
+        assert!(count(&surface, buttons[2], theme.danger) > 300);
+        let status = Rect::new(SIDEBAR, SIZE.1 - STATUS, SIZE.0 - SIDEBAR, STATUS);
+        // (Thin text is mostly partly covered pixels: count those that
+        // are red rather than those of exactly the colour.)
+        let reddish = |surface: &Surface| {
+            (status.y + 1..status.bottom())
+                .flat_map(|y| (status.x..status.right()).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    let pixel = surface.pixel(x, y).unwrap_or(0);
+                    let (red, green) = ((pixel >> 16) & 0xFF, (pixel >> 8) & 0xFF);
+                    red > green + 24
+                })
+                .count()
+        };
+        let asked = reddish(&surface);
+        assert!(asked > 150, "{asked} pixels of the question");
+        press(&mut window, &[27]);
+        let surface = draw(&mut window);
+        assert_eq!(count(&surface, buttons[2], theme.danger), 0);
+        assert_eq!(reddish(&surface), 0);
     }
 
     #[test]

@@ -93,11 +93,18 @@ this ADR records how the system implements it and how far it has got.
   old read-only viewer: Files opens text in it. A file's line ends
   and final line end are written back as they were found; what is not
   UTF-8 text, or is larger than 256 KB, is shown but cannot be
-  changed.
+  changed. The seventh: Files **makes folders, renames and deletes**
+  — three buttons in its tool bar, and F2 and Delete. A new folder
+  is made at once and its name typed over; a name being typed
+  replaces the old one unless End or Right is pressed first; Delete
+  asks, in the status line, and removes on the second press. There is
+  no Recycle Bin: what is deleted is gone, which the question says.
+  What the filesystem refuses (a folder that is not empty, a name
+  that is taken) is said in the status line.
 
 ## What works
 
-- 121 host tests in `libs/gfx`: the font and icon files (every
+- 126 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -124,7 +131,10 @@ this ADR records how the system implements it and how far it has got.
   fifth, a quick Alt+Tab must bring the Calculator back in front, and
   with the keys held the switcher must be on the screen and gone when
   they are let go. Since the sixth, a note is typed and saved with
-  Ctrl+S, and its file read after the desktop has closed.
+  Ctrl+S, and its file read after the desktop has closed. Since the
+  seventh, a folder is made and named in Files and listed by the
+  shell afterwards; renaming and deleting existing entries are tested
+  on the host only.
   That the settings file is read back at the next start is tested on
   the host only (the parser), not across a restart in QEMU.
 
@@ -143,8 +153,8 @@ halved that.) Debug builds are slower by the same factor as before.
   a second window for the other half after one was arranged, the
   quick panel and notifications, Market; all pages of Settings but
   one. In
-  Files: tabs, search, the preview pane, the context menu, renaming,
-  deleting and the Recycle Bin, sorting, and scrolling with the mouse
+  Files: tabs, search, the preview pane, the context menu, the
+  Recycle Bin, copying and moving, sorting, and scrolling with the mouse
   (there are no wheel events yet); a row is opened by clicking it a
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row

@@ -134,10 +134,22 @@ impl Storage for SystemFiles {
             })
             .collect())
     }
+
+    fn make_folder(&mut self, path: &str) -> Result<(), String> {
+        omit_rt::mkdir(path).map_err(|error| format!("{error}"))
+    }
+
+    fn rename(&mut self, from: &str, to: &str) -> Result<(), String> {
+        omit_rt::rename(from, to).map_err(|error| format!("{error}"))
+    }
+
+    fn remove(&mut self, path: &str) -> Result<(), String> {
+        omit_rt::remove(path).map_err(|error| format!("{error}"))
+    }
 }
 
-/// A Files window showing the folder `path`: files are opened in the
-/// viewer.
+/// A Files window showing the folder `path`: files are opened in
+/// Notes.
 pub fn files(path: &str) -> Files<SystemFiles> {
     let place = |label: &str, path: &str, icon: &str| Place {
         label: label.into(),
