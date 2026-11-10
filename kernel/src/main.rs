@@ -15,6 +15,7 @@ mod display;
 mod drivers;
 mod fbcon;
 mod fs;
+mod futex;
 mod input;
 mod linuxkpi;
 mod log;

@@ -114,7 +114,32 @@ pub mod nr {
     /// end is closed; writing fails with `BrokenPipe` once every reading
     /// end is closed.
     pub const PIPE: u64 = 27;
+    /// `thread_create(entry, stack, argument, exit_flag) -> thread id` —
+    /// starts another thread in the calling process. It begins executing
+    /// at `entry` with `argument` in RDI and `stack` as its stack pointer
+    /// (which must be 8 below a multiple of 16, as at a function's first
+    /// instruction). When the thread has ended, the kernel stores 1 in
+    /// the `u32` at `exit_flag` (if that is not zero) and wakes futex
+    /// waiters on it; the thread does not touch its stack after that.
+    pub const THREAD_CREATE: u64 = 28;
+    /// `thread_exit()` — ends the calling thread. The process ends (with
+    /// status 0) when its last thread does; `exit` ends all threads.
+    pub const THREAD_EXIT: u64 = 29;
+    /// `futex_wait(address, expected, timeout_ms)` — if the `u32` at
+    /// `address` equals `expected`, sleeps until another thread calls
+    /// `futex_wake` on the address or the timeout passes
+    /// ([`super::FUTEX_NO_TIMEOUT`] for none). Returns 0 when woken, and
+    /// fails with `WouldBlock` if the value differed or `TimedOut` if the
+    /// time passed.
+    pub const FUTEX_WAIT: u64 = 30;
+    /// `futex_wake(address, count) -> woken` — wakes up to `count`
+    /// threads of the calling process sleeping in `futex_wait` on
+    /// `address`.
+    pub const FUTEX_WAKE: u64 = 31;
 }
+
+/// `futex_wait` timeout value meaning "wait without limit".
+pub const FUTEX_NO_TIMEOUT: u64 = u64::MAX;
 
 /// Packs the standard streams for the `spawn` system call's fifth
 /// argument. Each is `None` to give the new program the caller's own
@@ -342,6 +367,8 @@ pub enum Errno {
     BrokenPipe = 32,
     /// Nothing is available right now, and the caller asked not to wait.
     WouldBlock = 11,
+    /// The time allowed for the operation has passed.
+    TimedOut = 110,
 }
 
 impl core::fmt::Display for Errno {
@@ -365,6 +392,7 @@ impl core::fmt::Display for Errno {
             Self::NoSuchSyscall => "Function not implemented",
             Self::BrokenPipe => "Broken pipe",
             Self::WouldBlock => "Resource temporarily unavailable",
+            Self::TimedOut => "Timed out",
         })
     }
 }
@@ -396,6 +424,7 @@ impl Errno {
             38 => Some(Self::NoSuchSyscall),
             32 => Some(Self::BrokenPipe),
             11 => Some(Self::WouldBlock),
+            110 => Some(Self::TimedOut),
             _ => None,
         }
     }

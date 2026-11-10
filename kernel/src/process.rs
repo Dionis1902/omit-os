@@ -90,7 +90,9 @@ pub enum Descriptor {
 pub type Stdio = [Option<Descriptor>; 3];
 
 struct Record {
-    thread: ThreadId,
+    /// The process's threads, the first one first. Finished threads stay
+    /// listed; a process is over when none of them is alive.
+    threads: Vec<ThreadId>,
     /// Set when the process ends.
     exit_status: Option<i32>,
     /// Working directory: a normalised absolute path.
@@ -121,6 +123,11 @@ const FIRST_FILE_FD: u64 = 3;
 struct Start {
     entry: u64,
     stack: u64,
+    /// Passed to the entry point in RDI.
+    argument: u64,
+    /// For threads created by `thread_create`: where to store 1 (and wake
+    /// futex waiters) when the thread has ended.
+    exit_flag: u64,
 }
 
 /// Allocates a zeroed frame, fills its start with `data`, and maps it at
@@ -247,6 +254,8 @@ fn load(image: &[u8], args: &[String]) -> Result<(AddressSpace, Start), ExecErro
         Start {
             entry: elf.entry(),
             stack,
+            argument: 0,
+            exit_flag: 0,
         },
     ))
 }
@@ -254,16 +263,35 @@ fn load(image: &[u8], args: &[String]) -> Result<(AddressSpace, Start), ExecErro
 /// Kernel-side entry of a process thread: drops to user mode.
 fn enter(start: usize) {
     // SAFETY: `start` is the pointer produced by `Box::into_raw` in
-    // `spawn`, passed to exactly one thread.
+    // `spawn` or `spawn_thread`, passed to exactly one thread.
     let start = unsafe { Box::from_raw(start as *mut Start) };
-    let (entry, stack) = (start.entry, start.stack);
+    let (entry, stack, argument) = (start.entry, start.stack, start.argument);
+    if start.exit_flag != 0 {
+        EXIT_FLAGS
+            .lock()
+            .insert(sched::current_thread(), start.exit_flag);
+    }
     drop(start);
     // SAFETY: this thread was created by `spawn_process` with the address
-    // space built by `load`, which is active now: it maps `entry` inside an
-    // executable user segment and the stack around `stack`. The scheduler
+    // space built by `load`, which is active now. For the first thread,
+    // `entry` is inside an executable user segment and `stack` in the
+    // stack `load` mapped. For further threads both come from the program
+    // itself: if they are wrong, the thread faults in user mode like any
+    // other bad jump, and the process is terminated. The scheduler
     // registered this thread's kernel stack when it switched to it.
-    unsafe { enter_user(entry, stack, u64::from(USER_CS), u64::from(USER_DS)) }
+    unsafe {
+        enter_user(
+            entry,
+            stack,
+            u64::from(USER_CS),
+            u64::from(USER_DS),
+            argument,
+        )
+    }
 }
+
+/// Where each thread created by `thread_create` wants its end announced.
+static EXIT_FLAGS: SpinLock<BTreeMap<ThreadId, u64>> = SpinLock::new(BTreeMap::new());
 
 /// Starts the program in `image` as a new process called `name`, with
 /// arguments `args` and working directory `cwd` (a normalised absolute
@@ -279,6 +307,7 @@ pub fn spawn(
     stdio: Stdio,
 ) -> Result<Pid, ExecError> {
     let (space, start) = load(image, args)?;
+    let space = sched::SharedSpace::new(space);
     let start = Box::into_raw(Box::new(start));
 
     let mut table = TABLE.lock();
@@ -289,7 +318,7 @@ pub fn spawn(
             table.processes.insert(
                 pid,
                 Record {
-                    thread,
+                    threads: alloc::vec![thread],
                     exit_status: None,
                     cwd: cwd.into(),
                     files: Vec::new(),
@@ -308,25 +337,86 @@ pub fn spawn(
     }
 }
 
-/// Ends the calling process with `status`. Must be called from a process's
-/// own thread.
+/// Starts another thread in the calling process: it begins at `entry`
+/// with `argument` in its first argument register and `stack` as its
+/// stack pointer. When it ends, 1 is stored in the `u32` at `exit_flag`
+/// (if non-zero) and futex waiters on that address are woken. Returns the
+/// thread's ID.
+pub fn spawn_thread(entry: u64, stack: u64, argument: u64, exit_flag: u64) -> Option<ThreadId> {
+    let pid = sched::current_pid()?;
+    let space = sched::current_space()?;
+    let start = Box::into_raw(Box::new(Start {
+        entry,
+        stack,
+        argument,
+        exit_flag,
+    }));
+    match sched::spawn_process("thread", enter, start as usize, space, pid) {
+        Ok(thread) => {
+            if let Some(record) = TABLE.lock().processes.get_mut(&pid) {
+                record.threads.push(thread);
+            }
+            Some(thread)
+        }
+        Err(_) => {
+            // SAFETY: no thread was created, so the pointer was never
+            // handed over and is still uniquely owned here.
+            drop(unsafe { Box::from_raw(start) });
+            None
+        }
+    }
+}
+
+/// Ends the calling thread only. If it is the last thread of its process,
+/// the process ends with status 0.
+pub fn exit_thread() -> ! {
+    let Some(pid) = sched::current_pid() else {
+        sched::exit()
+    };
+    if sched::live_threads(pid) <= 1 {
+        exit(0);
+    }
+    announce_thread_end();
+    sched::exit()
+}
+
+/// Tells whoever waits for the calling thread that it has ended: stores 1
+/// in its exit flag and wakes futex waiters. The thread never returns to
+/// user mode after this, so its stack may be released by the waiter.
+fn announce_thread_end() {
+    let flag = EXIT_FLAGS.lock().remove(&sched::current_thread());
+    if let Some(address) = flag
+        && sched::with_address_space(|space| space.write(address, &1u32.to_le_bytes()))
+            == Some(true)
+    {
+        crate::futex::wake(address, usize::MAX);
+    }
+}
+
+/// Ends the calling process with `status`: the calling thread ends now,
+/// and every other thread of the process the next time it would return to
+/// user mode. If several threads end the process, the first status wins.
 pub fn exit(status: i32) -> ! {
     if let Some(pid) = sched::current_pid() {
         // If it owned the screen, the text console takes over again.
         crate::display::release(pid);
+        sched::kill_other_threads(pid);
     }
     // Closing descriptors can wake other threads (the other end of a
     // pipe), so they are taken out under the lock and dropped after it.
     let closed = sched::current_pid().and_then(|pid| {
         let mut table = TABLE.lock();
         let record = table.processes.get_mut(&pid)?;
-        record.exit_status = Some(status);
+        if record.exit_status.is_none() {
+            record.exit_status = Some(status);
+        }
         Some((
             core::mem::take(&mut record.files),
             core::mem::take(&mut record.stdio),
         ))
     });
     drop(closed);
+    EXIT_FLAGS.lock().remove(&sched::current_thread());
     sched::exit()
 }
 
@@ -338,21 +428,30 @@ pub fn exit_if_killed() {
     }
 }
 
-/// Waits for process `pid` to end and returns its exit status, or `None`
-/// if there is no such process (or it was already waited for).
+/// Whether any thread of the process is still alive, and if so, one of
+/// them.
+fn live_thread(pid: Pid) -> Option<Option<ThreadId>> {
+    let threads = TABLE.lock().processes.get(&pid)?.threads.clone();
+    Some(threads.into_iter().find(|&thread| sched::is_alive(thread)))
+}
+
+/// Waits for process `pid` to end — all of its threads — and returns its
+/// exit status, or `None` if there is no such process (or it was already
+/// waited for).
 pub fn wait(pid: Pid) -> Option<i32> {
-    let thread = TABLE.lock().processes.get(&pid)?.thread;
-    sched::join(thread);
+    // Threads can be created while waiting, so look again after each one.
+    while let Some(thread) = live_thread(pid)? {
+        sched::join(thread);
+    }
     let record = TABLE.lock().processes.remove(&pid)?;
-    // A thread can only die without a status if the kernel ended it.
+    // A process can only end without a status if the kernel ended it.
     Some(record.exit_status.unwrap_or(EXIT_KILLED))
 }
 
 /// Like [`wait`], but does not block: `Some(None)` means process `pid` is
 /// still running.
 pub fn try_wait(pid: Pid) -> Option<Option<i32>> {
-    let thread = TABLE.lock().processes.get(&pid)?.thread;
-    if sched::is_alive(thread) {
+    if live_thread(pid)?.is_some() {
         return Some(None);
     }
     let record = TABLE.lock().processes.remove(&pid)?;
@@ -365,7 +464,7 @@ pub fn reap_finished() {
     TABLE
         .lock()
         .processes
-        .retain(|_, record| sched::is_alive(record.thread));
+        .retain(|_, record| record.threads.iter().any(|&thread| sched::is_alive(thread)));
 }
 
 /// Requests termination of process `pid`.

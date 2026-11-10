@@ -20,6 +20,7 @@
 use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicBool, Ordering};
 
@@ -68,8 +69,9 @@ struct Thread {
     wake_tick: Option<u64>,
     /// Timer ticks during which this thread was the one running.
     cpu_ticks: u64,
-    /// The user address space, for threads that run a process.
-    address_space: Option<AddressSpace>,
+    /// The user address space, for threads that run a process; shared by
+    /// all threads of the process and released with the last of them.
+    address_space: Option<Arc<SharedSpace>>,
     /// The process this thread belongs to, if any.
     pid: Option<u64>,
     /// Set by [`kill`]; the thread exits the next time it is about to
@@ -80,6 +82,34 @@ struct Thread {
     /// Saved x87/SSE state, for threads that run a process. Kernel code
     /// does not use those registers.
     fpu: Option<Box<cpu::FpuState>>,
+}
+
+/// The address space of a process, shared by its threads.
+pub struct SharedSpace {
+    /// Physical address of the top-level page table; never changes.
+    root: u64,
+    space: SpinLock<AddressSpace>,
+}
+
+impl SharedSpace {
+    /// Wraps a new process's address space.
+    pub fn new(space: AddressSpace) -> Arc<Self> {
+        Arc::new(Self {
+            root: space.root(),
+            space: SpinLock::new(space),
+        })
+    }
+
+    /// Runs `f` on the address space. `f` runs with interrupts disabled,
+    /// so it must be short and must not block.
+    pub fn with<R>(&self, f: impl FnOnce(&mut AddressSpace) -> R) -> R {
+        f(&mut self.space.lock())
+    }
+
+    /// A value that identifies the address space while it exists.
+    pub fn id(&self) -> u64 {
+        self.root
+    }
 }
 
 /// A snapshot of one thread, for `ps`.
@@ -174,7 +204,7 @@ pub fn spawn_process(
     name: &str,
     entry: fn(usize),
     argument: usize,
-    address_space: AddressSpace,
+    address_space: Arc<SharedSpace>,
     pid: u64,
 ) -> Result<ThreadId, SpawnError> {
     spawn_with(name, entry, argument, Some(address_space), Some(pid))
@@ -184,7 +214,7 @@ fn spawn_with(
     name: &str,
     entry: fn(usize),
     argument: usize,
-    address_space: Option<AddressSpace>,
+    address_space: Option<Arc<SharedSpace>>,
     pid: Option<u64>,
 ) -> Result<ThreadId, SpawnError> {
     let stack = KernelStack::new().ok_or(SpawnError::OutOfMemory)?;
@@ -267,7 +297,7 @@ fn reschedule() {
             let root = next_thread
                 .address_space
                 .as_ref()
-                .map_or_else(uspace::kernel_root, AddressSpace::root);
+                .map_or_else(uspace::kernel_root, |space| space.root);
             let kernel_stack = next_thread
                 .stack
                 .as_ref()
@@ -475,45 +505,90 @@ pub fn current_pid() -> Option<u64> {
     scheduler.threads.get(&scheduler.current)?.pid
 }
 
+/// The calling thread's user address space; `None` for kernel threads.
+pub fn current_space() -> Option<Arc<SharedSpace>> {
+    let guard = SCHEDULER.lock();
+    let scheduler = guard.as_ref()?;
+    scheduler
+        .threads
+        .get(&scheduler.current)?
+        .address_space
+        .clone()
+}
+
 /// Runs `f` on the calling thread's user address space. Returns `None` for
 /// kernel threads.
 ///
-/// `f` runs under the scheduler lock with interrupts disabled, so it must
-/// be short and must not block.
+/// `f` runs with interrupts disabled, so it must be short and must not
+/// block.
 pub fn with_address_space<R>(f: impl FnOnce(&mut AddressSpace) -> R) -> Option<R> {
-    let mut guard = SCHEDULER.lock();
-    let scheduler = guard.as_mut()?;
-    let current = scheduler.current;
-    scheduler
-        .threads
-        .get_mut(&current)?
-        .address_space
-        .as_mut()
-        .map(f)
+    // The reference is taken first and the scheduler lock released: `f`
+    // runs under the address space's own lock only.
+    let space = current_space()?;
+    Some(space.with(f))
 }
 
-/// Asks the process `pid` to terminate. It exits the next time it is about
-/// to return to user mode; if it is blocked, it is woken first. Returns
-/// `false` if there is no such process.
-pub fn kill(pid: u64) -> bool {
+/// The calling thread's ID.
+pub fn current_thread() -> ThreadId {
+    SCHEDULER
+        .lock()
+        .as_ref()
+        .map_or(0, |scheduler| scheduler.current)
+}
+
+/// Marks threads of process `pid` for termination — all of them, or all
+/// but the calling one. A marked thread exits the next time it is about to
+/// return to user mode; blocked ones are woken first. Returns how many
+/// were marked.
+fn kill_threads(pid: u64, spare_current: bool) -> usize {
     let mut guard = SCHEDULER.lock();
     let Some(scheduler) = guard.as_mut() else {
-        return false;
+        return 0;
     };
-    let Some((&id, thread)) = scheduler
-        .threads
-        .iter_mut()
-        .find(|(_, thread)| thread.pid == Some(pid) && thread.state != ThreadState::Dead)
-    else {
-        return false;
-    };
-    thread.killed = true;
-    if thread.state == ThreadState::Blocked {
-        thread.state = ThreadState::Ready;
-        thread.wake_tick = None;
-        scheduler.ready.push_back(id);
+    let current = scheduler.current;
+    let mut woken = Vec::new();
+    let mut count = 0;
+    for (&id, thread) in &mut scheduler.threads {
+        if thread.pid != Some(pid)
+            || thread.state == ThreadState::Dead
+            || (spare_current && id == current)
+        {
+            continue;
+        }
+        thread.killed = true;
+        count += 1;
+        if thread.state == ThreadState::Blocked {
+            thread.state = ThreadState::Ready;
+            thread.wake_tick = None;
+            woken.push(id);
+        }
     }
-    true
+    scheduler.ready.extend(woken);
+    count
+}
+
+/// Asks the process `pid` to terminate: every thread of it exits the next
+/// time it is about to return to user mode. Returns `false` if there is
+/// no such process.
+pub fn kill(pid: u64) -> bool {
+    kill_threads(pid, false) != 0
+}
+
+/// Like [`kill`], but spares the calling thread: used by a thread that
+/// ends its own process.
+pub fn kill_other_threads(pid: u64) {
+    kill_threads(pid, true);
+}
+
+/// Number of threads of process `pid` that have not finished.
+pub fn live_threads(pid: u64) -> usize {
+    SCHEDULER.lock().as_ref().map_or(0, |scheduler| {
+        scheduler
+            .threads
+            .values()
+            .filter(|thread| thread.pid == Some(pid) && thread.state != ThreadState::Dead)
+            .count()
+    })
 }
 
 /// Whether the calling thread has been asked to terminate.

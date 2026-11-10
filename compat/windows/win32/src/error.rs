@@ -33,6 +33,8 @@ pub const ERROR_INSUFFICIENT_BUFFER: u32 = 122;
 pub const ERROR_INVALID_NAME: u32 = 123;
 /// The specified module could not be found.
 pub const ERROR_MOD_NOT_FOUND: u32 = 126;
+/// The wait operation timed out.
+pub const WAIT_TIMEOUT: u32 = 258;
 /// The pipe has been ended.
 pub const ERROR_BROKEN_PIPE: u32 = 109;
 /// The specified procedure could not be found.
@@ -81,6 +83,7 @@ pub fn from_errno(errno: Errno) -> u32 {
         Errno::NoSuchSyscall => ERROR_CALL_NOT_IMPLEMENTED,
         Errno::BrokenPipe => ERROR_BROKEN_PIPE,
         Errno::WouldBlock => ERROR_BUSY,
+        Errno::TimedOut => WAIT_TIMEOUT,
     }
 }
 

@@ -11,14 +11,15 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use omit_abi::{
-    ARGS_MAX, Blit, Errno, INPUT_READ_MAX, INPUT_TIMEOUT_MAX, InputEvent, KIND_DIRECTORY,
-    KIND_FILE, PATH_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat, WAIT_NO_HANG,
-    WRITE_MAX, nr, open, protect,
+    ARGS_MAX, Blit, Errno, FUTEX_NO_TIMEOUT, INPUT_READ_MAX, INPUT_TIMEOUT_MAX, InputEvent,
+    KIND_DIRECTORY, KIND_FILE, PATH_MAX, READ_MAX, READ_NO_WAIT, STDERR, STDIN, STDOUT, Stat,
+    WAIT_NO_HANG, WRITE_MAX, nr, open, protect,
 };
 use omit_shell::LineEditor;
 use omit_vfs::{FileType, FsError, WriteMode, path};
 
 use crate::console::{self, Writer};
+use crate::futex::WaitResult;
 use crate::pipe::{self, PipeError};
 use crate::process::{self, Descriptor, OpenFile};
 use crate::sync::Mutex;
@@ -121,6 +122,32 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
             .ok_or(Errno::NoSuchProcess),
         nr::CLOCK => Ok(time::monotonic_ns() / 1000),
         nr::PIPE => create_pipe(a0),
+        nr::THREAD_CREATE => {
+            // The addresses are the program's own business — a wrong one
+            // faults in user mode — but they must at least be user
+            // addresses.
+            let user = |address: u64| crate::arch::uspace::is_user_range(address, 1);
+            if !user(a0) || !user(a1.wrapping_sub(8)) || (a3 != 0 && !user(a3)) {
+                Err(Errno::InvalidArgument)
+            } else {
+                process::spawn_thread(a0, a1, a2, a3).ok_or(Errno::NoSpace)
+            }
+        }
+        nr::THREAD_EXIT => process::exit_thread(),
+        nr::FUTEX_WAIT => {
+            let timeout = (a2 != FUTEX_NO_TIMEOUT).then_some(a2);
+            let outcome = crate::futex::wait(a0, a1 as u32, timeout);
+            process::exit_if_killed();
+            match outcome {
+                WaitResult::Woken => Ok(0),
+                WaitResult::ValueChanged => Err(Errno::WouldBlock),
+                WaitResult::TimedOut => Err(Errno::TimedOut),
+                WaitResult::Fault => Err(Errno::Fault),
+            }
+        }
+        nr::FUTEX_WAKE => {
+            Ok(crate::futex::wake(a0, usize::try_from(a1).unwrap_or(usize::MAX)) as u64)
+        }
         nr::KILL => {
             if sched::kill(a0) {
                 Ok(0)

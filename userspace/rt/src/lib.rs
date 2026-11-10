@@ -21,12 +21,18 @@
 //! standard input and files, list and modify directories, start other
 //! programs, and use the `alloc` crate (`Box`, `Vec`, `String`, ...): the
 //! runtime provides the global allocator. There is no environment yet.
+//!
+//! A program can start more threads ([`thread::spawn`]) and share data
+//! between them with [`sync::Mutex`]. A panic in any thread ends the
+//! whole program.
 
 #![no_std]
 
 extern crate alloc;
 
 mod heap;
+pub mod sync;
+pub mod thread;
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -516,6 +522,43 @@ pub fn spawn_with_stdio(
 pub fn wait(pid: u64) -> Result<i32, Errno> {
     // SAFETY: plain integer argument.
     result(unsafe { syscall(nr::WAIT, pid, 0, 0) }).map(|status| status as i32)
+}
+
+/// Sleeps until another thread calls [`futex_wake`] on `word`, provided
+/// `word` still holds `expected` when the kernel looks; `timeout_ms` of
+/// `None` waits without limit. Returns `Err(WouldBlock)` if the value had
+/// changed and `Err(TimedOut)` if the time passed. This is the building
+/// block of [`sync::Mutex`] and of joining threads.
+pub fn futex_wait(
+    word: &core::sync::atomic::AtomicU32,
+    expected: u32,
+    timeout_ms: Option<u64>,
+) -> Result<(), Errno> {
+    // SAFETY: the address is that of a live atomic the kernel only reads.
+    result(unsafe {
+        syscall(
+            nr::FUTEX_WAIT,
+            core::ptr::from_ref(word) as u64,
+            u64::from(expected),
+            timeout_ms.unwrap_or(abi::FUTEX_NO_TIMEOUT),
+        )
+    })
+    .map(|_| ())
+}
+
+/// Wakes up to `count` threads sleeping in [`futex_wait`] on `word`;
+/// returns how many.
+pub fn futex_wake(word: &core::sync::atomic::AtomicU32, count: usize) -> usize {
+    // SAFETY: the address only identifies the waiters.
+    let woken = unsafe {
+        syscall(
+            nr::FUTEX_WAKE,
+            core::ptr::from_ref(word) as u64,
+            count as u64,
+            0,
+        )
+    };
+    usize::try_from(woken).unwrap_or(0)
 }
 
 /// Microseconds since the system started.

@@ -140,7 +140,10 @@ pub unsafe fn set_kernel_stack(stack_top: u64) {
 global_asm!(
     r#"
 .section .text.enter_user, "ax", @progbits
-// enter_user(rip [rdi], rsp [rsi], user_cs [rdx], user_ss [rcx]) -> !
+// enter_user(rip [rdi], rsp [rsi], user_cs [rdx], user_ss [rcx],
+//            argument [r8]) -> !
+// The argument arrives in the user code's RDI; every other general
+// register is zero.
 .global enter_user
 enter_user:
     cli
@@ -154,7 +157,7 @@ enter_user:
     xor ecx, ecx
     xor edx, edx
     xor esi, esi
-    xor edi, edi
+    mov rdi, r8
     xor ebp, ebp
     xor r8d, r8d
     xor r9d, r9d
@@ -180,5 +183,5 @@ unsafe extern "C" {
     /// The active address space must map `rip` as user-executable code and
     /// `rsp` as the top of a user-writable stack, and the calling thread's
     /// kernel stack must be registered as described above.
-    pub fn enter_user(rip: u64, rsp: u64, user_cs: u64, user_ss: u64) -> !;
+    pub fn enter_user(rip: u64, rsp: u64, user_cs: u64, user_ss: u64, argument: u64) -> !;
 }

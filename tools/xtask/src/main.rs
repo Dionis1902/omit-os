@@ -130,8 +130,22 @@ struct Artifacts {
 
 /// User programs shipped in `/bin` of the initial ramdisk.
 const USER_PROGRAMS: &[&str] = &[
-    "cat", "crash", "desktop", "echo", "fileops", "hello", "ls", "memtest", "pipetest", "run",
-    "sleeper", "spin", "syscheck", "tee", "winrun",
+    "cat",
+    "crash",
+    "desktop",
+    "echo",
+    "fileops",
+    "hello",
+    "ls",
+    "memtest",
+    "pipetest",
+    "run",
+    "sleeper",
+    "spin",
+    "syscheck",
+    "tee",
+    "threadtest",
+    "winrun",
 ];
 
 /// Windows test programs (see `compat/windows/samples`) shipped in `/bin`.
@@ -645,7 +659,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -723,6 +737,11 @@ const BOOT_TESTS: &[BootTest] = &[
             // program, and through a filter with more data than a pipe
             // holds.
             ("pipetest", "\npipetest: all checks passed\n"),
+            // Threads within a process: results through join, a mutex
+            // under contention, the shared heap, the futex, and a process
+            // that ends while two of its threads never would.
+            ("threadtest", "\nthreadtest: all checks passed\nomit:/# "),
+            ("ps", "PID"),
             // Pipelines and input redirection in the shell. `cat`, `ls`
             // and `echo` here are the programs in /bin: built-in commands
             // do not take part in pipelines.

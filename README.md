@@ -226,14 +226,14 @@ system library; a desktop that is a single program.
 | Shell with built-in `help echo pwd cd ls cat mkdir touch cp mv rm uname clear exit`, quoting and `>`/`>>` | Working; host-tested and driven over the serial port in the QEMU tests |
 | Kernel threads, preemptive round-robin scheduler, sleep, wait queues | Working; self-tested at every boot (including preemption of a thread that never yields) |
 | User mode: per-process address spaces, ELF loader, `syscall`/`sysret` entry | Working; tested end to end in QEMU |
-| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe` | Working, tested |
+| System calls: `exit`, `write`, `read`, `open`, `close`, `map`, `unmap`, `protect`, `stat`, `readdir`, `mkdir`, `remove`, `rename`, `spawn`, `wait`, `kill`, `getpid`, `yield`, `sleep`, `uptime`, `set_thread_pointer`, `display_info`, `display_acquire`, `display_release`, `display_blit`, `input_read`, `clock`, `pipe`, `thread_create`, `thread_exit`, `futex_wait`, `futex_wake` | Working, tested |
 | Heap for programs: the Rust `alloc` crate works in user space | Working, tested (1 M-element vector, 5000-node map, repeated 8 MiB blocks) |
 | Output redirection (`>`, `>>`) for programs | Working, tested |
 | Program arguments, standard input (line-edited, Ctrl-D ends input), per-process working directory and open files | Working, tested |
 | Kernel-wide root filesystem behind a sleeping mutex, shared by the shell and by programs | Working, tested |
 | Fault containment: a crashing program is terminated, the system continues | Working, tested (bad pointers to the kernel, direct kernel memory access) |
 | Shell: run programs from `/bin` or by path, `&` for background, `ps`, `kill`, `free` | Working, tested |
-| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest` | Working; shipped in the initial ramdisk |
+| Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest`, `threadtest` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
 | USB (and therefore USB keyboards) | Not started |
@@ -249,7 +249,8 @@ system library; a desktop that is a single program.
 | Loadable drivers, driver packages, automatic driver installation | Not started |
 | Pipes between processes; standard input, output and error connectable to pipes or files at `spawn`; non-waiting reads | Working; self-tested at every boot and by `/bin/pipetest` (300 KB through a filter) |
 | Shell pipelines (`a \| b \| c`) and input redirection (`< file`) | Working; host-tested and run in QEMU, including Windows programs in pipelines |
-| Environment variables, signals, multi-threaded processes, shared memory | Not started |
+| Threads within a process (shared address space, `thread_create`, process-wide exit), futex, user-space mutex and join | Working on one CPU; `/bin/threadtest` checks contention, the shared heap, futex semantics and process exit with threads still running |
+| Environment variables, signals, shared memory, more than one CPU | Not started |
 | Installer, booting from an installed disk, partition tables, NVMe/AHCI | Not started |
 | SMP | Not started |
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
@@ -431,6 +432,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0012 — Graphics for programs, mouse input and a first desktop](docs/adr/0012-display-input-and-desktop.md)
 - [ADR 0013 — Advanced compatibility: what was investigated, what was built](docs/adr/0013-advanced-compatibility-investigation.md)
 - [ADR 0014 — Pipes, standard streams and pipelines](docs/adr/0014-pipes.md)
+- [ADR 0015 — Threads within a process, and the futex](docs/adr/0015-threads-and-futex.md)
 
 ## Testing
 
@@ -461,11 +463,10 @@ goals — reusing Linux drivers through a compatibility layer, and running
 Windows executables natively — each have a first working instance (ADRs
 0010 and 0011). Both are far from being generally useful.
 
-**Next step:** the rest of inter-process communication — shared memory
-and a way to wait on several things at once — and threads within a
-process. Pipes exist (ADR 0014); those are what the desktop still needs
-to become a display server and what Windows programs with a C runtime
-need. Still open from earlier milestones: interrupts for device drivers (MSI-X), an
+**Next step:** shared memory and a way to wait on several things at once
+(what the desktop needs to become a display server), and threads, locks
+and thread-local storage in the Windows layer (what programs with a C
+runtime need). Pipes and native threads exist (ADRs 0014 and 0015). Still open from earlier milestones: interrupts for device drivers (MSI-X), an
 installer, loadable drivers and packages, a Rust `std` port for coreutils,
 threads, and the Windows functions the C runtime needs.
 

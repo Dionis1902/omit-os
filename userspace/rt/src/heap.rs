@@ -38,9 +38,10 @@ unsafe impl PageSource for KernelPages {
     }
 }
 
-/// A process has a single thread, so the lock only guards against
-/// re-entrancy (an allocation made while one is in progress), which would
-/// otherwise be undefined behaviour; in that case allocation fails.
+/// The heap is shared by all threads of the process. Allocations are
+/// short, so a thread that finds the heap busy gives up the CPU and tries
+/// again rather than sleeping: the thread holding it was merely preempted.
+/// (The lock cannot be the runtime's own `Mutex`, which may allocate.)
 struct ProgramHeap {
     busy: AtomicBool,
     heap: UnsafeCell<Heap<KernelPages>>,
@@ -50,15 +51,15 @@ struct ProgramHeap {
 unsafe impl Sync for ProgramHeap {}
 
 impl ProgramHeap {
-    fn with<R>(&self, f: impl FnOnce(&mut Heap<KernelPages>) -> R) -> Option<R> {
-        if self.busy.swap(true, Ordering::Acquire) {
-            return None;
+    fn with<R>(&self, f: impl FnOnce(&mut Heap<KernelPages>) -> R) -> R {
+        while self.busy.swap(true, Ordering::Acquire) {
+            crate::yield_now();
         }
         // SAFETY: `busy` was clear and is now set, so this is the only
         // reference to the heap until it is cleared again below.
         let result = f(unsafe { &mut *self.heap.get() });
         self.busy.store(false, Ordering::Release);
-        Some(result)
+        result
     }
 }
 
@@ -67,7 +68,6 @@ impl ProgramHeap {
 unsafe impl GlobalAlloc for ProgramHeap {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         self.with(|heap| heap.allocate(layout))
-            .unwrap_or(core::ptr::null_mut())
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
