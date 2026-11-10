@@ -149,6 +149,7 @@ dependencies = [
 name = "omit-shell"
 version = "0.1.0"
 dependencies = [
+ "omit-abi",
  "omit-vfs",
 ]
 

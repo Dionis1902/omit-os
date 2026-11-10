@@ -19,6 +19,7 @@
 //! * Threads exist, but libraries are not told about them (no
 //!   `DLL_THREAD_ATTACH`), threads cannot be created suspended, and a
 //!   process that ends through its last thread reports exit code 0.
+//! * The date and time are UTC: there are no time zones.
 //! * There is no environment, and no way to tell whether standard output
 //!   is the console or a file; it is reported as console.
 //! * Console input ends lines with `\n`, not `\r\n`.
@@ -629,6 +630,82 @@ extern "win64" fn Sleep(milliseconds: u32) {
     } else {
         omit_rt::sleep_ms(u64::from(milliseconds));
     }
+}
+
+/// 100-nanosecond intervals between 1601-01-01, where Windows file
+/// times start, and 1970-01-01.
+const FILETIME_UNIX_EPOCH: u64 = 116_444_736_000_000_000;
+
+/// `SYSTEMTIME`.
+#[repr(C)]
+pub struct SystemTime {
+    year: u16,
+    month: u16,
+    day_of_week: u16,
+    day: u16,
+    hour: u16,
+    minute: u16,
+    second: u16,
+    milliseconds: u16,
+}
+
+/// `GetSystemTimeAsFileTime`: the date and time (UTC) as a `FILETIME`.
+/// On a machine without a usable clock the result is 0, the start of
+/// 1601 — a date no program will mistake for the present.
+unsafe extern "win64" fn GetSystemTimeAsFileTime(time: *mut u64) {
+    if time.is_null() {
+        return;
+    }
+    let value = omit_rt::realtime_us().map_or(0, |micros| micros * 10 + FILETIME_UNIX_EPOCH);
+    // SAFETY: the program passes a pointer to its `FILETIME`, which is
+    // two 32-bit halves, low first, and need not be aligned to 8 bytes.
+    unsafe { time.write_unaligned(value) };
+}
+
+/// `GetSystemTime`: the date and time (UTC), broken down. Without a
+/// usable clock: 1601-01-01 00:00:00, as for
+/// [`GetSystemTimeAsFileTime`].
+unsafe extern "win64" fn GetSystemTime(time: *mut SystemTime) {
+    use abi::datetime::DateTime;
+    if time.is_null() {
+        return;
+    }
+    let (moment, milliseconds) = omit_rt::realtime_us()
+        .and_then(|micros| {
+            let moment = DateTime::from_unix((micros / 1_000_000) as i64)?;
+            Some((moment, (micros / 1000 % 1000) as u16))
+        })
+        .unwrap_or((
+            DateTime {
+                year: 1601,
+                month: 1,
+                day: 1,
+                hour: 0,
+                minute: 0,
+                second: 0,
+            },
+            0,
+        ));
+    // SAFETY: the program passes a pointer to its `SYSTEMTIME`.
+    unsafe {
+        time.write_unaligned(SystemTime {
+            year: moment.year.clamp(1601, 30827) as u16,
+            month: u16::from(moment.month),
+            day_of_week: u16::from(moment.weekday()),
+            day: u16::from(moment.day),
+            hour: u16::from(moment.hour),
+            minute: u16::from(moment.minute),
+            second: u16::from(moment.second),
+            milliseconds,
+        });
+    }
+}
+
+/// `GetLocalTime`: the same as [`GetSystemTime`] — there are no time
+/// zones, local time is UTC.
+unsafe extern "win64" fn GetLocalTime(time: *mut SystemTime) {
+    // SAFETY: forwarded.
+    unsafe { GetSystemTime(time) }
 }
 
 /// `GetTickCount64`: milliseconds since the system started.
@@ -1978,12 +2055,15 @@ exports! {
     GetFileSizeEx,
     GetFileType,
     GetLastError,
+    GetLocalTime,
     GetModuleFileNameA,
     GetModuleHandleA,
     GetModuleHandleW,
     GetProcAddress,
     GetProcessHeap,
     GetStdHandle,
+    GetSystemTime,
+    GetSystemTimeAsFileTime,
     GetTickCount,
     GetTickCount64,
     HeapAlloc,

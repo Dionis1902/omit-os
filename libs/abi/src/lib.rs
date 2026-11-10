@@ -23,6 +23,8 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+pub mod datetime;
+
 /// System call numbers.
 pub mod nr {
     /// `exit(code: i32) -> !` — terminates the calling process.
@@ -170,6 +172,10 @@ pub mod nr {
     /// event is pending for the display owner, reported as
     /// [`super::POLL_INPUT_READY`]. 0 means the time passed.
     pub const POLL: u64 = 37;
+    /// `realtime() -> microseconds` — the date and time, as microseconds
+    /// since 1970-01-01 00:00:00 UTC (see [`super::datetime`]). Fails
+    /// with `Io` if the machine's clock could not be read at start-up.
+    pub const REALTIME: u64 = 38;
 }
 
 /// Largest shared memory segment, in bytes.

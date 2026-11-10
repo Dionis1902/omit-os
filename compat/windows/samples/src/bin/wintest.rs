@@ -396,6 +396,53 @@ fn time(checks: &mut Checks) {
     Sleep(50);
     let elapsed = GetTickCount64() - before;
     checks.check((40..2000).contains(&elapsed), "Sleep(50) takes about 50 ms");
+
+    // The date and time. The test machine's clock is set to a moment in
+    // November 2026 (and the real date is not earlier than that).
+    let (mut file_time, mut later) = (FileTime::default(), FileTime::default());
+    let (mut system, mut local) = (SystemTime::default(), SystemTime::default());
+    // SAFETY: the pointers refer to live structures of the right types.
+    unsafe {
+        GetSystemTimeAsFileTime(&raw mut file_time);
+        GetSystemTime(&raw mut system);
+        GetLocalTime(&raw mut local);
+        Sleep(20);
+        GetSystemTimeAsFileTime(&raw mut later);
+    }
+    // 2026-11-10 00:00:00 UTC as a file time, and one year in its units.
+    const NOVEMBER_2026: u64 = 134_387_424_000_000_000;
+    const YEAR: u64 = 365 * 86_400 * 10_000_000;
+    checks.check(
+        (NOVEMBER_2026..NOVEMBER_2026 + 100 * YEAR).contains(&file_time.value()),
+        "the file time is a present-day date",
+    );
+    let advanced = later.value() - file_time.value();
+    checks.check(
+        (100_000..20_000_000).contains(&advanced),
+        "the file time advances with the clock",
+    );
+    checks.check(
+        system.year >= 2026
+            && (1..=12).contains(&system.month)
+            && (1..=31).contains(&system.day)
+            && system.day_of_week < 7
+            && system.hour < 24
+            && system.minute < 60
+            && system.second < 60
+            && system.milliseconds < 1000,
+        "the system time is a valid date",
+    );
+    checks.check(
+        (local.year, local.month, local.day) == (system.year, system.month, system.day),
+        "local time is UTC",
+    );
+    say!(
+        "wintest: date {}-{:02}-{:02}, day {} of the week",
+        system.year,
+        system.month,
+        system.day,
+        system.day_of_week
+    );
     say!("wintest: time ok");
 }
 

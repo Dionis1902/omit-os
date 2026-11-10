@@ -99,6 +99,10 @@ pub trait Host {
     /// Current memory usage.
     fn memory(&mut self) -> MemoryInfo;
 
+    /// The date and time in seconds since 1970-01-01 00:00:00 UTC, if
+    /// the machine has a clock.
+    fn now(&mut self) -> Option<i64>;
+
     /// One line of description per PCI device.
     fn pci_devices(&mut self) -> Vec<String>;
 
@@ -185,7 +189,7 @@ type CommandResult = Result<(), Failure>;
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
     "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
-    "devattr", "watchdog", "install", "cmp",
+    "devattr", "watchdog", "install", "cmp", "date",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -242,6 +246,7 @@ Built-in commands:
   ps                   list threads and processes
   kill PID             terminate a process
   free                 show memory usage
+  date                 show the date and time (UTC)
   lspci                list PCI devices
   lsblk                list block devices
   lsdrv                list drivers and the devices they control
@@ -571,6 +576,21 @@ impl Shell {
                 Ok(())
             }
             _ if !BUILTINS.contains(&name) => Err(Failure(NOT_BUILTIN.into())),
+            "date" => {
+                if !args.is_empty() {
+                    return Err(Failure("usage: date".into()));
+                }
+                let moment = host
+                    .now()
+                    .and_then(omit_abi::datetime::DateTime::from_unix)
+                    .ok_or_else(|| Failure("this machine has no usable clock".into()))?;
+                const DAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+                Ok(writeln!(
+                    out,
+                    "{} {moment} UTC",
+                    DAYS[usize::from(moment.weekday())]
+                )?)
+            }
             "free" => {
                 let memory = host.memory();
                 writeln!(out, "             total        used        free (KiB)")?;
@@ -1118,6 +1138,7 @@ mod tests {
         last_stdin: Option<String>,
         last_pipeline: Vec<(String, Vec<String>)>,
         formatted: u32,
+        now: Option<i64>,
     }
 
     impl Host for MockHost {
@@ -1250,6 +1271,10 @@ mod tests {
                 ("vda", _) => Ok(Box::new(RamFs::new())),
                 _ => Err("no such block device".into()),
             }
+        }
+
+        fn now(&mut self) -> Option<i64> {
+            self.now
         }
 
         fn memory(&mut self) -> MemoryInfo {
@@ -1830,6 +1855,15 @@ mod tests {
         assert_eq!(s.err("cmp /a /d"), "cmp: /a and /d differ at byte 1\n");
         assert_eq!(s.err("cmp /a /c"), "cmp: /a and /c differ at byte 4\n");
         assert!(s.err("cmp /a").contains("usage"));
+    }
+
+    #[test]
+    fn date_shows_the_clock_or_says_there_is_none() {
+        let mut s = Session::new();
+        assert_eq!(s.err("date"), "date: this machine has no usable clock\n");
+        s.host.now = Some(1_794_312_000);
+        assert_eq!(s.ok("date"), "Tue 2026-11-10 12:00:00 UTC\n");
+        assert_eq!(s.err("date tomorrow"), "date: usage: date\n");
     }
 
     #[test]

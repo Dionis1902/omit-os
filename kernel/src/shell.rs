@@ -263,6 +263,10 @@ impl Host for KernelHost {
         process::kill(pid)
     }
 
+    fn now(&mut self) -> Option<i64> {
+        crate::time::realtime_us().map(|micros| (micros / 1_000_000) as i64)
+    }
+
     fn memory(&mut self) -> MemoryInfo {
         let (total, free) = mm::frame::stats().map_or((0, 0), |stats| {
             let kib = |frames: usize| frames as u64 * mm::PAGE_SIZE / 1024;

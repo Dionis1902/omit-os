@@ -122,6 +122,7 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
             .map(|status| status as u32 as u64)
             .ok_or(Errno::NoSuchProcess),
         nr::CLOCK => Ok(time::monotonic_ns() / 1000),
+        nr::REALTIME => time::realtime_us().ok_or(Errno::Io),
         nr::PIPE => create_pipe(a0),
         nr::SHARED_CREATE => shared_create(a0, a1),
         nr::SHARED_MAP => shared_map(a0, a1),

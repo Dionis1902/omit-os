@@ -51,6 +51,35 @@ pub const WAIT_OBJECT_0: u32 = 0;
 pub const WAIT_TIMEOUT: u32 = 258;
 pub const STILL_ACTIVE: u32 = 259;
 
+/// `FILETIME`: 100-nanosecond intervals since 1601-01-01 (UTC), in two
+/// halves.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct FileTime {
+    pub low: u32,
+    pub high: u32,
+}
+
+impl FileTime {
+    pub fn value(&self) -> u64 {
+        u64::from(self.low) | (u64::from(self.high) << 32)
+    }
+}
+
+/// `SYSTEMTIME`.
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct SystemTime {
+    pub year: u16,
+    pub month: u16,
+    pub day_of_week: u16,
+    pub day: u16,
+    pub hour: u16,
+    pub minute: u16,
+    pub second: u16,
+    pub milliseconds: u16,
+}
+
 /// `CRITICAL_SECTION`: 40 bytes that belong to the system once
 /// initialised.
 #[repr(C, align(8))]
@@ -149,6 +178,9 @@ unsafe extern "system" {
     pub safe fn TlsSetValue(index: u32, value: *mut c_void) -> Bool;
     pub safe fn Sleep(milliseconds: u32);
     pub safe fn GetTickCount64() -> u64;
+    pub fn GetSystemTimeAsFileTime(time: *mut FileTime);
+    pub fn GetSystemTime(time: *mut SystemTime);
+    pub fn GetLocalTime(time: *mut SystemTime);
 }
 
 pub type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;

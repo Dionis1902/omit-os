@@ -341,6 +341,11 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         clocks.timer_hz / 1_000_000,
         time::TICK_HZ,
     );
+    arch::rtc::self_test().map_err(InitError::PipeSelfTest)?;
+    match time::init_realtime() {
+        Some(moment) => info!("time: real-time clock reads {moment} UTC"),
+        None => warn!("time: the real-time clock holds no valid date; there is no date and time"),
+    }
     let elapsed_ns = time::self_test().map_err(InitError::TickSelfTest)?;
     info!(
         "time: timer interrupt self-test passed ({} ticks in {} ms)",

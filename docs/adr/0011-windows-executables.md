@@ -45,7 +45,7 @@ are started like any other.
   Win32 error codes, path translation (`C:\a\b` is `/a/b`), command-line
   quoting, UTF-16 conversion, the handle table. Host-tested.
 - `userspace/programs/src/bin/winrun` — the loader and the implementation
-  of 66 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
+  of 69 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
   Omit OS system calls.
 - `compat/windows/samples` — test programs. They are real Windows console
   executables (target `x86_64-pc-windows-msvc`), built by `cargo xtask`
@@ -101,7 +101,7 @@ needed to build; no code is taken from Wine or ReactOS.
 Verified in QEMU by the `windows-programs` test:
 
 - a minimal executable prints through `GetStdHandle`/`WriteFile`;
-- a test executable performs 57 self-checked API operations — heap,
+- a test executable performs 61 self-checked API operations — heap,
   virtual memory, file and directory operations with the documented error
   codes, console output in UTF-16, timing, the TEB/PEB fields, data that
   requires relocation — and its exit code reaches the shell;
@@ -142,7 +142,7 @@ Verified in QEMU by the `windows-programs` test:
 This is a proof that the approach works, not Windows compatibility.
 
 - **Only programs whose imports are all satisfied by the implemented
-  functions — 66 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
+  functions — 69 of `KERNEL32.dll`, 28 of `USER32.dll`, 14 of
   `GDI32.dll` — or by DLL files that are present and themselves
   loadable, run.** That excludes practically all existing software:
   anything linked against the C runtime or the Rust standard library, or

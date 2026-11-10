@@ -85,6 +85,35 @@ pub fn init() -> Result<TimeInfo, ApicError> {
     })
 }
 
+/// The real time at the moment `monotonic_ns` was 0, in microseconds
+/// since the Unix epoch; 0 if the machine's clock could not be read.
+static REALTIME_AT_INIT_US: AtomicU64 = AtomicU64::new(0);
+
+/// Reads the machine's real-time clock and from then on derives the
+/// date and time from it and the system's own clock. Returns what the
+/// clock said, or `None` if it holds no valid date after 1970.
+pub fn init_realtime() -> Option<omit_abi::datetime::DateTime> {
+    let moment = crate::arch::rtc::now()?;
+    let seconds = u64::try_from(moment.to_unix()?).ok().filter(|&s| s != 0)?;
+    let since_init_us = monotonic_ns() / 1000;
+    REALTIME_AT_INIT_US.store(
+        (seconds * 1_000_000).saturating_sub(since_init_us),
+        Ordering::Relaxed,
+    );
+    Some(moment)
+}
+
+/// The date and time as microseconds since the Unix epoch (UTC), or
+/// `None` if the machine's clock could not be read at start-up. The
+/// clock is read once; afterwards time advances with the system's own
+/// clock and is never adjusted.
+pub fn realtime_us() -> Option<u64> {
+    match REALTIME_AT_INIT_US.load(Ordering::Relaxed) {
+        0 => None,
+        base => Some(base + monotonic_ns() / 1000),
+    }
+}
+
 fn on_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
     crate::sched::on_tick();

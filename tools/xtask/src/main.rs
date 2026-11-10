@@ -516,6 +516,9 @@ fn qemu_command(
         .args(["-device", "i6300esb"])
         .args(["-action", "watchdog=reset"])
         .args(["-device", "isa-debug-exit,iobase=0xf4,iosize=0x04"])
+        // A fixed date and time, advancing with the guest's own clock,
+        // so that what the tests see does not depend on when they run.
+        .args(["-rtc", "base=2026-11-10T12:00:00,clock=vm"])
         .args(["-serial", "stdio"])
         .args(["-display", "none"])
         .args(["-nic", "none"])
@@ -660,6 +663,7 @@ const BOOT_TESTS: &[BootTest] = &[
         cmdline: "",
         expected_exit: QEMU_EXIT_SUCCESS,
         must_contain: &[
+            "[INFO ] time: real-time clock reads 2026-11-10 12:00:",
             SUCCESS_MESSAGE,
             "[INFO ] serial: COM1 16550 UART ready",
             "[INFO ] cpu: IDT loaded, 256 vectors installed, #BP self-test passed",
@@ -812,6 +816,8 @@ const BOOT_TESTS: &[BootTest] = &[
             // program, and through a filter with more data than a pipe
             // holds.
             ("pipetest", "\npipetest: all checks passed\n"),
+            // The date, from the (emulated, fixed) real-time clock.
+            ("date", "\nTue 2026-11-10 12:0"),
             // Shared memory between two processes, channels, poll.
             ("ipctest", "\nipctest: all checks passed\n"),
             // Threads within a process: results through join, a mutex
@@ -1210,7 +1216,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "cat /wintest.log",
-                "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: time ok\r\nwintest: all 57 checks passed\r\n",
+                "wintest: relocated data works\r\nwintest: image loaded at a relocated base: true\r\nwintest: heap and virtual memory ok\r\nwintest: files and directories ok\r\nwintest: wide characters ok\r\nwintest: date 2026-11-10, day 2 of the week\r\nwintest: time ok\r\nwintest: all 61 checks passed\r\n",
             ),
             // The directory the test created and removed is gone.
             ("ls /", "ls /\nbin\nboot\nwintest.log\nomit:/# "),
@@ -1236,7 +1242,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!CloseClipboard, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateProcessA, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!CloseClipboard, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),

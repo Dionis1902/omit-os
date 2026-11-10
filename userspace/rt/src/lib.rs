@@ -665,6 +665,13 @@ pub fn futex_wake(word: &core::sync::atomic::AtomicU32, count: usize) -> usize {
     usize::try_from(woken).unwrap_or(0)
 }
 
+/// The date and time, as microseconds since 1970-01-01 00:00:00 UTC
+/// (see [`abi::datetime`]); `None` if the machine has no usable clock.
+pub fn realtime_us() -> Option<u64> {
+    // SAFETY: no arguments.
+    result(unsafe { syscall(nr::REALTIME, 0, 0, 0) }).ok()
+}
+
 /// Microseconds since the system started.
 pub fn clock_us() -> u64 {
     // SAFETY: no arguments.

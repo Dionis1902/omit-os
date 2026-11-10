@@ -20,6 +20,7 @@ mod pit;
 mod port;
 pub mod ps2;
 pub mod qemu;
+pub mod rtc;
 pub mod serial;
 pub mod syscall;
 pub mod uspace;

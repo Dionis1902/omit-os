@@ -2,8 +2,8 @@
 //! A program that needs things the compatibility layer does not have:
 //! a function of a system library that is missing altogether (the
 //! registry, `ADVAPI32.dll`), a function that is missing from a library
-//! that exists (`USER32.dll` has no clipboard), and the current date and
-//! time (there is no real-time clock driver). It must be refused before
+//! that exists (`USER32.dll` has no clipboard), and starting another
+//! program (`CreateProcessA`). It must be refused before
 //! it starts, with all three named.
 
 #![no_std]
@@ -25,9 +25,19 @@ unsafe extern "system" {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    /// The current date and time: Omit OS has no real-time clock driver
-    /// yet, so this function does not exist there.
-    fn GetSystemTimeAsFileTime(time: *mut u64);
+    /// Starting another program is not implemented.
+    fn CreateProcessA(
+        application: *const u8,
+        command_line: *mut u8,
+        process_attributes: *mut c_void,
+        thread_attributes: *mut c_void,
+        inherit_handles: i32,
+        flags: u32,
+        environment: *mut c_void,
+        directory: *const u8,
+        startup: *mut c_void,
+        information: *mut c_void,
+    ) -> i32;
 }
 
 /// Entry point.
@@ -38,8 +48,18 @@ pub extern "C" fn mainCRTStartup() -> u32 {
     unsafe {
         RegCloseKey(core::ptr::null_mut());
         CloseClipboard();
-        let mut time = 0u64;
-        GetSystemTimeAsFileTime(&raw mut time);
+        CreateProcessA(
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+            0,
+            0,
+            core::ptr::null_mut(),
+            core::ptr::null(),
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        );
     }
     ExitProcess(1)
 }
