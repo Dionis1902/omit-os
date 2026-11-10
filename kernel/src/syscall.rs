@@ -118,6 +118,7 @@ pub extern "C" fn dispatch(number: u64, a0: u64, a1: u64, a2: u64, a3: u64, a4: 
         nr::WAIT => process::wait(a0)
             .map(|status| status as u32 as u64)
             .ok_or(Errno::NoSuchProcess),
+        nr::CLOCK => Ok(time::monotonic_ns() / 1000),
         nr::KILL => {
             if sched::kill(a0) {
                 Ok(0)
@@ -329,23 +330,16 @@ fn input_read(address: u64, capacity: u64, timeout_ms: u64) -> SysResult {
         return Err(Errno::InvalidArgument);
     }
     let capacity = capacity.min(INPUT_READ_MAX) as usize;
-    let deadline = time::monotonic_ns() + timeout_ms * 1_000_000;
+    // Rounded up, so that a short timeout still waits.
+    let tick_ms = 1000 / u64::from(time::TICK_HZ);
+    input::wait(timeout_ms.div_ceil(tick_ms));
+    process::exit_if_killed();
     let mut events = Vec::new();
-    loop {
-        while events.len() < capacity * size_of::<InputEvent>() {
-            match input::pop() {
-                Some(event) => events.extend_from_slice(bytes_of(&event)),
-                None => break,
-            }
+    while events.len() < capacity * size_of::<InputEvent>() {
+        match input::pop() {
+            Some(event) => events.extend_from_slice(bytes_of(&event)),
+            None => break,
         }
-        if !events.is_empty() || capacity == 0 || time::monotonic_ns() >= deadline {
-            break;
-        }
-        // Input arrives at human speed; checking once per timer tick adds
-        // at most 10 ms of latency and needs no wake-up from the interrupt
-        // handlers.
-        sched::sleep_ticks(1);
-        process::exit_if_killed();
     }
     copy_out(address, &events)?;
     Ok((events.len() / size_of::<InputEvent>()) as u64)

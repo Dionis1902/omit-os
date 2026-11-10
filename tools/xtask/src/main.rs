@@ -1405,12 +1405,12 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
         |image: &Screenshot, colour: omit_gfx::Colour| image.count(0..image.height, rgb(colour));
 
     let image = wait_for_screen(check, "the desktop", patience, |image| {
+        // The first frame is copied to the screen row by row, so wait for
+        // its last part, the task bar at the bottom, as well.
         image.pixel(image.width - 3, 3) == rgb(theme::BACKGROUND)
+            && image.pixel(image.width / 2, image.height - 2) == rgb(theme::TASKBAR)
             && screen_shows(image, "Everything you need. Nothing you don't.")
     })?;
-    if image.pixel(image.width / 2, image.height - 2) != rgb(theme::TASKBAR) {
-        return Err("no task bar at the bottom of the screen".into());
-    }
     if count_all(&image, theme::TITLE_ACTIVE) < 5000 {
         return Err("the About window has no active title bar".into());
     }

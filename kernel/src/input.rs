@@ -12,6 +12,7 @@ use omit_abi::{InputEvent, event, key};
 use omit_term::mouse::Report;
 use omit_term::scancode::Key;
 
+use crate::sched::WaitQueue;
 use crate::sync::SpinLock;
 
 const CAPACITY: usize = 256;
@@ -27,13 +28,20 @@ const EMPTY: InputEvent = InputEvent {
     a: 0,
     b: 0,
     c: 0,
+    time_us: 0,
 };
+
+fn now_us() -> u64 {
+    crate::time::monotonic_ns() / 1000
+}
 
 static QUEUE: SpinLock<Queue> = SpinLock::new(Queue {
     events: [EMPTY; CAPACITY],
     head: 0,
     len: 0,
 });
+/// The display owner, waiting for input.
+static ARRIVED: WaitQueue = WaitQueue::new();
 /// Whether events are being collected for a display owner.
 static GRABBED: AtomicBool = AtomicBool::new(false);
 
@@ -96,7 +104,9 @@ pub fn key_pressed(pressed: Key) {
         a: code,
         b: 0,
         c: 0,
+        time_us: now_us(),
     });
+    ARRIVED.wake_all();
 }
 
 /// Handles a report from the mouse driver (interrupt context).
@@ -122,10 +132,24 @@ pub fn mouse_moved(report: Report) {
         a: i32::from(report.dx),
         b: i32::from(report.dy),
         c: buttons,
+        time_us: now_us(),
     });
+    drop(queue);
+    ARRIVED.wake_all();
 }
 
 /// Removes the oldest pending event.
 pub fn pop() -> Option<InputEvent> {
     QUEUE.lock().pop()
+}
+
+/// Blocks the calling thread until an event is pending, the thread has
+/// been killed, or `ticks` timer ticks have passed. The interrupt handlers
+/// wake the thread as soon as they queue an event, so input is delivered
+/// without waiting for the next timer tick.
+pub fn wait(ticks: u64) {
+    ARRIVED.wait_until_or_timeout(
+        || QUEUE.lock().len != 0 || crate::sched::current_killed(),
+        ticks,
+    );
 }

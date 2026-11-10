@@ -107,6 +107,9 @@ pub mod nr {
     /// `kill(pid)` — asks for process `pid` to be terminated. It ends the
     /// next time it would return to user mode.
     pub const KILL: u64 = 25;
+    /// `clock() -> microseconds` — time since the system started, with
+    /// microsecond resolution.
+    pub const CLOCK: u64 = 26;
 }
 
 /// Flag for the `wait` system call: do not block.
@@ -158,6 +161,10 @@ pub struct InputEvent {
     pub b: i32,
     /// Mouse: the buttons held (bit 0 left, bit 1 right, bit 2 middle).
     pub c: u32,
+    /// When the kernel received the event from the device, in
+    /// microseconds on the clock of the `clock` system call. For mouse
+    /// movement merged from several reports, the time of the first.
+    pub time_us: u64,
 }
 
 /// Event kinds.

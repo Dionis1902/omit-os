@@ -472,6 +472,12 @@ pub fn wait(pid: u64) -> Result<i32, Errno> {
     result(unsafe { syscall(nr::WAIT, pid, 0, 0) }).map(|status| status as i32)
 }
 
+/// Microseconds since the system started.
+pub fn clock_us() -> u64 {
+    // SAFETY: no arguments.
+    unsafe { syscall(nr::CLOCK, 0, 0, 0) as u64 }
+}
+
 /// Checks whether process `pid` has ended, without waiting: its exit
 /// status if so, `None` while it is still running.
 pub fn try_wait(pid: u64) -> Result<Option<i32>, Errno> {

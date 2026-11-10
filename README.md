@@ -196,7 +196,10 @@ Milestones 0 (development environment), 1 (bootable kernel), 2 (memory and
 interrupts), 3 (terminal and filesystem), 4 (processes and userspace),
 5 (storage; coreutils only in part), 6 (driver compatibility, first
 instance), 7 (Windows executables, first instance) and 8 (graphics and a
-desktop, first instance) are implemented. "First instance" means what it
+desktop, first instance) are implemented. Of Milestone 9 (advanced
+compatibility), the parts that could be built and tested were: DLL
+support, a second Linux driver family, and latency measurement; Direct3D,
+Vulkan, GPU acceleration and games were investigated only (ADR 0013). "First instance" means what it
 says: two small Linux drivers; Windows programs that use only a small part of one
 system library; a desktop that is a single program.
 
@@ -257,7 +260,9 @@ system library; a desktop that is a single program.
 | Display for programs: exclusive ownership, pixel blits, keyboard and mouse events; console restored when the owner exits or the kernel panics | Working, tested in QEMU |
 | Graphics library (`libs/gfx`): clipped drawing, text, window manager with incremental repainting | Working; host-tested, including equivalence of incremental and full repaints |
 | Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
+| Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
 | Programs opening their own windows, a terminal emulator, resizing, USB input, graphics modes | Not started |
+| GPU drivers and acceleration, Vulkan, Direct3D, games | Not started; requirements and a proposed order of work are in ADR 0013 |
 | Windows: C runtime, threads, exceptions, TLS, graphics, registry, networking, 32-bit programs | Not started |
 
 ### What has been verified, and how
@@ -419,6 +424,9 @@ The exact contract between loader and kernel is documented in
 - [ADR 0008 — Threads, processes and system calls](docs/adr/0008-threads-processes-and-system-calls.md)
 - [ADR 0009 — Storage: PCI, VirtIO block and ext2](docs/adr/0009-storage-and-persistent-filesystem.md)
 - [ADR 0010 — Reusing Linux drivers through a LinuxKPI layer](docs/adr/0010-driver-reuse-through-linuxkpi.md)
+- [ADR 0011 — Running Windows executables natively](docs/adr/0011-windows-executables.md)
+- [ADR 0012 — Graphics for programs, mouse input and a first desktop](docs/adr/0012-display-input-and-desktop.md)
+- [ADR 0013 — Advanced compatibility: what was investigated, what was built](docs/adr/0013-advanced-compatibility-investigation.md)
 
 ## Testing
 

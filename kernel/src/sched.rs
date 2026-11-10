@@ -577,6 +577,49 @@ impl WaitQueue {
         interrupts::restore(interrupts_were_enabled);
     }
 
+    /// Like [`WaitQueue::wait_until`], but gives up after `ticks` timer
+    /// ticks. Returns whether the condition became true.
+    pub fn wait_until_or_timeout(&self, mut condition: impl FnMut() -> bool, ticks: u64) -> bool {
+        let interrupts_were_enabled = interrupts::save_and_disable();
+        let deadline = time::ticks() + ticks;
+        let satisfied = loop {
+            if condition() {
+                break true;
+            }
+            if time::ticks() >= deadline {
+                break false;
+            }
+            let blocked = {
+                let mut guard = SCHEDULER.lock();
+                guard.as_mut().and_then(|scheduler| {
+                    let current = scheduler.current;
+                    let thread = scheduler.threads.get_mut(&current)?;
+                    thread.state = ThreadState::Blocked;
+                    // The timer wakes the thread at the deadline if nothing
+                    // else does first.
+                    thread.wake_tick = Some(deadline);
+                    Some(current)
+                })
+            };
+            match blocked {
+                Some(current) => {
+                    self.waiters.lock().push_back(current);
+                    reschedule();
+                    // If the timer (rather than `wake_all`) ended the wait,
+                    // the thread is still listed; a later `wake_all` must
+                    // not find it there and cut short some unrelated sleep.
+                    self.waiters.lock().retain(|&id| id != current);
+                }
+                None => {
+                    interrupts::wait();
+                    interrupts::disable();
+                }
+            }
+        };
+        interrupts::restore(interrupts_were_enabled);
+        satisfied
+    }
+
     /// Makes every waiting thread ready. Safe to call from interrupt
     /// handlers.
     pub fn wake_all(&self) {
@@ -672,5 +715,37 @@ pub fn self_test() -> Result<(), &'static str> {
     if threads().len() != before {
         return Err("finished threads were not cleaned up");
     }
+
+    // Waiting with a timeout: returns at once when the condition holds,
+    // gives up after the timeout when it does not, is ended early by a
+    // wake-up, and leaves nothing behind on the queue.
+    static TIMED: WaitQueue = WaitQueue::new();
+    static SIGNAL: AtomicBool = AtomicBool::new(false);
+    if !TIMED.wait_until_or_timeout(|| true, 50) {
+        return Err("timed wait missed a condition that already held");
+    }
+    let start = time::ticks();
+    if TIMED.wait_until_or_timeout(|| false, 3) {
+        return Err("timed wait reported a condition that never held");
+    }
+    let waited = time::ticks() - start;
+    if !(3..=5).contains(&waited) {
+        return Err("timed wait did not last as long as its timeout");
+    }
+    if !TIMED.waiters.lock().is_empty() {
+        return Err("timed wait left the thread on the queue");
+    }
+    fn signaller(_: usize) {
+        sleep_ticks(2);
+        SIGNAL.store(true, Ordering::Relaxed);
+        TIMED.wake_all();
+    }
+    let helper = spawn("timed-wait-test", signaller, 0).map_err(|_| "cannot spawn a thread")?;
+    let start = time::ticks();
+    let woken = TIMED.wait_until_or_timeout(|| SIGNAL.load(Ordering::Relaxed), 200);
+    if !woken || time::ticks() - start > 50 {
+        return Err("timed wait was not ended by a wake-up");
+    }
+    join(helper);
     Ok(())
 }

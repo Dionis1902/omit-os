@@ -70,6 +70,9 @@ fn main() -> i32 {
 
     let mut events = [InputEvent::default(); 32];
     let mut failure = None;
+    let mut latency = Latency::default();
+    // When the oldest input not yet visible on the screen arrived.
+    let mut pending_since: Option<u64> = None;
     while !desktop.quit_requested() {
         let seconds = omit_rt::uptime_ms() / 1000;
         desktop.set_status(&format!(
@@ -93,7 +96,12 @@ fn main() -> i32 {
                 failure = Some(error);
                 break;
             }
+            // What the input led to is on the screen now.
+            if let Some(since) = pending_since.take() {
+                latency.record(omit_rt::clock_us().saturating_sub(since));
+            }
         }
+        pending_since = None;
 
         let count = match omit_rt::read_events(&mut events, IDLE_MS) {
             Ok(count) => count,
@@ -103,10 +111,11 @@ fn main() -> i32 {
             }
         };
         for input in &events[..count] {
+            pending_since = Some(pending_since.map_or(input.time_us, |t| t.min(input.time_us)));
             match input.kind {
                 event::KEY if input.a == key::F1 + 11 => {
                     // F12 always leaves, whatever the windows do.
-                    return finish(None);
+                    return finish(None, &latency);
                 }
                 event::KEY => desktop.key(input.a),
                 event::MOUSE => desktop.mouse(input.a, input.b, input.c),
@@ -115,14 +124,42 @@ fn main() -> i32 {
         }
         desktop.tick();
     }
-    finish(failure)
+    finish(failure, &latency)
 }
 
-fn finish(failure: Option<Errno>) -> i32 {
+/// Statistics of the time from an input event reaching the kernel to the
+/// screen showing its effect.
+#[derive(Default)]
+struct Latency {
+    updates: u64,
+    total_us: u64,
+    max_us: u64,
+}
+
+impl Latency {
+    fn record(&mut self, micros: u64) {
+        self.updates += 1;
+        self.total_us += micros;
+        self.max_us = self.max_us.max(micros);
+    }
+}
+
+fn finish(failure: Option<Errno>, latency: &Latency) -> i32 {
     let _ = omit_rt::display_release();
     match failure {
         None => {
             println!("desktop: closed");
+            if let Some(average) = latency.total_us.checked_div(latency.updates) {
+                println!(
+                    "desktop: input-to-screen latency over {} updates: average {}.{} ms, \
+                     longest {}.{} ms",
+                    latency.updates,
+                    average / 1000,
+                    (average % 1000) / 100,
+                    latency.max_us / 1000,
+                    (latency.max_us % 1000) / 100
+                );
+            }
             0
         }
         Some(error) => {
