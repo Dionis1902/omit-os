@@ -47,7 +47,6 @@ use arch::interrupts::RegisterError;
 use arch::ioapic::IoApicError;
 use arch::paging::PagingError;
 use arch::qemu::{self, ExitCode};
-use arch::serial::SerialError;
 use mm::frame::FrameInitError;
 use time::TickTestError;
 
@@ -67,7 +66,6 @@ const SUCCESS_MESSAGE: &str = "Omit OS — Kernel initialized successfully.";
 /// Why kernel initialisation stopped.
 #[derive(Debug)]
 enum InitError {
-    Serial(SerialError),
     BootInfoPointer,
     BootInfo(BootInfoError),
     Cpu(CpuError),
@@ -93,7 +91,6 @@ enum InitError {
 impl fmt::Display for InitError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Serial(e) => write!(f, "serial console: {e:?}"),
             Self::BootInfoPointer => write!(f, "boot info pointer is null or misaligned"),
             Self::BootInfo(e) => write!(f, "boot info: {e}"),
             Self::Cpu(e) => write!(f, "cpu: {e}"),
@@ -207,9 +204,17 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         qemu::enable();
     }
 
-    serial.map_err(InitError::Serial)?;
+    // A machine without a serial port (most current ones) is used
+    // through its screen and keyboard alone. Until the framebuffer
+    // console starts, a few steps further down, such a machine shows
+    // nothing; the log is kept and appears then.
+    let serial_present = serial.is_ok();
     boot_info_result.map_err(InitError::BootInfo)?;
-    info!("serial: COM1 16550 UART ready (115200 8N1), loopback test passed");
+    if serial_present {
+        info!("serial: COM1 16550 UART ready (115200 8N1), loopback test passed");
+    } else {
+        info!("serial: no COM1 port; the console is on the screen only");
+    }
     info!(
         "boot: protocol v{}, command line \"{}\"",
         boot_info.version,
@@ -329,9 +334,16 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
     );
 
     // 8. Clocks and the periodic tick. Interrupts are enabled from here on.
-    let clocks = time::init().map_err(InitError::Timer)?;
+    // SAFETY: `rsdp_phys` is the RSDP address reported by the firmware
+    // (or 0), passed through the validated boot information, and the
+    // direct map was registered in step 5.
+    let pm_timer = unsafe { arch::acpi::pm_timer(boot_info.rsdp_phys) };
+    // `calibrate=pmtimer` measures against the ACPI timer even where the
+    // PIT works, to test the path machines without a PIT take.
+    let prefer_pm_timer = cmdline.value("calibrate") == Some("pmtimer");
+    let clocks = time::init(pm_timer, prefer_pm_timer).map_err(InitError::Timer)?;
     info!(
-        "time: TSC {} MHz ({}), APIC timer {} MHz, tick {} Hz",
+        "time: TSC {} MHz ({}), APIC timer {} MHz, tick {} Hz; measured against the {}",
         clocks.tsc_hz / 1_000_000,
         if cpu.invariant_tsc {
             "invariant"
@@ -340,7 +352,21 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         },
         clocks.timer_hz / 1_000_000,
         time::TICK_HZ,
+        clocks.reference.name(),
     );
+    // Two independent reference clocks should agree closely; if they do
+    // not, one of them (or the measurement) is not to be trusted, and
+    // every time the system reports is suspect.
+    // (A 20 ms measurement is good to a few parts per thousand.)
+    match clocks.cross_check_per_mille {
+        Some(difference) if difference <= 50 => {
+            info!("time: a second reference clock differs by {difference} per mille");
+        }
+        Some(difference) => {
+            warn!("time: the reference clocks disagree by {difference} per mille");
+        }
+        None => info!("time: no second reference clock to check against"),
+    }
     arch::rtc::self_test().map_err(InitError::PipeSelfTest)?;
     match time::init_realtime() {
         Some(moment) => info!("time: real-time clock reads {moment} UTC"),
@@ -366,17 +392,20 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         "irq: ACPI lists {} CPU(s); I/O APIC at {:#x} with {} lines",
         acpi.cpu_count, acpi.ioapic_address, lines
     );
-    arch::interrupts::register(SERIAL_VECTOR, arch::serial::handle_interrupt)
-        .map_err(InitError::InputInterrupt)?;
-    // The I/O APIC's physical destination field is 8 bits wide; the boot
-    // CPU's ID always fits on machines this kernel can currently boot.
-    arch::ioapic::enable(acpi.serial_irq, SERIAL_VECTOR, apic.id as u8)
-        .map_err(InitError::IoApic)?;
-    console::enable_input();
-    info!(
-        "console: serial input enabled (GSI {} -> vector {})",
-        acpi.serial_irq.gsi, SERIAL_VECTOR
-    );
+    if serial_present {
+        arch::interrupts::register(SERIAL_VECTOR, arch::serial::handle_interrupt)
+            .map_err(InitError::InputInterrupt)?;
+        // The I/O APIC's physical destination field is 8 bits wide; the
+        // boot CPU's ID always fits on machines this kernel can
+        // currently boot.
+        arch::ioapic::enable(acpi.serial_irq, SERIAL_VECTOR, apic.id as u8)
+            .map_err(InitError::IoApic)?;
+        console::enable_input();
+        info!(
+            "console: serial input enabled (GSI {} -> vector {})",
+            acpi.serial_irq.gsi, SERIAL_VECTOR
+        );
+    }
     // `nops2` leaves the PS/2 keyboard and mouse alone, so that tests can
     // prove input arrives another way (USB).
     if cmdline.flag("nops2") {

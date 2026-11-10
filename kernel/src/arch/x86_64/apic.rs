@@ -12,6 +12,8 @@ use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use super::interrupts::{self, FIRST_USABLE_VECTOR, RegisterError, SPURIOUS_VECTOR};
 use super::paging::{self, MapError};
+use omit_acpi::PmTimer;
+
 use super::{cpu, pit};
 use crate::error;
 
@@ -205,28 +207,83 @@ pub struct Calibration {
     pub timer_hz: u64,
 }
 
-/// Measures the TSC and local APIC timer frequencies against the PIT.
+/// A clock of known frequency to measure the others against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reference {
+    /// The legacy programmable interval timer. Present on every PC for
+    /// decades; switched off by the firmware of some current machines.
+    Pit,
+    /// The ACPI power-management timer.
+    PmTimer(PmTimer),
+}
+
+impl Reference {
+    /// A name for the log.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Pit => "PIT",
+            Self::PmTimer(_) => "ACPI PM timer",
+        }
+    }
+}
+
+/// Lets the reference clock run for about 20 ms and returns how many of
+/// its ticks passed and its frequency. `None` if it does not count.
+fn reference_interval(reference: Reference) -> Option<(u64, u64)> {
+    match reference {
+        Reference::Pit => {
+            pit::start_one_shot(CALIBRATION_PIT_TICKS);
+            pit::wait_for_one_shot().then_some((
+                u64::from(CALIBRATION_PIT_TICKS),
+                u64::from(pit::FREQUENCY_HZ),
+            ))
+        }
+        Reference::PmTimer(timer) => {
+            /// Ticks to wait for: a fiftieth of a second.
+            const TARGET: u32 = omit_acpi::PM_TIMER_HZ / 50;
+            /// Bound on reads, so that a counter that stands still gives
+            /// an error instead of a hang. A read is a port access, on
+            /// the order of a microsecond.
+            const READ_LIMIT: u32 = 10_000_000;
+            let mask = if timer.wide { u32::MAX } else { 0x00FF_FFFF };
+            // SAFETY: the port is the power-management timer's counter
+            // register, as reported by the firmware's ACPI tables;
+            // reading it has no side effects.
+            let now = || unsafe { super::port::inl(timer.port) } & mask;
+            let start = now();
+            for _ in 0..READ_LIMIT {
+                // The counter wraps (every 4.7 s at 24 bits); the
+                // difference modulo its width is still right.
+                let elapsed = now().wrapping_sub(start) & mask;
+                if elapsed >= TARGET {
+                    return Some((u64::from(elapsed), u64::from(omit_acpi::PM_TIMER_HZ)));
+                }
+            }
+            None
+        }
+    }
+}
+
+/// Measures the TSC and local APIC timer frequencies against
+/// `reference`.
 ///
 /// Takes about 20 ms. Must be called after [`init`], with interrupts
 /// disabled so the measurement is not stretched by a handler.
-pub fn calibrate() -> Result<Calibration, ApicError> {
+pub fn calibrate(reference: Reference) -> Result<Calibration, ApicError> {
     write(REG_TIMER_DIVIDE, TIMER_DIVIDE_BY_16);
     write(REG_LVT_TIMER, LVT_MASKED);
 
-    pit::start_one_shot(CALIBRATION_PIT_TICKS);
     write(REG_TIMER_INITIAL, u32::MAX);
     let tsc_start = cpu::read_tsc();
-    if !pit::wait_for_one_shot() {
+    let Some((ticks, frequency)) = reference_interval(reference) else {
+        write(REG_TIMER_INITIAL, 0);
         return Err(ApicError::CalibrationTimeout);
-    }
+    };
     let tsc_end = cpu::read_tsc();
     let timer_elapsed = u32::MAX - read(REG_TIMER_CURRENT);
     write(REG_TIMER_INITIAL, 0); // stop the timer
 
-    let scale = |count: u64| {
-        (u128::from(count) * u128::from(pit::FREQUENCY_HZ) / u128::from(CALIBRATION_PIT_TICKS))
-            as u64
-    };
+    let scale = |count: u64| (u128::from(count) * u128::from(frequency) / u128::from(ticks)) as u64;
     let calibration = Calibration {
         tsc_hz: scale(tsc_end.wrapping_sub(tsc_start)),
         timer_hz: scale(u64::from(timer_elapsed)),

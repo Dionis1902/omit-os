@@ -11,7 +11,9 @@
 use core::fmt;
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use crate::arch::apic::{self, ApicError};
+use omit_acpi::PmTimer;
+
+use crate::arch::apic::{self, ApicError, Reference};
 use crate::arch::{cpu, interrupts};
 
 /// Frequency of the periodic tick.
@@ -66,14 +68,35 @@ pub struct TimeInfo {
     pub tsc_hz: u64,
     /// Local APIC timer frequency in Hz.
     pub timer_hz: u64,
+    /// The clock the two were measured against.
+    pub reference: Reference,
+    /// If a second reference clock was available: by how many parts per
+    /// thousand its TSC measurement differed from the one used.
+    pub cross_check_per_mille: Option<u64>,
 }
 
 /// Calibrates the clocks and starts the periodic tick.
 ///
 /// Must be called once, after the local APIC is initialised, with interrupts
 /// disabled. Ticks start being counted once interrupts are enabled.
-pub fn init() -> Result<TimeInfo, ApicError> {
-    let calibration = apic::calibrate()?;
+///
+/// The clocks are measured against the legacy PIT, or, where that does
+/// not count (or `prefer_pm_timer` asks for it), against the ACPI
+/// power-management timer if the machine has one. When both work, the
+/// second serves as a check on the first.
+pub fn init(pm_timer: Option<PmTimer>, prefer_pm_timer: bool) -> Result<TimeInfo, ApicError> {
+    let mut references = [Some(Reference::Pit), pm_timer.map(Reference::PmTimer)];
+    if prefer_pm_timer {
+        references.reverse();
+    }
+    let mut results = references
+        .into_iter()
+        .flatten()
+        .filter_map(|reference| Some((reference, apic::calibrate(reference).ok()?)));
+    let (reference, calibration) = results.next().ok_or(ApicError::CalibrationTimeout)?;
+    let cross_check_per_mille = results
+        .next()
+        .map(|(_, other)| other.tsc_hz.abs_diff(calibration.tsc_hz) * 1000 / calibration.tsc_hz);
     TSC_AT_INIT.store(cpu::read_tsc(), Ordering::Relaxed);
     TSC_HZ.store(calibration.tsc_hz, Ordering::Release);
 
@@ -82,6 +105,8 @@ pub fn init() -> Result<TimeInfo, ApicError> {
     Ok(TimeInfo {
         tsc_hz: calibration.tsc_hz,
         timer_hz: calibration.timer_hz,
+        reference,
+        cross_check_per_mille,
     })
 }
 

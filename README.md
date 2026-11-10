@@ -140,6 +140,7 @@ Stored in `\EFI\OMIT\CMDLINE` on the boot volume; set it with `--cmdline`.
 | --- | --- |
 | `noshell` | Do not start the interactive shell after initialisation. |
 | `nops2` | Do not use the PS/2 keyboard and mouse. For tests of USB input. |
+| `calibrate=pmtimer` | Measure the clocks against the ACPI power-management timer even if the PIT works. For tests. |
 | `qemu-exit` | Report final status through QEMU's `isa-debug-exit` device and terminate the VM. Only for use under QEMU. |
 | `fault=panic` \| `pagefault` \| `stackoverflow` | Deliberately crash after initialisation, to exercise the diagnostics. Test use only. |
 
@@ -202,7 +203,8 @@ The screen should work wherever the firmware provides a 32-bit framebuffer.
 Keyboard input needs a PS/2 keyboard, or a USB keyboard plugged directly
 into a port of an xHCI controller (not through a hub; the USB driver has
 only been tested in QEMU); otherwise the only way to type is a serial port
-(COM1, 115200 8N1).
+(COM1, 115200 8N1). A serial port is not needed: without one the system
+uses the screen and keyboard alone.
 
 ## Status
 
@@ -326,8 +328,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 
 - **Never run on real hardware** or with firmware other than OVMF. KVM has
   only been exercised in CI.
-- The kernel requires a working COM1 serial port even when a screen is
-  present, and stops silently without one.
+- Without a COM1 serial port the kernel uses the screen and keyboard
+  alone (tested in QEMU). A machine with neither a serial port nor a
+  firmware framebuffer shows nothing.
 - Graphics are limited to the firmware's framebuffer at its boot
   resolution. Other programs can open windows, but only fixed-size
   ones, one per connection, without resizing, menus or a clipboard; the
@@ -343,9 +346,11 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   be larger than 4 MiB.
 - The disk filesystem has no journal and no cache: it is slow, and a crash
   mid-operation can leave it needing `e2fsck`.
-- Clock calibration needs the legacy PIT. On hardware without one the kernel
-  reports a calibration timeout and stops; CPUID- or HPET-based calibration
-  is future work. The TSC is used as the clock even when the CPU does not
+- Clock calibration needs the legacy PIT or, where that does not count,
+  the ACPI power-management timer (when both work, each checks the
+  other). A machine with neither reports a calibration timeout and
+  stops; CPUID- or HPET-based calibration is future work. The TSC is
+  used as the clock even when the CPU does not
   advertise it as invariant (a warning-worthy condition on real hardware,
   normal under emulation).
 - The tick is periodic at 100 Hz even when idle; tickless idle is future
@@ -483,6 +488,8 @@ checks both QEMU's exit status and the serial log:
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`), and `echo`/`cat`/`tee` exercising arguments, relative paths, file reads and writes, error reporting and typed standard input |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
+| `no-serial-port` | A machine without a serial port: the console must appear on the screen, and `exit` typed on the keyboard must end the shell (the exit status is the only thing such a machine can report to the test) |
+| `calibrate-with-pm-timer` | The clocks are measured against the ACPI power-management timer instead of the PIT (as on a machine without a working PIT); the other clock serves as a check, and the date and a program run |
 | `usb-keyboard` | PS/2 devices switched off (`nops2`): the xHCI driver finds a USB keyboard and mouse, and a command typed on the USB keyboard runs |
 | `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |

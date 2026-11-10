@@ -73,6 +73,36 @@ unsafe fn table_at(phys: u64) -> Result<Table<'static>, AcpiLookupError> {
     Table::parse(bytes).map_err(AcpiLookupError::Invalid)
 }
 
+/// Finds the ACPI power-management timer, a reference clock, in the
+/// tables rooted at the RSDP at `rsdp_phys`. `None` if the machine has
+/// none (or no usable ACPI tables).
+///
+/// # Safety
+///
+/// As for [`interrupt_config`].
+pub unsafe fn pm_timer(rsdp_phys: u64) -> Option<omit_acpi::PmTimer> {
+    if rsdp_phys == 0 {
+        return None;
+    }
+    // SAFETY: as in `interrupt_config`, which this mirrors.
+    let revision = unsafe { firmware_bytes(rsdp_phys, RSDP_V1_SIZE).ok()? }[15];
+    let rsdp_len = if revision >= 2 {
+        RSDP_V2_SIZE
+    } else {
+        RSDP_V1_SIZE
+    };
+    // SAFETY: as above.
+    let rsdp = Rsdp::parse(unsafe { firmware_bytes(rsdp_phys, rsdp_len).ok()? }).ok()?;
+    let root_phys = rsdp.xsdt_address.unwrap_or(u64::from(rsdp.rsdt_address));
+    // SAFETY: the address comes from the validated RSDP.
+    let root = unsafe { table_at(root_phys).ok()? };
+    root.root_entries().ok()?.find_map(|phys| {
+        // SAFETY: the address comes from the validated root table.
+        let table = unsafe { table_at(phys) }.ok()?;
+        omit_acpi::PmTimer::parse(&table)
+    })
+}
+
 /// The interrupt-routing facts the kernel needs from the MADT.
 #[derive(Debug, Clone, Copy)]
 pub struct InterruptConfig {

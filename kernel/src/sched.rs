@@ -133,6 +133,18 @@ impl SharedSpace {
             .map(|&(_, pages, _)| pages)
     }
 
+    /// Gives up every shared segment mapped into the address space. For
+    /// the moment the last thread of the process ends: no code will run
+    /// in the address space again, so the stale page-table entries are
+    /// harmless, and whoever waits for the process finds its segments
+    /// released — not "soon", when the address space itself is freed.
+    pub fn release_shared(&self) {
+        // Taken out under the lock, dropped after it: dropping the last
+        // reference to a segment frees its frames.
+        let released = core::mem::take(&mut *self.shared.lock());
+        drop(released);
+    }
+
     /// Whether `[address, end)` touches a mapped segment.
     pub fn overlaps_shared(&self, address: u64, end: u64) -> bool {
         self.shared
@@ -466,6 +478,16 @@ pub fn sleep_ticks(ticks: u64) {
 /// Ends the calling thread. Its stack is released once another thread is
 /// running.
 pub fn exit() -> ! {
+    // The last thread of a process to end releases what the process
+    // shares with others (see `SharedSpace::release_shared`). No thread
+    // can join the process now: only its own threads could create one,
+    // and this is the last.
+    if let Some(pid) = current_pid()
+        && live_threads(pid) <= 1
+        && let Some(space) = current_space()
+    {
+        space.release_shared();
+    }
     interrupts::disable();
     if let Some(scheduler) = SCHEDULER.lock().as_mut() {
         let current = scheduler.current;

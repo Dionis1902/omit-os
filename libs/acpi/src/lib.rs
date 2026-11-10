@@ -13,6 +13,63 @@
 #![no_std]
 #![forbid(unsafe_code)]
 
+/// The ACPI power-management timer: a counter running at a fixed
+/// 3.579545 MHz, read from an I/O port. A reference clock that needs no
+/// calibration itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PmTimer {
+    /// The I/O port of the 32-bit counter register.
+    pub port: u16,
+    /// Whether the counter is 32 bits wide (otherwise the low 24 bits
+    /// count and the rest read as zero).
+    pub wide: bool,
+}
+
+/// Frequency of the power-management timer, in Hz.
+pub const PM_TIMER_HZ: u32 = 3_579_545;
+
+impl PmTimer {
+    /// Finds the power-management timer in the Fixed ACPI Description
+    /// Table (signature `FACP`). `None` if `table` is another table, or
+    /// the machine has no such timer, or it is not in I/O port space.
+    pub fn parse(table: &Table<'_>) -> Option<Self> {
+        // Offsets within the table body (the table minus its header).
+        const BLOCK: usize = 76 - SDT_HEADER_SIZE;
+        const LENGTH: usize = 91 - SDT_HEADER_SIZE;
+        const FLAGS: usize = 112 - SDT_HEADER_SIZE;
+        const EXTENDED_BLOCK: usize = 208 - SDT_HEADER_SIZE;
+        /// Flag: the timer counts 32 bits.
+        const TIMER_32_BIT: u32 = 1 << 8;
+        /// Address space of an extended address: system I/O.
+        const SPACE_IO: u8 = 1;
+        if &table.signature() != b"FACP" {
+            return None;
+        }
+        let body = table.body();
+        let dword = |at: usize| {
+            body.get(at..at + 4)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+        };
+        if *body.get(LENGTH)? != 4 {
+            return None;
+        }
+        let wide = dword(FLAGS)? & TIMER_32_BIT != 0;
+        // The extended address, where present and set, takes precedence.
+        if let Some(extended) = body.get(EXTENDED_BLOCK..EXTENDED_BLOCK + 12) {
+            let address = u64::from_le_bytes(extended[4..12].try_into().ok()?);
+            if address != 0 {
+                let port = u16::try_from(address).ok()?;
+                return (extended[0] == SPACE_IO).then_some(Self { port, wide });
+            }
+        }
+        let port = u16::try_from(dword(BLOCK)?)
+            .ok()
+            .filter(|&port| port != 0)?;
+        Some(Self { port, wide })
+    }
+}
+
 #[cfg(test)]
 extern crate std;
 
@@ -572,5 +629,66 @@ mod tests {
             Madt::parse(&Table::parse(&short).unwrap()),
             Err(AcpiError::Truncated)
         ));
+    }
+
+    #[test]
+    fn pm_timer_from_the_fadt() {
+        let fadt = |port: u32, length: u8, flags: u32, extended: Option<(u8, u64)>| {
+            let mut body = vec![0u8; 244 - SDT_HEADER_SIZE];
+            body[76 - SDT_HEADER_SIZE..80 - SDT_HEADER_SIZE].copy_from_slice(&port.to_le_bytes());
+            body[91 - SDT_HEADER_SIZE] = length;
+            body[112 - SDT_HEADER_SIZE..116 - SDT_HEADER_SIZE]
+                .copy_from_slice(&flags.to_le_bytes());
+            if let Some((space, address)) = extended {
+                body[208 - SDT_HEADER_SIZE] = space;
+                body[212 - SDT_HEADER_SIZE..220 - SDT_HEADER_SIZE]
+                    .copy_from_slice(&address.to_le_bytes());
+            }
+            table(b"FACP", &body)
+        };
+        let parse = |bytes: &[u8]| PmTimer::parse(&Table::parse(bytes).unwrap());
+        // What QEMU's q35 machine reports: port 0x608, 32 bits.
+        assert_eq!(
+            parse(&fadt(0x608, 4, 1 << 8, None)),
+            Some(PmTimer {
+                port: 0x608,
+                wide: true
+            })
+        );
+        assert_eq!(
+            parse(&fadt(0x408, 4, 0, None)),
+            Some(PmTimer {
+                port: 0x408,
+                wide: false
+            })
+        );
+        // The extended address wins when set and must be an I/O port.
+        assert_eq!(
+            parse(&fadt(0x408, 4, 0, Some((1, 0x1808)))),
+            Some(PmTimer {
+                port: 0x1808,
+                wide: false
+            })
+        );
+        assert_eq!(parse(&fadt(0x408, 4, 0, Some((0, 0xFED0_0000)))), None);
+        assert_eq!(parse(&fadt(0x408, 4, 0, Some((1, 0x1_0000)))), None);
+        // No timer: no port, or no register length.
+        assert_eq!(parse(&fadt(0, 4, 0, None)), None);
+        assert_eq!(parse(&fadt(0x608, 0, 0, None)), None);
+        assert_eq!(parse(&fadt(0x1_0000, 4, 0, None)), None);
+        // An ACPI 1.0 table, too short for the extended fields.
+        let mut short = vec![0u8; 116 - SDT_HEADER_SIZE];
+        short[76 - SDT_HEADER_SIZE..80 - SDT_HEADER_SIZE].copy_from_slice(&0x608u32.to_le_bytes());
+        short[91 - SDT_HEADER_SIZE] = 4;
+        assert_eq!(
+            parse(&table(b"FACP", &short)),
+            Some(PmTimer {
+                port: 0x608,
+                wide: false
+            })
+        );
+        // Truncated before the flags, and another table altogether.
+        assert_eq!(parse(&table(b"FACP", &short[..60])), None);
+        assert_eq!(parse(&table(b"APIC", &short)), None);
     }
 }

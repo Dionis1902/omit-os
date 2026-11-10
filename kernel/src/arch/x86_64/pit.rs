@@ -19,10 +19,12 @@ const GATE_2: u8 = 1 << 0;
 const SPEAKER_ENABLE: u8 = 1 << 1;
 const OUT_2: u8 = 1 << 5;
 
-/// Bound on polls in [`wait_for_one_shot`], so that a machine without a PIT
-/// produces an error instead of a hang. Each poll is a port read (roughly a
-/// microsecond on hardware), so this is far beyond the 55 ms maximum period.
-const POLL_LIMIT: u32 = 50_000_000;
+/// Bound on polls in [`wait_for_one_shot`], so that a machine without a
+/// working PIT produces an error instead of a hang. Each poll is a port
+/// read — roughly a microsecond on hardware, never much less — so this
+/// is far beyond the 55 ms maximum period, yet costs such a machine only
+/// seconds before another reference clock is tried.
+const POLL_LIMIT: u32 = 5_000_000;
 
 /// Starts channel 2 counting down from `ticks` at [`FREQUENCY_HZ`].
 pub fn start_one_shot(ticks: u16) {

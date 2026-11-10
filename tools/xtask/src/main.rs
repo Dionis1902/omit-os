@@ -519,11 +519,15 @@ fn qemu_command(
         // A fixed date and time, advancing with the guest's own clock,
         // so that what the tests see does not depend on when they run.
         .args(["-rtc", "base=2026-11-10T12:00:00,clock=vm"])
-        .args(["-serial", "stdio"])
         .args(["-display", "none"])
         .args(["-nic", "none"])
         .arg("-no-reboot")
         .args(extra);
+    // The serial console on standard input and output — unless the test
+    // says what the machine's serial port is (or that it has none).
+    if !extra.contains(&"-serial") {
+        command.args(["-serial", "stdio"]);
+    }
     if let Some(media) = media {
         command.arg("-drive").arg(media);
     }
@@ -655,6 +659,11 @@ struct BootTest {
     /// Like `nvme`, with a SATA disk on port 2 of the machine's AHCI
     /// controller (`sdc`).
     sata: bool,
+    /// The machine has no serial port (`-serial none` in `qemu_args`), so
+    /// there is no log and no way to type a script: the test waits for
+    /// the console to appear on the screen, types `exit` on the keyboard
+    /// and expects the kernel to report success. Requires `display`.
+    no_serial: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -664,6 +673,8 @@ const BOOT_TESTS: &[BootTest] = &[
         expected_exit: QEMU_EXIT_SUCCESS,
         must_contain: &[
             "[INFO ] time: real-time clock reads 2026-11-10 12:00:",
+            "tick 100 Hz; measured against the PIT",
+            "[INFO ] time: a second reference clock differs by ",
             SUCCESS_MESSAGE,
             "[INFO ] serial: COM1 16550 UART ready",
             "[INFO ] cpu: IDT loaded, 256 vectors installed, #BP self-test passed",
@@ -689,6 +700,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "shell-session",
@@ -869,6 +881,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -889,6 +902,58 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
+    },
+    // The clocks measured against the ACPI power-management timer, as on
+    // a machine whose legacy timer is switched off; here that timer
+    // exists, so it serves as the check instead. The date then has to
+    // advance at the right rate: `sleeper` sleeps and the uptime and
+    // the clock must agree.
+    BootTest {
+        name: "calibrate-with-pm-timer",
+        cmdline: "calibrate=pmtimer",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "tick 100 Hz; measured against the ACPI PM timer",
+            "[INFO ] time: a second reference clock differs by ",
+            "[INFO ] time: timer interrupt self-test passed",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("date", "\nTue 2026-11-10 12:0"),
+            ("hello", "\nHello from user mode! I am process 1 "),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: false,
+    },
+    // A machine without a serial port, like most current ones: the
+    // kernel must come up on screen and keyboard alone. With no serial
+    // log, the test can only see the screen and the exit status, which
+    // is "success" only if the shell ran and `exit` was typed into it.
+    BootTest {
+        name: "no-serial-port",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[],
+        must_not_contain: &[],
+        script: &[],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: true,
+        desktop: false,
+        qemu_args: &["-serial", "none"],
+        boot_installed: false,
+        nvme: false,
+        sata: false,
+        no_serial: true,
     },
     // The same with a USB keyboard on an xHCI controller, and the PS/2
     // devices switched off, so the typed line can only have come by USB.
@@ -916,6 +981,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     // And the whole desktop scenario — pointer movement, clicks, drags,
     // typing — with USB mouse and keyboard only.
@@ -938,6 +1004,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "desktop",
@@ -958,6 +1025,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "disk-persistence",
@@ -1018,6 +1086,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     // The installer: the system writes itself to the VirtIO disk, the
     // machine is restarted without the boot medium, and must come up from
@@ -1081,6 +1150,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: true,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     // The same on an NVMe disk, the kind most current machines have: the
     // native NVMe driver, installation, and booting from the result with
@@ -1131,6 +1201,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: true,
         nvme: true,
         sata: false,
+        no_serial: false,
     },
     // And on a SATA disk, the kind virtual machines offer by default.
     // (When the test boots from a disk image, that image is a SATA disk
@@ -1182,6 +1253,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: true,
         nvme: false,
         sata: true,
+        no_serial: false,
     },
     BootTest {
         name: "windows-programs",
@@ -1291,6 +1363,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1375,6 +1448,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1402,6 +1476,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1464,6 +1539,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1489,6 +1565,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1511,6 +1588,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1531,6 +1609,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1551,6 +1630,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1570,6 +1650,7 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
         sata: false,
+        no_serial: false,
     },
 ];
 
@@ -2309,6 +2390,59 @@ fn find_prompt(output: &[u8], from: usize) -> Option<usize> {
 /// line only after the previous one's prompt has appeared, followed by
 /// `exit`. Nothing is sent before the first prompt: earlier input would be
 /// consumed by the firmware. Script failures are appended to `failures`.
+/// Runs a machine that has no serial port: waits until the screen shows
+/// the console, then types `exit` on the keyboard — again every few
+/// seconds, since nothing says when the shell is ready to read — until
+/// QEMU ends. The exit status is the only thing the kernel can report.
+fn run_without_serial(
+    mut command: Command,
+    display: &DisplayCheck,
+    timeout: Duration,
+    failures: &mut Vec<String>,
+) -> Result<QemuRun> {
+    let start = Instant::now();
+    let deadline = start + timeout;
+    let mut child = command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot start QEMU: {e}"))?;
+    let mut console_seen = false;
+    let mut last_typed = Instant::now();
+    let exit = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        if !console_seen {
+            // (The monitor socket appears a moment after QEMU starts.)
+            if let Ok(image) = take_screenshot(&display.monitor, &display.screenshot)
+                && check_screenshot(&image).is_empty()
+            {
+                console_seen = true;
+                last_typed = Instant::now() - Duration::from_secs(10);
+            }
+        } else if last_typed.elapsed() >= Duration::from_secs(3) {
+            let _ = type_on_keyboard(&display.monitor, &["e", "x", "i", "t", "ret"]);
+            last_typed = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(100));
+    };
+    if !console_seen {
+        failures.push("the console never appeared on the screen".into());
+    }
+    Ok(QemuRun {
+        exit,
+        serial: String::new(),
+        elapsed: start.elapsed(),
+    })
+}
+
 fn run_qemu_captured(
     mut command: Command,
     script: &[(&str, &str)],
@@ -2530,7 +2664,7 @@ fn run_boot_test(
     };
 
     // Tests without a script must not sit at the shell prompt forever.
-    let shell = if test.script.is_empty() {
+    let shell = if test.script.is_empty() && !test.no_serial {
         "noshell "
     } else {
         ""
@@ -2543,21 +2677,27 @@ fn run_boot_test(
         screenshot: dir.join(format!("test-{}.screen.ppm", test.name)),
         desktop: test.desktop,
     });
-    let run = run_qemu_captured(
-        qemu_command(
-            Some(&image),
-            &vars,
-            &data_disk,
-            display.as_ref().map(|d| d.monitor.as_path()),
-            &qemu_args,
-            options,
-        )?,
-        test.script,
-        test.ends_with_reset,
-        display.as_ref(),
-        timeout,
-        &mut failures,
+    let command = qemu_command(
+        Some(&image),
+        &vars,
+        &data_disk,
+        display.as_ref().map(|d| d.monitor.as_path()),
+        &qemu_args,
+        options,
     )?;
+    let run = match &display {
+        Some(display) if test.no_serial => {
+            run_without_serial(command, display, timeout, &mut failures)?
+        }
+        _ => run_qemu_captured(
+            command,
+            test.script,
+            test.ends_with_reset,
+            display.as_ref(),
+            timeout,
+            &mut failures,
+        )?,
+    };
     if let Some(display) = &display {
         let _ = fs::remove_file(&display.monitor);
     }
