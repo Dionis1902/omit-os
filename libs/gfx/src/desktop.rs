@@ -221,6 +221,15 @@ pub trait App {
     /// Called before each `draw` with where the task bar's icons sit,
     /// for windows that show it.
     fn alignment(&mut self, _alignment: Alignment) {}
+
+    /// The person asked for the window to be closed (its close button,
+    /// or Alt+F4). Returning `false` keeps it open — for a window with
+    /// something unsaved to say so first; it is then drawn again. It is
+    /// not asked when the program itself closes the window or the
+    /// desktop ends.
+    fn closing(&mut self) -> bool {
+        true
+    }
 }
 
 /// Identifies a window for as long as it is open.
@@ -775,6 +784,18 @@ impl Desktop {
         }
     }
 
+    /// Closes the window at the person's request, unless it objects.
+    fn close_if_agreed(&mut self, id: WindowId) {
+        let Some(index) = self.index_of(id) else {
+            return;
+        };
+        if self.windows[index].app.closing() {
+            self.close(id);
+        } else {
+            self.damage_window(index);
+        }
+    }
+
     /// The windows that belong to the `index`-th program: those whose
     /// title begins with its label.
     fn windows_of(&self, index: usize) -> impl Iterator<Item = usize> + '_ {
@@ -1089,7 +1110,7 @@ impl Desktop {
         self.damage_window(top);
 
         match self.windows[top].control_at(at) {
-            Some(Control::Close) => return self.close(id),
+            Some(Control::Close) => return self.close_if_agreed(id),
             Some(Control::Maximise) => return self.toggle_maximised(top),
             Some(Control::Minimise) => return self.minimise(top),
             None => {}
@@ -1218,7 +1239,7 @@ impl Desktop {
         }
         if alt && code == F4 {
             if let Some(id) = self.front() {
-                self.close(id);
+                self.close_if_agreed(id);
             }
             return;
         }
@@ -3086,6 +3107,70 @@ mod tests {
         let fresh = f.repainted();
         assert!(fresh == f.surface);
         f.desktop.set_modifiers(0);
+    }
+
+    #[test]
+    fn a_window_can_decline_to_be_closed_by_its_button_or_alt_f4() {
+        /// Says no the first `refusals` times it is asked.
+        struct Reluctant {
+            refusals: Rc<RefCell<u32>>,
+        }
+        impl App for Reluctant {
+            fn title(&self) -> &str {
+                "reluctant"
+            }
+            fn draw(&mut self, _: &mut Canvas<'_>, _: i32, _: i32, _: &Theme) {}
+            fn closing(&mut self) -> bool {
+                let mut left = self.refusals.borrow_mut();
+                if *left == 0 {
+                    true
+                } else {
+                    *left -= 1;
+                    false
+                }
+            }
+            fn key(&mut self, code: i32, context: &mut Context) {
+                // `q` is the program closing its own window: not asked.
+                if code == 0x71 {
+                    context.close();
+                }
+            }
+        }
+        let mut f = Fixture::new();
+        let refusals = Rc::new(RefCell::new(2));
+        let id = f.desktop.open(
+            Box::new(Reluctant {
+                refusals: refusals.clone(),
+            }),
+            240,
+            120,
+        );
+        f.render();
+        let close = f.desktop.control_frame(id, Control::Close).unwrap();
+        f.click_in(close);
+        assert_eq!(f.desktop.window_count(), 1);
+        // It is drawn again, to say why.
+        assert!(!f.render().is_empty());
+        f.desktop.set_modifiers(modifier::ALT);
+        f.desktop.key(0x114);
+        f.desktop.set_modifiers(0);
+        assert_eq!(f.desktop.window_count(), 1);
+        assert_eq!(*refusals.borrow(), 0);
+        // The third time it agrees.
+        f.click_in(close);
+        assert_eq!(f.desktop.window_count(), 0);
+        // A window that closes itself is not asked.
+        *refusals.borrow_mut() = 5;
+        f.desktop.open(
+            Box::new(Reluctant {
+                refusals: refusals.clone(),
+            }),
+            240,
+            120,
+        );
+        f.desktop.key(0x71);
+        assert_eq!(f.desktop.window_count(), 0);
+        assert_eq!(*refusals.borrow(), 5);
     }
 
     #[test]

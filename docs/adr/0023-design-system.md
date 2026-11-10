@@ -104,7 +104,7 @@ this ADR records how the system implements it and how far it has got.
 
 ## What works
 
-- 126 host tests in `libs/gfx`: the font and icon files (every
+- 128 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -159,9 +159,11 @@ halved that.) Debug builds are slower by the same factor as before.
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
-- Notes has no selection, clipboard, undo or search, wraps no lines,
-  and **closing its window discards unsaved changes without asking**
-  (the title shows a dot while there are any). A new note is named by
+- Notes has no selection, clipboard, undo or search, and wraps no
+  lines. Closing its window with unsaved changes is refused once, with
+  a line saying so; the second time it closes and they are lost (a
+  window may now decline its close button and Alt+F4). **Ending the
+  desktop asks nothing**: unsaved notes are lost. A new note is named by
   the system (`note-1.txt`, ...): there is no dialog to choose a name
   or folder.
 - The window switcher shows icons and titles, not pictures of the

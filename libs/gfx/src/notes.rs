@@ -52,6 +52,9 @@ enum Notice {
     Nothing,
     Saved,
     Failed(String),
+    /// The window was asked to close with changes not saved; asked
+    /// again, it closes.
+    Unsaved,
 }
 
 /// A Notes window.
@@ -377,6 +380,10 @@ impl<D: Documents> App for Notes<D> {
             (Some(reason), _) => (reason.clone(), theme.text_3),
             (None, Notice::Failed(reason)) => (format!("Not saved: {reason}"), theme.danger),
             (None, Notice::Saved) => ("Saved".into(), theme.success),
+            (None, Notice::Unsaved) => (
+                "Not saved: close again to lose the changes".into(),
+                theme.danger,
+            ),
             (None, Notice::Nothing) if self.modified => ("Changed".into(), theme.text_3),
             (None, Notice::Nothing) => (String::new(), theme.text_3),
         };
@@ -479,6 +486,9 @@ impl<D: Documents> App for Notes<D> {
 
     fn click(&mut self, x: i32, y: i32, _: &mut Context) {
         let at = Point::new(x, y);
+        if self.notice == Notice::Unsaved {
+            self.notice = Notice::Nothing;
+        }
         if y < TOOLBAR {
             if Self::save_button(self.size.0).contains(at) {
                 self.save();
@@ -497,6 +507,17 @@ impl<D: Documents> App for Notes<D> {
         self.wanted = column;
     }
 
+    /// Closing with changes not saved is refused once, and says why.
+    /// Anything done in between (typing, moving, a failed save) and it
+    /// asks again the next time.
+    fn closing(&mut self) -> bool {
+        if !self.modified || self.notice == Notice::Unsaved {
+            return true;
+        }
+        self.notice = Notice::Unsaved;
+        false
+    }
+
     fn key(&mut self, code: i32, _: &mut Context) {
         const TAB_KEY: i32 = 9;
         const ENTER: i32 = 13;
@@ -513,6 +534,9 @@ impl<D: Documents> App for Notes<D> {
         const DELETE: i32 = 0x10A;
         let (line, column) = self.cursor;
         let page = self.visible_rows().saturating_sub(1).max(1);
+        if self.notice == Notice::Unsaved {
+            self.notice = Notice::Nothing;
+        }
         match code {
             UP => self.go_to_line(line.saturating_sub(1)),
             DOWN => self.go_to_line(line + 1),
@@ -847,6 +871,38 @@ mod tests {
         assert!(notes.lines.len() > 1000);
         keys(&mut notes, &[DOWN, END]);
         assert_eq!(notes.cursor(), (1, 6));
+    }
+
+    #[test]
+    fn closing_with_unsaved_changes_is_refused_once() {
+        let shelf = Shelf::with(&[("/a", b"old\n")]);
+        // Nothing changed: it closes.
+        let mut notes = Notes::open(shelf.clone(), "/a");
+        assert!(notes.closing());
+        // Changed: refused, and said; asked again straight away, it
+        // closes (and nothing was written).
+        typed(&mut notes, "x");
+        assert!(!notes.closing());
+        assert_eq!(notes.notice, Notice::Unsaved);
+        assert!(notes.closing());
+        assert_eq!(shelf.get("/a").unwrap(), b"old\n");
+        // Anything done in between, and it asks again.
+        let mut notes = Notes::open(shelf.clone(), "/a");
+        typed(&mut notes, "x");
+        assert!(!notes.closing());
+        keys(&mut notes, &[LEFT]);
+        assert_eq!(notes.notice, Notice::Nothing);
+        assert!(!notes.closing());
+        typed(&mut notes, "y");
+        assert!(!notes.closing());
+        // Saved: it closes.
+        keys(&mut notes, &[19]);
+        assert!(notes.closing());
+        assert_eq!(shelf.get("/a").unwrap(), b"yxold\n");
+        // What cannot be changed has nothing to lose.
+        let mut notes = Notes::open(shelf, "/missing");
+        typed(&mut notes, "x");
+        assert!(notes.closing());
     }
 
     #[test]
