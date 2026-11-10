@@ -66,6 +66,11 @@ pub struct Window {
     closed: bool,
 }
 
+// SAFETY: a `Window` owns its mapping and its connection; the pointer is
+// only that mapping's address, and nothing about either is tied to the
+// thread that opened the window.
+unsafe impl Send for Window {}
+
 impl Window {
     /// Opens a window with a content area of `width` x `height` pixels,
     /// initially black.
@@ -112,6 +117,13 @@ impl Window {
             return Err(OpenError::Refused);
         }
         Ok(window)
+    }
+
+    /// The descriptor of the connection to the desktop, for waiting on
+    /// several windows (or a window and something else) with
+    /// [`crate::poll`]: it is readable when an event may have arrived.
+    pub fn descriptor(&self) -> u64 {
+        self.connection
     }
 
     /// Width of the content area in pixels.

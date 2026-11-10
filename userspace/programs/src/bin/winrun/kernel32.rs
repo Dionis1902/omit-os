@@ -289,7 +289,7 @@ fn last_error_slot() -> *mut u32 {
     (teb() + TEB_LAST_ERROR) as *mut u32
 }
 
-fn set_last_error(code: u32) {
+pub(crate) fn set_last_error(code: u32) {
     // SAFETY: the TEB stays mapped for the life of the process; the field
     // is 4-byte aligned. Windows keeps the last error in the same place,
     // per thread.

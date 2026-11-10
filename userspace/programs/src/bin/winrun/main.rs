@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-//! `winrun` — runs a 64-bit Windows console program.
+//! `winrun` — runs a 64-bit Windows program.
 //!
 //! ```text
 //! winrun PROGRAM.EXE [ARGUMENT...]
@@ -10,7 +10,8 @@
 //! libraries (DLL files) it uses, lays them out in its own address space
 //! the way the PE format prescribes ([`loader`]), points the imported
 //! functions at their implementations — functions of `KERNEL32.dll` at
-//! the ones in [`kernel32`], functions of other libraries at the code of
+//! the ones in [`kernel32`], functions of `USER32.dll` and `GDI32.dll`
+//! at the ones in [`gui`], functions of other libraries at the code of
 //! those libraries — and jumps to the entry point. The Windows program
 //! then runs directly on the CPU — nothing is emulated or translated —
 //! and every Windows API call it makes is an ordinary function call into
@@ -20,19 +21,20 @@
 //!
 //! * programs that need a function or library that does not exist here
 //!   (every missing item is listed);
-//! * graphical programs, .NET programs, 32-bit programs;
+//! * .NET programs, 32-bit programs, drivers;
 //! * images using thread-local storage or delay-loaded imports;
 //! * images without relocation information, since an image cannot be
 //!   placed at an address of its choosing;
 //! * sections that are both writable and executable.
 //!
-//! `--list` prints the implemented `KERNEL32.dll` functions.
+//! `--list` prints the implemented functions of the system libraries.
 
 #![no_std]
 #![no_main]
 
 extern crate alloc;
 
+mod gui;
 mod kernel32;
 mod loader;
 
@@ -70,8 +72,14 @@ fn main() -> i32 {
             2
         }
         Some(&"--list") => {
-            for name in kernel32::NAMES {
-                println!("KERNEL32.dll!{name}");
+            for (library, names) in [
+                ("GDI32.dll", gui::GDI32_NAMES),
+                ("KERNEL32.dll", kernel32::NAMES),
+                ("USER32.dll", gui::USER32_NAMES),
+            ] {
+                for name in names {
+                    println!("{library}!{name}");
+                }
             }
             0
         }

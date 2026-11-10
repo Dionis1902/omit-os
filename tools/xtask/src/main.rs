@@ -195,6 +195,7 @@ const USER_PROGRAMS: &[&str] = &[
 const WINDOWS_PROGRAMS: &[&str] = &[
     "windll.exe",
     "winfloat.exe",
+    "wingui.exe",
     "winhello.exe",
     "winmissing.exe",
     "winplugin.dll",
@@ -728,7 +729,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+                "\ncat\nclock\ncrash\ndesktop\necho\nfileops\nhello\nipctest\nls\nmemtest\npipetest\nrun\nscribble\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwingui.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -1124,7 +1125,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: 2 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs advapi32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll!KillTimer, which is not available\nwinrun: /bin/winmissing.exe: 3 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),
@@ -1133,7 +1134,16 @@ const BOOT_TESTS: &[BootTest] = &[
                 "winrun: /fake.exe: not a Windows executable (no PE signature)\nfake.exe: exited with status 126\n",
             ),
             ("winrun", "usage: winrun PROGRAM.EXE [ARGUMENT...]\n"),
-            ("winrun --list", "\nKERNEL32.dll!WriteFile\n"),
+            (
+                "winrun --list",
+                "\nKERNEL32.dll!WriteFile\nUSER32.dll!BeginPaint\n",
+            ),
+            // A graphical program without a desktop to show its window
+            // on: creating the window fails, and the program says so.
+            (
+                "wingui.exe",
+                "\nwingui: cannot create a window (error 50)\r\n",
+            ),
             (
                 "winrun /bin/hello",
                 "winrun: /bin/hello: not an executable (no MZ signature)\n",
@@ -1848,6 +1858,74 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
             screen_shows(image, "> _") && at(image, 10, 100) != paper && at(image, 10, 3) != red
         },
     )?;
+
+    // A graphical Windows program: its window is the fourth one opened.
+    let wingui = layout.open(Box::new(Blank), 340, 150);
+    let frame = layout
+        .window_frame(wingui)
+        .ok_or("no frame for the fourth window")?;
+    let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+    // Text as the Windows program draws it: black on white.
+    let win_text = |image: &Screenshot, text: &str| screen_shows_in(image, text, 0, 0xFF_FF_FF);
+    type_on_keyboard(
+        &check.monitor,
+        &["w", "i", "n", "g", "u", "i", "dot", "e", "x", "e", "ret"],
+    )?;
+    wait_for_screen(check, "the window of wingui.exe", patience, |image| {
+        title(image, "Windows GUI test")
+            && win_text(image, "Hello from a Windows GUI program")
+            && win_text(image, "clicks: 0")
+            // Drawn through GetDC, outside WM_PAINT: a green square
+            // with a yellow pixel in the middle.
+            && image.pixel((left + 305) as usize, (top + 15) as usize) == rgb(0x14_A0_3C)
+            && image.pixel((left + 310) as usize, (top + 20) as usize) == rgb(0xFF_FF_00)
+    })?;
+    // A click: WM_LBUTTONDOWN with the position, then a repaint with a
+    // red square there.
+    mouse.click(left + 200, top + 100)?;
+    mouse.move_to(left + 300, top + 130)?;
+    wait_for_screen(check, "the click shown by wingui.exe", patience, |image| {
+        win_text(image, "clicks: 1")
+            // (The repaint erased what was drawn outside WM_PAINT.)
+            && image.pixel((left + 305) as usize, (top + 15) as usize) == rgb(0xFF_FF_FF)
+            && image.pixel((left + 200) as usize, (top + 100) as usize) == rgb(0xC8_1E_1E)
+            && image.pixel((left + 200) as usize, (top + 80) as usize) == rgb(0xFF_FF_FF)
+    })?;
+    // Keys arrive as WM_CHAR; `t` makes the program set its title.
+    type_on_keyboard(&check.monitor, &["a", "b", "t"])?;
+    wait_for_screen(check, "typed text and a new title", patience, |image| {
+        win_text(image, "typed: ab") && title(image, "1 click(s)")
+    })?;
+    // Kept next to the serial log: a picture of a Windows program's
+    // window on the desktop.
+    let _ = fs::copy(
+        &check.screenshot,
+        check.screenshot.with_extension("windows-gui.ppm"),
+    );
+    // `m`: a message box, a window of its own, closed with Enter.
+    type_on_keyboard(&check.monitor, &["m"])?;
+    let box_text =
+        |image: &Screenshot| screen_shows_in(image, "This is a message box.", 0, 0xF0_F0_F0);
+    wait_for_screen(check, "the message box", patience, |image| {
+        box_text(image) && title(image, "wingui")
+    })?;
+    type_on_keyboard(&check.monitor, &["ret"])?;
+    wait_for_screen(
+        check,
+        "the window without the message box",
+        patience,
+        |image| !box_text(image) && title(image, "1 click(s)") && win_text(image, "typed: ab"),
+    )?;
+    // `q`: the program destroys its window, leaves its message loop and
+    // reports what it saw.
+    type_on_keyboard(&check.monitor, &["q"])?;
+    wait_for_screen(check, "the report of wingui.exe", patience, |image| {
+        screen_shows(
+            image,
+            "wingui: quit code 7, 1 click(s), typed \"ab\", checks 0xf, paints ok",
+        ) && screen_shows(image, "wingui: 32 startup checks passed")
+            && screen_shows(image, "> _")
+    })?;
 
     // The Run window is the second one opened; drag it by its title bar
     // (the About window does not reach this far right).

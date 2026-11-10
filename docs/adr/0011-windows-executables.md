@@ -118,6 +118,19 @@ Verified in QEMU by the `windows-programs` test:
   nested call, per-thread storage and error codes, auto- and manual-reset
   events with waiters, timeouts, and a thread still running when the
   program returns (44 self-checked operations);
+- a graphical program (`wingui.exe`, `desktop` test): it registers a
+  window class, creates a window, paints text, a filled rectangle and a
+  line in `WM_PAINT`, and runs a message loop. Driven through the
+  emulated mouse and keyboard, the test checks on screenshots that a
+  click arrives as `WM_LBUTTONDOWN` with the right position, typed keys
+  arrive as `WM_CHAR`, `SetWindowTextA` changes the title bar, a
+  `MessageBoxA` appears and is dismissed with Enter, and that after
+  `DestroyWindow` → `WM_DESTROY` → `PostQuitMessage(7)` the loop ends
+  with that code; the program also confirms `WM_CREATE`'s parameters,
+  `WM_SIZE`, a posted message and `WM_KEYUP`, and checks 32 results of
+  the remaining functions itself (sizes, error codes, device context
+  state, text extents, object lifetime). Started without a desktop, it
+  reports that its window cannot be created;
 - a program needing unimplemented functions or a missing library, a file
   that is not a PE image, a DLL started as a program, and a native
   program given to `winrun` are each refused with a specific message.
@@ -126,15 +139,23 @@ Verified in QEMU by the `windows-programs` test:
 
 This is a proof that the approach works, not Windows compatibility.
 
-- **Only programs whose imports are all satisfied by the 66 implemented
-  `KERNEL32.dll` functions, or by DLL files that are present and
-  themselves loadable, run.** That excludes practically all existing
-  software: anything linked against the C runtime, the Rust standard
-  library, or a Windows system DLL other than `KERNEL32.dll`.
-  `winrun --list` prints the functions.
-- Console programs only. No graphics, windows, messages, registry,
-  networking, processes started by Windows programs, structured
-  exception handling, or environment.
+- **Only programs whose imports are all satisfied by the implemented
+  functions — 66 of `KERNEL32.dll`, 26 of `USER32.dll`, 14 of
+  `GDI32.dll` — or by DLL files that are present and themselves
+  loadable, run.** That excludes practically all existing software:
+  anything linked against the C runtime or the Rust standard library, or
+  using any other Windows system DLL. `winrun --list` prints the
+  functions.
+- Graphical programs get a first slice only (see the module comment of
+  `winrun/gui.rs` for the full list of differences): one kind of
+  top-level window of fixed size, visible from creation; no child
+  windows and therefore no controls, menus or dialogs other than a
+  one-button `MessageBoxA`; one fixed-width font; a dozen message
+  types; solid brushes and one-pixel pens; no bitmaps, regions,
+  clipping, timers, clipboard, or `...W` functions. Windows need the
+  desktop to be running.
+- No registry, networking, processes started by Windows programs,
+  structured exception handling, or environment.
 - Threads: libraries are not notified of them (`DLL_THREAD_ATTACH`),
   static thread-local storage (`__declspec(thread)`, the PE TLS
   directory) is not supported — only the `Tls*` functions — and there are

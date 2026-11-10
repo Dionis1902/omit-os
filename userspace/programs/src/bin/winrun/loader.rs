@@ -247,18 +247,14 @@ fn load_image(
     }
     if !as_library {
         match pe.subsystem() {
-            SUBSYSTEM_CONSOLE => {}
-            SUBSYSTEM_GUI => {
-                return Err(unusable(
-                    path,
-                    "graphical Windows programs are not supported (there is no window system \
-                     for them)",
-                ));
-            }
+            // Graphical programs differ from console programs only in
+            // what they import; whether that is available is checked
+            // function by function below.
+            SUBSYSTEM_CONSOLE | SUBSYSTEM_GUI => {}
             other => {
                 return Err(unusable(
                     path,
-                    format!("not a console program (subsystem {other})"),
+                    format!("not a console or graphical program (subsystem {other})"),
                 ));
             }
         }
@@ -330,6 +326,8 @@ fn load_image(
     for import in imports {
         let address = if import.library.eq_ignore_ascii_case("kernel32.dll") {
             kernel32::resolve(import.symbol)
+        } else if let Some(address) = crate::gui::resolve(import.library, import.symbol) {
+            address
         } else {
             let library = match find(import.library) {
                 Some(library) => Some(library),

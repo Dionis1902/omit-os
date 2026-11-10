@@ -151,6 +151,246 @@ unsafe extern "system" {
     pub safe fn GetTickCount64() -> u64;
 }
 
+pub type WindowProcedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
+
+pub const WM_CREATE: u32 = 0x0001;
+pub const WM_DESTROY: u32 = 0x0002;
+pub const WM_SIZE: u32 = 0x0005;
+pub const WM_PAINT: u32 = 0x000F;
+pub const WM_CLOSE: u32 = 0x0010;
+pub const WM_KEYDOWN: u32 = 0x0100;
+pub const WM_KEYUP: u32 = 0x0101;
+pub const WM_CHAR: u32 = 0x0102;
+pub const WM_MOUSEMOVE: u32 = 0x0200;
+pub const WM_LBUTTONDOWN: u32 = 0x0201;
+pub const WM_LBUTTONUP: u32 = 0x0202;
+pub const WM_USER: u32 = 0x0400;
+pub const WS_OVERLAPPEDWINDOW: u32 = 0x00CF_0000;
+pub const CW_USEDEFAULT: i32 = i32::MIN;
+pub const SW_SHOW: i32 = 5;
+pub const COLOR_WINDOW: usize = 5;
+pub const TRANSPARENT: i32 = 1;
+pub const BLACK_PEN: i32 = 7;
+pub const IDOK: i32 = 1;
+pub const OPAQUE: i32 = 2;
+pub const PM_NOREMOVE: u32 = 0;
+pub const ERROR_CANNOT_FIND_WND_CLASS: u32 = 1407;
+pub const ERROR_CLASS_ALREADY_EXISTS: u32 = 1410;
+
+/// `RGB(r, g, b)`: a `COLORREF`.
+pub const fn rgb(red: u8, green: u8, blue: u8) -> u32 {
+    red as u32 | (green as u32) << 8 | (blue as u32) << 16
+}
+
+#[repr(C)]
+pub struct WndClassA {
+    pub style: u32,
+    pub window_procedure: Option<WindowProcedure>,
+    pub class_extra: i32,
+    pub window_extra: i32,
+    pub instance: *mut c_void,
+    pub icon: Handle,
+    pub cursor: Handle,
+    pub background: usize,
+    pub menu_name: *const c_char,
+    pub class_name: *const c_char,
+}
+
+#[repr(C)]
+pub struct WndClassExA {
+    pub size: u32,
+    pub style: u32,
+    pub window_procedure: Option<WindowProcedure>,
+    pub class_extra: i32,
+    pub window_extra: i32,
+    pub instance: *mut c_void,
+    pub icon: Handle,
+    pub cursor: Handle,
+    pub background: usize,
+    pub menu_name: *const c_char,
+    pub class_name: *const c_char,
+    pub small_icon: Handle,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Size {
+    pub cx: i32,
+    pub cy: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+pub struct Point {
+    pub x: i32,
+    pub y: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct Rect {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+#[repr(C)]
+pub struct Msg {
+    pub window: Handle,
+    pub message: u32,
+    pub wparam: usize,
+    pub lparam: isize,
+    pub time: u32,
+    pub point: Point,
+    pub private: u32,
+}
+
+#[repr(C)]
+pub struct CreateStructA {
+    pub create_params: *mut c_void,
+    pub instance: *mut c_void,
+    pub menu: Handle,
+    pub parent: Handle,
+    pub cy: i32,
+    pub cx: i32,
+    pub y: i32,
+    pub x: i32,
+    pub style: i32,
+    pub name: *const c_char,
+    pub class: *const c_char,
+    pub ex_style: u32,
+}
+
+#[repr(C)]
+pub struct PaintStruct {
+    pub context: Handle,
+    pub erase: Bool,
+    pub paint: Rect,
+    pub restore: Bool,
+    pub inc_update: Bool,
+    pub reserved: [u8; 32],
+}
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    pub fn RegisterClassA(class: *const WndClassA) -> u16;
+    pub fn RegisterClassExA(class: *const WndClassExA) -> u16;
+    pub safe fn GetSystemMetrics(index: i32) -> i32;
+    pub fn CreateWindowExA(
+        ex_style: u32,
+        class_name: *const c_char,
+        window_name: *const c_char,
+        style: u32,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        parent: Handle,
+        menu: Handle,
+        instance: *mut c_void,
+        param: *mut c_void,
+    ) -> Handle;
+    pub safe fn ShowWindow(window: Handle, command: i32) -> Bool;
+    pub safe fn UpdateWindow(window: Handle) -> Bool;
+    pub fn GetMessageA(message: *mut Msg, window: Handle, min: u32, max: u32) -> Bool;
+    pub fn PeekMessageA(message: *mut Msg, window: Handle, min: u32, max: u32, remove: u32)
+    -> Bool;
+    pub fn TranslateMessage(message: *const Msg) -> Bool;
+    pub fn DispatchMessageA(message: *const Msg) -> isize;
+    pub safe fn DefWindowProcA(window: Handle, message: u32, wparam: usize, lparam: isize)
+    -> isize;
+    pub safe fn DestroyWindow(window: Handle) -> Bool;
+    pub safe fn PostQuitMessage(exit_code: i32);
+    pub safe fn PostMessageA(window: Handle, message: u32, wparam: usize, lparam: isize) -> Bool;
+    pub safe fn SendMessageA(window: Handle, message: u32, wparam: usize, lparam: isize) -> isize;
+    pub fn BeginPaint(window: Handle, paint: *mut PaintStruct) -> Handle;
+    pub fn EndPaint(window: Handle, paint: *const PaintStruct) -> Bool;
+    pub safe fn GetDC(window: Handle) -> Handle;
+    pub safe fn ReleaseDC(window: Handle, context: Handle) -> i32;
+    pub fn GetClientRect(window: Handle, rect: *mut Rect) -> Bool;
+    pub fn InvalidateRect(window: Handle, rect: *const Rect, erase: Bool) -> Bool;
+    pub fn SetWindowTextA(window: Handle, title: *const c_char) -> Bool;
+    pub fn FillRect(context: Handle, rect: *const Rect, brush: Handle) -> i32;
+    pub fn MessageBoxA(
+        owner: Handle,
+        text: *const c_char,
+        caption: *const c_char,
+        kind: u32,
+    ) -> i32;
+    pub fn LoadCursorA(instance: *mut c_void, name: *const c_char) -> Handle;
+}
+
+#[link(name = "gdi32", kind = "raw-dylib")]
+unsafe extern "system" {
+    pub fn TextOutA(context: Handle, x: i32, y: i32, text: *const u8, length: i32) -> Bool;
+    pub fn GetTextExtentPoint32A(
+        context: Handle,
+        text: *const u8,
+        length: i32,
+        size: *mut Size,
+    ) -> Bool;
+    pub safe fn SetTextColor(context: Handle, color: u32) -> u32;
+    pub safe fn SetBkColor(context: Handle, color: u32) -> u32;
+    pub safe fn SetBkMode(context: Handle, mode: i32) -> i32;
+    pub safe fn CreateSolidBrush(color: u32) -> Handle;
+    pub safe fn CreatePen(style: i32, width: i32, color: u32) -> Handle;
+    pub safe fn DeleteObject(object: Handle) -> Bool;
+    pub safe fn GetStockObject(index: i32) -> Handle;
+    pub safe fn SelectObject(context: Handle, object: Handle) -> Handle;
+    pub safe fn Rectangle(context: Handle, left: i32, top: i32, right: i32, bottom: i32) -> Bool;
+    pub safe fn SetPixel(context: Handle, x: i32, y: i32, color: u32) -> u32;
+    pub fn MoveToEx(context: Handle, x: i32, y: i32, previous: *mut Point) -> Bool;
+    pub safe fn LineTo(context: Handle, x: i32, y: i32) -> Bool;
+}
+
+/// Text of at most `N` bytes, built with `write!`; what does not fit is
+/// dropped.
+pub struct Text<const N: usize> {
+    bytes: [u8; N],
+    length: usize,
+}
+
+impl<const N: usize> Text<N> {
+    pub const fn new() -> Self {
+        Self {
+            bytes: [0; N],
+            length: 0,
+        }
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes[..self.length]
+    }
+
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(self.as_bytes()).unwrap_or("")
+    }
+
+    pub fn clear(&mut self) {
+        self.length = 0;
+    }
+}
+
+impl<const N: usize> Default for Text<N> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<const N: usize> fmt::Write for Text<N> {
+    fn write_str(&mut self, text: &str) -> fmt::Result {
+        let room = N - self.length;
+        let mut take = text.len().min(room);
+        while !text.is_char_boundary(take) {
+            take -= 1;
+        }
+        self.bytes[self.length..self.length + take].copy_from_slice(&text.as_bytes()[..take]);
+        self.length += take;
+        Ok(())
+    }
+}
+
 /// Writes to a standard handle; implements [`fmt::Write`] so that the
 /// `write!` macros work.
 pub struct Output(pub u32);

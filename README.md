@@ -27,6 +27,13 @@ and two Windows executables:
 
 ![Omit OS desktop: file browser and a window showing the output of Windows programs](docs/screenshot-desktop.png)
 
+Programs can have windows of their own — including Windows programs.
+Here `wingui.exe`, an ordinary PE executable using `USER32.dll` and
+`GDI32.dll` functions, has been clicked once and typed into (the
+screenshot is taken by the automated test):
+
+![A Windows GUI program's window on the Omit OS desktop](docs/screenshot-windows-gui.png)
+
 The same session on the serial console:
 
 ```text
@@ -265,7 +272,8 @@ protocol for other programs' windows.
 | SSE/x87 state saved per process; `protect` and `set_thread_pointer` system calls | Working, tested (the SSE test was confirmed to fail without the save/restore) |
 | PE32+ parser (`compat/windows/pe`): headers, sections, imports, relocations | Working; host-tested including truncation and 200 000 random corruptions |
 | Windows program loader `winrun`: mapping, relocation, import binding, W^X section rights, stack, TEB/PEB | Working, tested in QEMU |
-| Windows API: 66 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process and module information, threads and synchronisation) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else from Windows can run**; see ADR 0011 |
+| Windows API: 66 functions of `KERNEL32.dll` (console, files, directories, heap, virtual memory, time, process and module information, threads and synchronisation) | Working, tested by a Windows program that checks 57 results. **Only programs importing nothing else from Windows (but see the next row) can run**; see ADR 0011 |
+| Windows GUI, first slice: 26 functions of `USER32.dll` and 14 of `GDI32.dll` — window classes, one fixed-size top-level window per `CreateWindowExA`, the message loop, painting with text, rectangles, lines and pixels, keyboard and mouse messages, `MessageBoxA` | Working; `wingui.exe` is operated by the QEMU test with mouse and keyboard and checked on screenshots. No controls, menus, dialogs, bitmaps, timers or `...W` functions: enough for a hand-written demonstration program, not for existing applications |
 | Windows libraries (DLL files): export tables, loading with dependencies, initialisation order, `LoadLibraryA`, `GetProcAddress` | Working, tested with two DLLs built in this repository (33 checks). No Windows system DLL exists here |
 | Windows programs started by name from the shell or by `spawn`; missing functions reported before start | Working, tested |
 | PS/2 mouse | Working; decoder host-tested, driven by injected movement and clicks in the QEMU tests |
@@ -367,9 +375,9 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
 - Linux driver reuse is demonstrated for two small drivers without
   interrupts or DMA, in emulation. It says little about how hard network,
   storage or graphics drivers will be.
-- Windows compatibility covers console programs that import only the 66
-  implemented `KERNEL32.dll` functions (`winrun --list`) and DLLs that do
-  the same. Practically no existing Windows software fits that; the test programs are built in this
+- Windows compatibility covers programs that import only the
+  implemented functions of `KERNEL32.dll`, `USER32.dll` and `GDI32.dll`
+  (`winrun --list`) and DLLs that do the same. Practically no existing Windows software fits that; the test programs are built in this
   repository and have not been run on Windows itself for comparison.
 - AVX is not enabled, and no memory can be writable and executable.
 - No performance measurements have been made, and no performance claims are
