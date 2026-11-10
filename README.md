@@ -226,8 +226,12 @@ windows. Milestones 6 to 9 are open-ended by nature, and nothing here
 should be read as those goals being reached.
 
 Storage (VirtIO, NVMe, SATA), USB input, the clock and the installer have
-native drivers that are **tested in QEMU only**. The system has never
-been run on a physical machine.
+native drivers that are **tested in QEMU only**. Outside QEMU, the
+release ISO has been booted to the shell in VirtualBox 7 (with EFI
+enabled) by the project's owner; nothing beyond that boot has been
+checked there, and the first attempt found a loader bug that QEMU's
+firmware had tolerated. The system has never been run on a physical
+machine.
 
 | Component | State |
 | --- | --- |

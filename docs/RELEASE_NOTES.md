@@ -65,8 +65,15 @@ qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omi
 
 A window shows the Omit OS console; you can type in it or in the terminal.
 
-VirtualBox / VMware: create a 64-bit "Other" VM, **enable EFI**, attach the
-ISO as an optical drive.
+VirtualBox: create a VM of type "Other", version "Other/Unknown
+(64-bit)", and under Settings → System → Motherboard tick **Enable EFI**
+(without it VirtualBox reports that the VM "failed to boot"); attach the
+ISO as an optical drive. This has been tried with VirtualBox 7 and boots
+(from version 0.1.1 on). VMware: the same idea — a 64-bit "Other" VM with
+UEFI firmware — but untried.
+
+If the screen stays black, add a serial port writing to a file (COM1,
+"Raw File") and look there: the system logs everything to it.
 
 USB stick (this erases the stick; replace `/dev/sdX` with its device):
 
