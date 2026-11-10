@@ -2155,6 +2155,17 @@ impl<'a> Mouse<'a> {
         Ok(())
     }
 
+    /// Turns the wheel `notches` towards the person (which scrolls
+    /// down), or away from them if negative.
+    fn wheel(&self, notches: i32) -> Result<()> {
+        // QEMU turns it one notch per command, up for a positive value.
+        let step = if notches > 0 { -1 } else { 1 };
+        for _ in 0..notches.abs() {
+            monitor_command(self.monitor, &format!("mouse_move 0 0 {step}"))?;
+        }
+        Ok(())
+    }
+
     fn click(&mut self, x: i32, y: i32) -> Result<()> {
         self.move_to(x, y)?;
         self.button(true)?;
@@ -2836,6 +2847,35 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                 theme.window,
             )
         })?;
+
+        // The wheel: with the pointer over the list, turning it towards
+        // the person brings the end of the list into view, and turning
+        // it back the beginning.
+        let last_name = |image: &Screenshot| {
+            screen_writes(image, "winthread.exe", REGULAR_13, theme.text, theme.window)
+        };
+        let first_name = |image: &Screenshot| {
+            screen_writes(image, "clock", REGULAR_13, theme.text, theme.window)
+        };
+        mouse.move_to(half.x + half.w / 2, half.y + half.h / 2)?;
+        let image = wait_for_screen(check, "the start of the list in Files", patience, |image| {
+            first_name(image)
+        })?;
+        if last_name(&image) {
+            return Err("the list in Files is too short to scroll".into());
+        }
+        mouse.wheel(10)?;
+        wait_for_screen(
+            check,
+            "the end of the list after the wheel",
+            patience,
+            |image| last_name(image) && !first_name(image),
+        )?;
+        mouse.wheel(-10)?;
+        wait_for_screen(check, "the start of the list again", patience, |image| {
+            first_name(image) && !last_name(image)
+        })?;
+        mouse.move_to(20, 300)?;
     }
 
     // The Calculator: the ninth window. 7 × 6 = by mouse; the result is

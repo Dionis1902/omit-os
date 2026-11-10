@@ -330,6 +330,8 @@ pub struct InputEvent {
     /// [`event::KEY`] or [`event::MOUSE`].
     pub kind: u32,
     /// Key: the key code (see [`key`]). Mouse: movement to the right.
+    /// Wheel: notches turned, positive towards the person (which
+    /// scrolls down).
     pub a: i32,
     /// Mouse: movement down the screen.
     pub b: i32,
@@ -351,6 +353,8 @@ pub mod event {
     /// A modifier key (Shift, Ctrl, Alt) was pressed or let go; the
     /// event says which are held now.
     pub const MODIFIERS: u32 = 3;
+    /// The mouse's wheel turned.
+    pub const WHEEL: u32 = 4;
 }
 
 /// The modifier keys, as bits of [`InputEvent::c`] in key and modifier

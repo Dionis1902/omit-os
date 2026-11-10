@@ -36,6 +36,11 @@ const CONFIG_AUX_CLOCK_OFF: u8 = 1 << 5;
 
 const MOUSE_SET_DEFAULTS: u8 = 0xF6;
 const MOUSE_ENABLE_REPORTING: u8 = 0xF4;
+const MOUSE_SET_SAMPLE_RATE: u8 = 0xF3;
+const MOUSE_GET_ID: u8 = 0xF2;
+/// The device ID of a mouse that has switched to four-byte packets
+/// with a wheel.
+const MOUSE_ID_WHEEL: u8 = 3;
 const MOUSE_ACK: u8 = 0xFA;
 
 /// Called with each key press.
@@ -162,10 +167,24 @@ pub fn init_mouse(handler: MouseHandler) -> bool {
             let config = (config | CONFIG_AUX_INTERRUPT) & !CONFIG_AUX_CLOCK_OFF;
             send(COMMAND_PORT, COMMAND_WRITE_CONFIG) && send(DATA_PORT, config)
         });
-    let ready =
-        configured && mouse_command(MOUSE_SET_DEFAULTS) && mouse_command(MOUSE_ENABLE_REPORTING);
+    let reset = configured && mouse_command(MOUSE_SET_DEFAULTS);
+    // A mouse with a wheel says so when the sample rate is set to 200,
+    // 100 and 80 in a row: its ID becomes 3 and its packets four bytes,
+    // the fourth being the wheel. One without ignores the sequence and
+    // keeps ID 0. (The rate is put back to the default of 100.)
+    let wheel = reset
+        && [200, 100, 80]
+            .iter()
+            .all(|&rate| mouse_command(MOUSE_SET_SAMPLE_RATE) && mouse_command(rate))
+        && mouse_command(MOUSE_GET_ID)
+        && receive() == Some(MOUSE_ID_WHEEL);
+    let ready = reset
+        && mouse_command(MOUSE_SET_SAMPLE_RATE)
+        && mouse_command(100)
+        && mouse_command(MOUSE_ENABLE_REPORTING);
     drain(&mut controller, false);
     if ready {
+        controller.mouse.set_wheel(wheel);
         controller.mouse_handler = Some(handler);
     }
     ready

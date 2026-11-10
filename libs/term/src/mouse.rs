@@ -30,22 +30,36 @@ pub struct Report {
     pub dy: i16,
     /// Buttons held: [`BUTTON_LEFT`], [`BUTTON_RIGHT`], [`BUTTON_MIDDLE`].
     pub buttons: u8,
+    /// Notches the wheel turned: positive towards the person, which
+    /// scrolls down. Zero for a mouse without a wheel.
+    pub wheel: i8,
 }
 
 /// Assembles reports from the mouse's byte stream.
 #[derive(Debug, Default)]
 pub struct Decoder {
-    packet: [u8; 3],
+    packet: [u8; 4],
     filled: usize,
+    /// The mouse has a wheel and was switched to four-byte packets.
+    wheel: bool,
 }
 
 impl Decoder {
     /// Creates a decoder waiting for the start of a packet.
     pub const fn new() -> Self {
         Self {
-            packet: [0; 3],
+            packet: [0; 4],
             filled: 0,
+            wheel: false,
         }
+    }
+
+    /// Tells the decoder that the mouse now sends four-byte packets,
+    /// the fourth being the wheel (a mouse that answered the
+    /// "IntelliMouse" sequence of sample rates with device ID 3).
+    pub fn set_wheel(&mut self, wheel: bool) {
+        self.wheel = wheel;
+        self.filled = 0;
     }
 
     /// Processes one byte and returns the report it completes, if any.
@@ -56,12 +70,12 @@ impl Decoder {
         }
         self.packet[self.filled] = byte;
         self.filled += 1;
-        if self.filled < 3 {
+        if self.filled < if self.wheel { 4 } else { 3 } {
             return None;
         }
         self.filled = 0;
 
-        let [flags, x, y] = self.packet;
+        let [flags, x, y, z] = self.packet;
         if flags & 0xC0 != 0 {
             // Overflow: the movement values are meaningless.
             return None;
@@ -71,6 +85,8 @@ impl Decoder {
             dx: extend(x, flags & 0x10 != 0),
             dy: -extend(y, flags & 0x20 != 0),
             buttons: flags & 0x07,
+            // The wire value is positive towards the person already.
+            wheel: if self.wheel { z as i8 } else { 0 },
         })
     }
 }
@@ -100,7 +116,12 @@ mod tests {
                 0x18, 0x00, 0, // left 256
             ],
         );
-        let report = |dx, dy, buttons| Report { dx, dy, buttons };
+        let report = |dx, dy, buttons| Report {
+            dx,
+            dy,
+            buttons,
+            wheel: 0,
+        };
         assert_eq!(
             reports,
             [
@@ -112,6 +133,38 @@ mod tests {
                 report(-256, 0, 0),
             ]
         );
+    }
+
+    #[test]
+    fn a_mouse_with_a_wheel_sends_four_bytes() {
+        let mut decoder = Decoder::new();
+        decoder.set_wheel(true);
+        let reports = feed_all(
+            &mut decoder,
+            &[
+                0x08, 0, 0, 1, // one notch towards the person
+                0x08, 0, 0, 0xFE, // two notches away
+                0x09, 2, 0, 0, // movement with a button, no wheel
+            ],
+        );
+        assert_eq!(
+            reports
+                .iter()
+                .map(|r| r.wheel)
+                .collect::<std::vec::Vec<_>>(),
+            [1, -2, 0]
+        );
+        assert_eq!((reports[2].dx, reports[2].buttons), (2, BUTTON_LEFT));
+        // Without the wheel the same bytes are three-byte packets, and
+        // no wheel is reported.
+        let mut decoder = Decoder::new();
+        let reports = feed_all(&mut decoder, &[0x08, 0, 0, 0x08, 3, 0]);
+        assert_eq!(reports.len(), 2);
+        assert!(reports.iter().all(|report| report.wheel == 0));
+        // Switching drops a packet in progress.
+        decoder.feed(0x08);
+        decoder.set_wheel(true);
+        assert_eq!(feed_all(&mut decoder, &[0x08, 1, 0, 5]).len(), 1);
     }
 
     #[test]

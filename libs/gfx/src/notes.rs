@@ -364,9 +364,19 @@ impl<D: Documents> App for Notes<D> {
         "notes"
     }
 
+    fn scroll(&mut self, lines: i32) -> bool {
+        let last = self.lines.len().saturating_sub(self.visible_rows());
+        let to = (self.scroll.0 as i64 + i64::from(lines)).clamp(0, last as i64) as usize;
+        let moved = to != self.scroll.0;
+        self.scroll.0 = to;
+        moved
+    }
+
     fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
         self.size = (width, height);
-        self.keep_cursor_visible();
+        // (The cursor is brought into view when it moves, not here:
+        // the wheel may scroll it out of sight.)
+        self.scroll.0 = self.scroll.0.min(self.lines.len() - 1);
         let hairline = |canvas: &mut Canvas<'_>, area: Rect| {
             canvas.tint(area, theme.separator.colour, theme.separator.alpha);
         };
@@ -505,6 +515,7 @@ impl<D: Documents> App for Notes<D> {
         let column = (self.scroll.1 + across).min(self.line_len(line));
         self.cursor = (line, column);
         self.wanted = column;
+        self.keep_cursor_visible();
     }
 
     /// Closing with changes not saved is refused once, and says why.
@@ -830,6 +841,36 @@ mod tests {
         assert!(notes.cell_frame(line, 0).is_none());
         keys(&mut notes, &[HOME]);
         assert!(notes.cell_frame(line, 0).is_some());
+    }
+
+    #[test]
+    fn the_wheel_scrolls_without_moving_the_cursor() {
+        let text: String = (1..=200).map(|number| format!("line {number}\n")).collect();
+        let shelf = Shelf::with(&[("/long", text.as_bytes())]);
+        let mut notes = Notes::open(shelf, "/long");
+        assert!(notes.scroll(30));
+        assert_eq!(notes.cursor(), (0, 0));
+        assert!(notes.cell_frame(0, 0).is_none());
+        // Drawing does not pull the text back to the cursor.
+        let theme = Theme::default();
+        let mut surface = Surface::new(SIZE.0 as usize, SIZE.1 as usize, theme.window);
+        notes.draw(&mut surface.canvas(), SIZE.0, SIZE.1, &theme);
+        assert!(notes.cell_frame(30, 0).is_some());
+        // A click puts the cursor where it lands; a key brings the
+        // cursor's line back into view.
+        let cell = notes.cell_frame(32, 2).unwrap();
+        let mut context = Context::default();
+        notes.click(cell.x + 1, cell.y + 3, &mut context);
+        assert_eq!(notes.cursor(), (32, 2));
+        assert!(notes.scroll(-1000));
+        assert!(!notes.scroll(-1));
+        assert!(notes.cell_frame(32, 2).is_none());
+        keys(&mut notes, &[LEFT]);
+        assert!(notes.cell_frame(32, 1).is_some());
+        // The end is the last screenful.
+        assert!(notes.scroll(100_000));
+        assert!(notes.cell_frame(199, 0).is_some());
+        assert!(!notes.scroll(1));
     }
 
     #[test]

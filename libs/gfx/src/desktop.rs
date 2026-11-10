@@ -222,6 +222,12 @@ pub trait App {
     /// for windows that show it.
     fn alignment(&mut self, _alignment: Alignment) {}
 
+    /// The mouse's wheel turned over the window: `lines` to scroll by,
+    /// positive for further down. Returns whether anything moved.
+    fn scroll(&mut self, _lines: i32) -> bool {
+        false
+    }
+
     /// The person asked for the window to be closed (its close button,
     /// or Alt+F4). Returning `false` keeps it open — for a window with
     /// something unsaved to say so first; it is then drawn again. It is
@@ -384,6 +390,9 @@ pub mod modifier {
     /// Either Alt key.
     pub const ALT: u32 = 1 << 2;
 }
+
+/// Lines scrolled for one notch of the mouse's wheel.
+pub const WHEEL_LINES: i32 = 3;
 
 /// One window in the switcher: this wide and high, ...
 const SWITCH_TILE: (i32, i32) = (116, 92);
@@ -1255,6 +1264,31 @@ impl Desktop {
         self.windows[index].app.key(code, &mut context);
         self.damage(self.windows[index].frame);
         self.perform(context, Some(id));
+    }
+
+    /// The mouse's wheel turned by `notches` (positive towards the
+    /// person): the window under the pointer scrolls, three lines a
+    /// notch, whether or not it is the one in front.
+    pub fn wheel(&mut self, notches: i32) {
+        if self.start_open || self.switcher.is_some() || notches == 0 {
+            return;
+        }
+        let at = self.pointer;
+        if self.taskbar().contains(at) {
+            return;
+        }
+        let under = self
+            .windows
+            .iter()
+            .rposition(|window| !window.minimised && window.frame.contains(at));
+        if let Some(index) = under
+            && self.windows[index].content().contains(at)
+            && self.windows[index]
+                .app
+                .scroll(notches.saturating_mul(WHEEL_LINES))
+        {
+            self.damage(self.windows[index].frame);
+        }
     }
 
     /// Tells the desktop which modifier keys are held now (bits of
@@ -2947,6 +2981,7 @@ mod tests {
                     4 => f.desktop.set_modifiers([0, 4, 5, 4][next(4) as usize]),
                     5 => f.desktop.key(9),
                     6 => f.desktop.key([27, 0x103, 0x104, 0x114][next(4) as usize]),
+                    7 => f.desktop.wheel(next(5) - 2),
                     _ => {}
                 },
             }
@@ -3171,6 +3206,70 @@ mod tests {
         f.desktop.key(0x71);
         assert_eq!(f.desktop.window_count(), 0);
         assert_eq!(*refusals.borrow(), 5);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_window_under_the_pointer() {
+        /// Counts the lines it was scrolled by; `stuck` ones say
+        /// nothing moved.
+        struct Scroller {
+            name: &'static str,
+            stuck: bool,
+            seen: Rc<RefCell<Vec<(&'static str, i32)>>>,
+        }
+        impl App for Scroller {
+            fn title(&self) -> &str {
+                self.name
+            }
+            fn draw(&mut self, _: &mut Canvas<'_>, _: i32, _: i32, _: &Theme) {}
+            fn scroll(&mut self, lines: i32) -> bool {
+                self.seen.borrow_mut().push((self.name, lines));
+                !self.stuck
+            }
+        }
+        let mut f = Fixture::new();
+        let seen: Rc<RefCell<Vec<(&'static str, i32)>>> = Rc::default();
+        let open = |f: &mut Fixture, name, stuck| {
+            f.desktop.open(
+                Box::new(Scroller {
+                    name,
+                    stuck,
+                    seen: seen.clone(),
+                }),
+                240,
+                120,
+            )
+        };
+        let back = open(&mut f, "back", false);
+        let front = open(&mut f, "front", true);
+        f.render();
+        let back_frame = f.desktop.window_frame(back).unwrap();
+        let front_frame = f.desktop.window_frame(front).unwrap();
+        // Over the front window's contents: it gets three lines a
+        // notch, down for towards the person. It says nothing moved, so
+        // nothing is repainted.
+        f.move_to(front_frame.x + 100, front_frame.y + TITLE_HEIGHT + 60);
+        f.render();
+        f.desktop.wheel(2);
+        assert_eq!(*seen.borrow(), [("front", 2 * WHEEL_LINES)]);
+        assert!(f.render().is_empty());
+        // Over the part of the back window that shows: that one
+        // scrolls, without coming to the front, and is repainted.
+        f.move_to(back_frame.x + 5, back_frame.y + TITLE_HEIGHT + 10);
+        f.render();
+        f.desktop.wheel(-1);
+        assert_eq!(seen.borrow().last(), Some(&("back", -WHEEL_LINES)));
+        assert_eq!(f.desktop.front(), Some(front));
+        assert!(!f.render().is_empty());
+        // Over a title bar, the desktop or the task bar: nothing.
+        let before = seen.borrow().len();
+        f.move_to(front_frame.x + 100, front_frame.y + 10);
+        f.desktop.wheel(1);
+        f.move_to(700, 400);
+        f.desktop.wheel(1);
+        f.move_to(400, H as i32 - 10);
+        f.desktop.wheel(1);
+        assert_eq!(seen.borrow().len(), before);
     }
 
     #[test]

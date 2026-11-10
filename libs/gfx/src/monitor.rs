@@ -639,6 +639,17 @@ impl<S: Source> App for Monitor<S> {
         }
     }
 
+    fn scroll(&mut self, lines: i32) -> bool {
+        if self.page != 0 {
+            return false;
+        }
+        let last = self.last_scroll();
+        let to = (self.scroll as i64 + i64::from(lines)).clamp(0, last as i64) as usize;
+        let moved = to != self.scroll;
+        self.scroll = to;
+        moved
+    }
+
     fn click(&mut self, x: i32, y: i32, _: &mut Context) {
         let at = Point::new(x, y);
         if let Some(page) = widgets::segment_at(MARGIN, 12, &PAGES, at) {
@@ -996,6 +1007,14 @@ mod tests {
         let frame = monitor.row_frame(last).expect("the last row is shown");
         assert!(frame.bottom() <= SIZE.1 - STATUS);
         assert!(monitor.row_frame(0).is_none());
+        // The wheel scrolls the list, to its ends and no further, and
+        // not on the other page.
+        assert!(!monitor.scroll(3));
+        assert!(monitor.scroll(-1000));
+        assert!(monitor.row_frame(0).is_some());
+        assert!(!monitor.scroll(-1));
+        monitor.page = 1;
+        assert!(!monitor.scroll(3));
     }
 
     #[test]

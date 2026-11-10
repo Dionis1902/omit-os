@@ -184,6 +184,7 @@ fn main() -> i32 {
                     desktop.key(input.a);
                 }
                 event::MODIFIERS => desktop.set_modifiers(input.c),
+                event::WHEEL => desktop.wheel(input.a),
                 event::MOUSE => desktop.mouse(input.a, input.b, input.c),
                 _ => {}
             }

@@ -171,16 +171,20 @@ impl BootKeyboard {
 }
 
 /// Decodes a boot mouse report: buttons (bit 0 left, 1 right, 2 middle),
-/// movement right, movement down. Longer reports (a wheel, say) are
-/// accepted and the rest ignored.
+/// movement right, movement down. A fourth byte, which many mice send
+/// although the boot protocol does not ask for it, is the wheel:
+/// positive away from the person, the opposite of [`Report::wheel`].
+/// Anything after that is ignored.
 pub fn boot_mouse(report: &[u8]) -> Option<Report> {
-    let &[buttons, dx, dy, ..] = report else {
+    let &[buttons, dx, dy, ref rest @ ..] = report else {
         return None;
     };
+    let wheel = rest.first().map_or(0, |&z| (z as i8).saturating_neg());
     Some(Report {
         dx: i16::from(dx as i8),
         dy: i16::from(dy as i8),
         buttons: buttons & 0x07,
+        wheel,
     })
 }
 
@@ -366,18 +370,24 @@ mod tests {
             Some(Report {
                 dx: 5,
                 dy: -3,
-                buttons: 1
+                buttons: 1,
+                wheel: 0
             })
         );
-        // A wheel byte and unused button bits are ignored.
+        // Unused button bits are ignored; a fourth byte is the wheel,
+        // away from the person: the other way round from ours.
         assert_eq!(
             boot_mouse(&[0xFA, 0x80, 0x7F, 9]),
             Some(Report {
                 dx: -128,
                 dy: 127,
-                buttons: 2
+                buttons: 2,
+                wheel: -9
             })
         );
+        assert_eq!(boot_mouse(&[0, 0, 0, 0xFF, 7]).unwrap().wheel, 1);
+        // The most negative value has no opposite in a byte.
+        assert_eq!(boot_mouse(&[0, 0, 0, 0x80]).unwrap().wheel, 127);
         assert_eq!(boot_mouse(&[1, 2]), None);
     }
 }

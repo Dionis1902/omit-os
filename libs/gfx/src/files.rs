@@ -556,9 +556,19 @@ impl<S: Storage> App for Files<S> {
         "files"
     }
 
+    fn scroll(&mut self, lines: i32) -> bool {
+        let last = self.entries.len().saturating_sub(self.visible_rows());
+        let to = (self.first_row as i64 + i64::from(lines)).clamp(0, last as i64) as usize;
+        let moved = to != self.first_row;
+        self.first_row = to;
+        moved
+    }
+
     fn draw(&mut self, canvas: &mut Canvas<'_>, width: i32, height: i32, theme: &Theme) {
         self.size = (width, height);
-        self.keep_selection_visible();
+        // (The selection is brought into view when it changes, not
+        // here: the wheel may scroll it out of sight.)
+        self.first_row = self.first_row.min(self.entries.len().saturating_sub(1));
         let line = |canvas: &mut Canvas<'_>, area: Rect| {
             canvas.tint(area, theme.separator.colour, theme.separator.alpha);
         };
@@ -1231,6 +1241,33 @@ mod tests {
         // The next key clears the message.
         press(&mut window, &[DOWN]);
         assert_eq!(window.message(), None);
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_list_and_leaves_the_selection_alone() {
+        let (mut window, _) = files("/bin");
+        let rows = window.visible_rows();
+        let last = window.names().len() - rows;
+        press(&mut window, &[DOWN]);
+        assert_eq!(window.selected(), Some("extras"));
+        assert!(window.scroll(3));
+        assert_eq!(window.first_row, 3);
+        // Drawing does not pull the list back to the selection.
+        let theme = Theme::default();
+        let mut surface = Surface::new(SIZE.0 as usize, SIZE.1 as usize, theme.window);
+        window.draw(&mut surface.canvas(), SIZE.0, SIZE.1, &theme);
+        assert_eq!(window.first_row, 3);
+        assert_eq!(window.selected(), Some("extras"));
+        // It stops at both ends, and says when nothing moved.
+        assert!(window.scroll(1000));
+        assert_eq!(window.first_row, last);
+        assert!(!window.scroll(1));
+        assert!(window.scroll(-1000));
+        assert_eq!(window.first_row, 0);
+        assert!(!window.scroll(-1));
+        // A short list does not scroll at all.
+        let (mut window, _) = files("/");
+        assert!(!window.scroll(3));
     }
 
     #[test]

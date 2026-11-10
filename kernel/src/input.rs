@@ -105,6 +105,7 @@ pub fn modifiers_held(held: u8) {
         time_us: now_us(),
     });
     ARRIVED.wake_all();
+    crate::poll::notify();
 }
 
 /// Handles a key press from the keyboard driver (interrupt context).
@@ -147,6 +148,24 @@ pub fn mouse_moved(report: Report) {
     }
     let buttons = u32::from(report.buttons);
     let mut queue = QUEUE.lock();
+    if report.wheel != 0 {
+        // Notches of one turn of the wheel are added up, like movement.
+        if let Some(last) = queue.last_mut()
+            && last.kind == event::WHEEL
+        {
+            last.a = last.a.saturating_add(i32::from(report.wheel));
+        } else {
+            queue.push(InputEvent {
+                kind: event::WHEEL,
+                a: i32::from(report.wheel),
+                b: 0,
+                c: 0,
+                time_us: now_us(),
+            });
+        }
+        // (The movement and buttons of the same report follow as an
+        // event of their own, which also wakes the reader.)
+    }
     // Movement reports arrive far faster than a program redraws; merge
     // one into the previous event when no button changed in between, so
     // that a burst of movement cannot push clicks out of the queue.

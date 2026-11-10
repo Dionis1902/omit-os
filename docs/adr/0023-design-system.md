@@ -100,11 +100,17 @@ this ADR records how the system implements it and how far it has got.
   asks, in the status line, and removes on the second press. There is
   no Recycle Bin: what is deleted is gone, which the question says.
   What the filesystem refuses (a folder that is not empty, a name
-  that is taken) is said in the status line.
+  that is taken) is said in the status line. The eighth: the **mouse
+  wheel**. The kernel asks a PS/2 mouse whether it has one (the
+  sequence of sample rates such mice answer to) and reads the fourth
+  byte many USB mice send in the boot protocol; turns arrive as an
+  input event of their own. The window under the pointer scrolls,
+  three lines a notch, in front or not: the lists of Files and the
+  System Monitor, and the text in Notes.
 
 ## What works
 
-- 128 host tests in `libs/gfx`: the font and icon files (every
+- 131 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -134,7 +140,9 @@ this ADR records how the system implements it and how far it has got.
   Ctrl+S, and its file read after the desktop has closed. Since the
   seventh, a folder is made and named in Files and listed by the
   shell afterwards; renaming and deleting existing entries are tested
-  on the host only.
+  on the host only. Since the eighth, the wheel is turned over that
+  list, with QEMU's PS/2 mouse in one test and its USB mouse in the
+  other, and must show the end of the list and then its start again.
   That the settings file is read back at the next start is tested on
   the host only (the parser), not across a restart in QEMU.
 
@@ -154,8 +162,7 @@ halved that.) Debug builds are slower by the same factor as before.
   quick panel and notifications, Market; all pages of Settings but
   one. In
   Files: tabs, search, the preview pane, the context menu, the
-  Recycle Bin, copying and moving, sorting, and scrolling with the mouse
-  (there are no wheel events yet); a row is opened by clicking it a
+  Recycle Bin, copying and moving, sorting; a row is opened by clicking it a
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
@@ -166,6 +173,10 @@ halved that.) Debug builds are slower by the same factor as before.
   desktop asks nothing**: unsaved notes are lost. A new note is named by
   the system (`note-1.txt`, ...): there is no dialog to choose a name
   or folder.
+- The wheel does not scroll the Run window or the windows of other
+  programs (the window protocol has no message for it), and a USB
+  mouse that sends only the three bytes the boot protocol promises
+  has no wheel here: report descriptors are not read.
 - The window switcher shows icons and titles, not pictures of the
   windows.
 - The System Monitor does not show memory per process (the kernel
