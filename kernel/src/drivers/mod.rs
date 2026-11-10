@@ -5,3 +5,4 @@ pub mod block;
 pub mod nvme;
 pub mod registry;
 pub mod virtio_blk;
+pub mod xhci;

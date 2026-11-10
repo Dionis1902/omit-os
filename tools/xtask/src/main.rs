@@ -877,6 +877,53 @@ const BOOT_TESTS: &[BootTest] = &[
         boot_installed: false,
         nvme: false,
     },
+    // The same with a USB keyboard on an xHCI controller, and the PS/2
+    // devices switched off, so the typed line can only have come by USB.
+    BootTest {
+        name: "usb-keyboard",
+        cmdline: "nops2",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            SUCCESS_MESSAGE,
+            "[INFO ] console: PS/2 devices not used (nops2)",
+            "[INFO ] xhci: controller started,",
+            "[INFO ] usb: port 5: keyboard (0627:0001)",
+            "[INFO ] usb: port 6: mouse (0627:0001)",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("echo typed-on-serial", "\ntyped-on-serial\n"),
+            ("lsdrv", "native     xhci\n"),
+        ],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: true,
+        desktop: false,
+        qemu_args: USB_INPUT,
+        boot_installed: false,
+        nvme: false,
+    },
+    // And the whole desktop scenario — pointer movement, clicks, drags,
+    // typing — with USB mouse and keyboard only.
+    BootTest {
+        name: "desktop-usb-input",
+        cmdline: "nops2",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] console: PS/2 devices not used (nops2)",
+            "desktop: closed",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[("echo before-desktop", "\nbefore-desktop\n")],
+        reboot_script: &[],
+        ends_with_reset: false,
+        display: true,
+        desktop: true,
+        qemu_args: USB_INPUT,
+        boot_installed: false,
+        nvme: false,
+    },
     BootTest {
         name: "desktop",
         cmdline: "",
@@ -1462,6 +1509,16 @@ struct DisplayCheck {
     /// Also run the graphical desktop and operate it with the mouse.
     desktop: bool,
 }
+
+/// An xHCI controller with a USB keyboard and a USB mouse.
+const USB_INPUT: &[&str] = &[
+    "-device",
+    "qemu-xhci,id=xhci",
+    "-device",
+    "usb-kbd,bus=xhci.0",
+    "-device",
+    "usb-mouse,bus=xhci.0",
+];
 
 /// QEMU key names that type `echo kbd-ok` followed by Enter.
 const KEYBOARD_TEST_KEYS: &[&str] = &[

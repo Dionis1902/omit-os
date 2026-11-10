@@ -372,26 +372,32 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         "console: serial input enabled (GSI {} -> vector {})",
         acpi.serial_irq.gsi, SERIAL_VECTOR
     );
-    arch::ps2::init(input::key_pressed);
-    arch::interrupts::register(KEYBOARD_VECTOR, arch::ps2::handle_interrupt)
-        .map_err(InitError::InputInterrupt)?;
-    arch::ioapic::enable(acpi.keyboard_irq, KEYBOARD_VECTOR, apic.id as u8)
-        .map_err(InitError::IoApic)?;
-    info!(
-        "console: PS/2 keyboard input enabled (GSI {} -> vector {})",
-        acpi.keyboard_irq.gsi, KEYBOARD_VECTOR
-    );
-    if arch::ps2::init_mouse(input::mouse_moved) {
-        arch::interrupts::register(MOUSE_VECTOR, arch::ps2::handle_interrupt)
+    // `nops2` leaves the PS/2 keyboard and mouse alone, so that tests can
+    // prove input arrives another way (USB).
+    if cmdline.flag("nops2") {
+        info!("console: PS/2 devices not used (nops2)");
+    } else {
+        arch::ps2::init(input::key_pressed);
+        arch::interrupts::register(KEYBOARD_VECTOR, arch::ps2::handle_interrupt)
             .map_err(InitError::InputInterrupt)?;
-        arch::ioapic::enable(acpi.mouse_irq, MOUSE_VECTOR, apic.id as u8)
+        arch::ioapic::enable(acpi.keyboard_irq, KEYBOARD_VECTOR, apic.id as u8)
             .map_err(InitError::IoApic)?;
         info!(
-            "input: PS/2 mouse enabled (GSI {} -> vector {})",
-            acpi.mouse_irq.gsi, MOUSE_VECTOR
+            "console: PS/2 keyboard input enabled (GSI {} -> vector {})",
+            acpi.keyboard_irq.gsi, KEYBOARD_VECTOR
         );
-    } else {
-        info!("input: no PS/2 mouse found");
+        if arch::ps2::init_mouse(input::mouse_moved) {
+            arch::interrupts::register(MOUSE_VECTOR, arch::ps2::handle_interrupt)
+                .map_err(InitError::InputInterrupt)?;
+            arch::ioapic::enable(acpi.mouse_irq, MOUSE_VECTOR, apic.id as u8)
+                .map_err(InitError::IoApic)?;
+            info!(
+                "input: PS/2 mouse enabled (GSI {} -> vector {})",
+                acpi.mouse_irq.gsi, MOUSE_VECTOR
+            );
+        } else {
+            info!("input: no PS/2 mouse found");
+        }
     }
 
     // Threads and the scheduler. From here on the boot context is thread 1.
@@ -462,6 +468,11 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         }
         Ok(None) => info!("nvme: no controller"),
         Err(error) => warn!("nvme: cannot initialise controller: {error}"),
+    }
+    match drivers::xhci::init() {
+        Ok(Some(ports)) => info!("xhci: controller started, {ports} port(s)"),
+        Ok(None) => info!("xhci: no controller"),
+        Err(error) => warn!("xhci: cannot start the controller: {error}"),
     }
     // Linux drivers running on the compatibility layer.
     match linuxkpi::init() {

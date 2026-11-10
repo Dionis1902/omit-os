@@ -11,7 +11,7 @@ unmodified (currently two; see `drivers/linux/`). It contains no Windows code.
 the CPU and the address space, manages memory, handles timer and device
 interrupts, schedules threads, and runs programs as isolated user-mode
 processes. You get an interactive shell with a RAM filesystem, on screen
-(with a PS/2 keyboard) and on the serial console, and can format, mount and
+(with a PS/2 or USB keyboard) and on the serial console, and can format, mount and
 use an ext2 filesystem on a VirtIO disk. Two unmodified Linux drivers run
 on a compatibility layer, simple Windows console executables run natively
 (no emulation, no Windows code), and there is a small graphical desktop.
@@ -139,6 +139,7 @@ Stored in `\EFI\OMIT\CMDLINE` on the boot volume; set it with `--cmdline`.
 | Token | Effect |
 | --- | --- |
 | `noshell` | Do not start the interactive shell after initialisation. |
+| `nops2` | Do not use the PS/2 keyboard and mouse. For tests of USB input. |
 | `qemu-exit` | Report final status through QEMU's `isa-debug-exit` device and terminate the VM. Only for use under QEMU. |
 | `fault=panic` \| `pagefault` \| `stackoverflow` | Deliberately crash after initialisation, to exercise the diagnostics. Test use only. |
 
@@ -198,8 +199,10 @@ publishing. See [`docs/RELEASE_NOTES.md`](docs/RELEASE_NOTES.md).
 
 **Not tested on real hardware.** Requirements: x86-64, UEFI, Secure Boot off.
 The screen should work wherever the firmware provides a 32-bit framebuffer.
-Keyboard input needs a PS/2 keyboard (or firmware that emulates one for a USB
-keyboard); otherwise the only way to type is a serial port (COM1, 115200 8N1).
+Keyboard input needs a PS/2 keyboard, or a USB keyboard plugged directly
+into a port of an xHCI controller (not through a hub; the USB driver has
+only been tested in QEMU); otherwise the only way to type is a serial port
+(COM1, 115200 8N1).
 
 ## Status
 
@@ -248,7 +251,8 @@ protocol for other programs' windows.
 | Userspace runtime (`omit-rt`) and programs `cat`, `echo`, `tee`, `ls`, `run`, `hello`, `sleeper`, `spin`, `crash`, `memtest`, `fileops`, `syscheck`, `pipetest`, `threadtest` | Working; shipped in the initial ramdisk |
 | Framebuffer console with status bar (text only) | Working; verified by screenshot in the QEMU tests |
 | PS/2 keyboard (US layout) | Working; verified by injected key presses in the QEMU tests |
-| USB (and therefore USB keyboards) | Not started |
+| USB keyboards and mice on xHCI controllers (boot protocol, polled; hot-plug) | Working in QEMU: one test types on a USB keyboard and another runs the whole desktop scenario with USB keyboard and mouse, PS/2 switched off. **Never run on real hardware; no hubs.** See ADR 0019 |
+| Other USB devices (storage, hubs, anything else) | Not started |
 | Bootable ISO, release workflow | ISO boot tested in QEMU; the release workflow itself has not run yet (it needs a tag) |
 | PCI device discovery (`lspci`) | Working, tested in QEMU |
 | VirtIO block driver (polling, one request at a time) | Working, tested in QEMU |
@@ -282,7 +286,7 @@ protocol for other programs' windows.
 | Desktop (`/bin/desktop`): movable windows, task bar, file browser, text viewer, program runner | Working; the QEMU test opens windows, types commands, runs a native and a Windows program, drags a window and exits, checking screenshots |
 | Windows for other programs: protocol (`libs/window`), client library, `/bin/scribble` (drawing) and `/bin/clock` | Working; the QEMU test draws in a client window with the mouse, sends keys, checks the title the program sets and that the window goes when the program ends. Fixed-size windows, whole-window repaints, no permissions (ADR 0018) |
 | Input latency: events are timestamped, delivered by wake-up rather than polling, and the desktop reports input-to-screen times | Working; measured under emulation (average about 3 ms after the change, from 10–16 ms; see ADR 0013). No frame pacing: the display has no vertical-blank signal |
-| Programs opening their own windows, a terminal emulator, resizing, USB input, graphics modes | Not started |
+| A terminal emulator, resizable windows, graphics modes | Not started |
 | GPU drivers and acceleration, Vulkan, Direct3D, games | Not started; requirements and a proposed order of work are in ADR 0013 |
 | Windows threads: `CreateThread`, exit codes, `WaitForSingleObject`, events, critical sections, `Tls*` storage, per-thread TEB | Working, tested by a multi-threaded Windows program (44 checks) |
 | Windows: C runtime, exceptions, static TLS, graphics, registry, networking, 32-bit programs | Not started |
@@ -327,7 +331,8 @@ On QEMU 8.2.2 with OVMF, Rust 1.97.0 — locally with software emulation
   Run window is a line-mode terminal without escape sequences (see ADRs
   0012, 0014 and 0018). Debug builds draw noticeably slowly
   under emulation.
-- Only PS/2 keyboards (US layout) and PS/2 mice. No USB.
+- Keyboards (US layout) and mice: PS/2, or USB plugged directly into an
+  xHCI port — no hubs, and USB is untested outside QEMU.
 - Installation works onto VirtIO and NVMe disks and has only been tested
   with QEMU's emulated ones; there is no SATA (AHCI) or USB storage
   driver. An installed system still runs from memory; only `/data`
@@ -462,6 +467,7 @@ The exact contract between loader and kernel is documented in
 - [ADR 0016 — Installing to a disk](docs/adr/0016-installation.md)
 - [ADR 0017 — NVMe driver](docs/adr/0017-nvme.md)
 - [ADR 0018 — Shared memory, channels, poll, and windows for other programs](docs/adr/0018-windows-for-programs.md)
+- [ADR 0019 — USB keyboards and mice (xHCI)](docs/adr/0019-usb-input.md)
 
 ## Testing
 
@@ -473,6 +479,8 @@ checks both QEMU's exit status and the serial log:
 | `boot` | Every initialisation step (including the frame-allocator and timer-interrupt self-tests) logs success, the success line is printed, exit status reports success, no panic/exception/error/warning output |
 | `shell-session` | Boots into the shell and types about 40 commands over the serial port, checking the output of each: directories, files, redirection, copy/move/remove, error messages, line editing; then runs user programs — a greeting, one that passes bad pointers and reads kernel memory (must be terminated), one that sleeps and returns a status, one that spins forever in the background (must show up in `ps` and die on `kill`), and `echo`/`cat`/`tee` exercising arguments, relative paths, file reads and writes, error reporting and typed standard input |
 | `display-and-keyboard` | Types a command on the emulated PS/2 keyboard and checks it ran; takes a screenshot and checks the status bar and console colours |
+| `usb-keyboard` | PS/2 devices switched off (`nops2`): the xHCI driver finds a USB keyboard and mouse, and a command typed on the USB keyboard runs |
+| `desktop`, `desktop-usb-input` | The desktop operated through the emulated mouse and keyboard and checked on screenshots: windows, the Run terminal, a native program with its own window (`scribble`), a Windows GUI program (`wingui.exe`), dragging, exit. The second variant uses USB input only |
 | `disk-persistence` | On a blank VirtIO disk: `mkfs`, mount, create files and directories (from the shell and from programs), unmount; reboot with the same disk, mount, read everything back and run a program stored on the disk; finally `e2fsck` checks the disk image on the host |
 | `linux-driver-watchdog` | The reused Linux watchdog driver: bound at boot, reprogrammed, started; the machine survives longer than the timeout while keep-alives are sent and after the watchdog is stopped; unbinding removes it |
 | `install-to-nvme` | The native NVMe driver: install onto an emulated NVMe disk, write files (including one large enough to span many commands), restart from the NVMe disk alone, compare the files; the disk is then verified on the host like the VirtIO one |

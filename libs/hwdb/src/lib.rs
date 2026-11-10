@@ -145,8 +145,8 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x1B36,
         0x000D,
         "QEMU xHCI USB controller",
-        Support::Unsupported,
-        Validation::None,
+        Support::Native { driver: "xhci" },
+        Validation::Emulation,
     ),
     entry(
         0x1B36,
