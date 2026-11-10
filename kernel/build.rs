@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! Kernel build script: passes the linker script to the linker and compiles
 //! the C parts of the kernel (the LinuxKPI runtime and the Linux drivers

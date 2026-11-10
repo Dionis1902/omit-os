@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Omit OS contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# cargo-deny policy for the SDK crates, which programs under any licence
+# link: nothing copyleft in their dependency trees. The one exception is
+# omit-abi, the system call interface, whose licence carries an explicit
+# exception for exactly this use.
+
+[graph]
+exclude-dev = true
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# One list serves several crates; not every licence occurs in each.
+unused-allowed-license = "allow"
+
+[[licenses.exceptions]]
+crate = "omit-abi"
+allow = ["GPL-2.0-only WITH AdditionRef-OmitOS-syscall-note"]

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `cargo xtask` — the Omit OS build, image, run and test driver.
 //!
 //! Everything that goes beyond a plain `cargo build` lives here, in Rust,

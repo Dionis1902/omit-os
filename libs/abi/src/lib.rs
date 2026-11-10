@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OmitOS-syscall-note
 //! The Omit OS native system call ABI.
 //!
 //! # Calling convention (x86-64)

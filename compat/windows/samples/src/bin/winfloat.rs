@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Checks that SSE registers survive being preempted.
 //!
 //! `winfloat N [MS]` keeps values derived from `N` in two SSE registers

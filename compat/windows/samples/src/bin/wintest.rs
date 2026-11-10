@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Exercises the Windows API functions the compatibility layer provides
 //! and checks each result, including the documented error codes. Prints
 //! one line per group of checks and returns exit code 42 from the entry

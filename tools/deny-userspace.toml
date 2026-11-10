@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Omit OS contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# cargo-deny policy for user-space system components (the desktop, the
+# bundled programs, the Windows compatibility layer) and for host tools.
+# The kernel list plus Apache-2.0, MPL-2.0 and GPL-3.0-or-later.
+
+[graph]
+exclude-dev = true
+
+[licenses]
+allow = [
+    "GPL-2.0-or-later",
+    "GPL-3.0-or-later",
+    "MIT",
+    "Apache-2.0",
+    "MPL-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+]
+confidence-threshold = 0.9
+# One list serves several crates; not every licence occurs in each.
+unused-allowed-license = "allow"
+
+# Reached only through system calls; see the exception text in LICENSES/.
+[[licenses.exceptions]]
+crate = "omit-abi"
+allow = ["GPL-2.0-only WITH AdditionRef-OmitOS-syscall-note"]
+
+# The build tool links two kernel-side libraries (the archive format of
+# the initial ramdisk and the partition table code), so that images are
+# written by the code that reads them. The tool as a whole is therefore
+# distributed under GPL-2.0-only; it is not part of the system image.
+[[licenses.exceptions]]
+crate = "omit-vfs"
+allow = ["GPL-2.0-only"]
+
+[[licenses.exceptions]]
+crate = "omit-gpt"
+allow = ["GPL-2.0-only"]

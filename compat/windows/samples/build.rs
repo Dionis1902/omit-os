@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Linker settings for the Windows test programs: programs whose
 //! entry point is `mainCRTStartup`, as for programs built without the C
 //! runtime.

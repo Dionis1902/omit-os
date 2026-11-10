@@ -538,6 +538,20 @@ network stack, loadable drivers, a shell outside the kernel, and a Rust
 
 ## Licence
 
-GPL-2.0-only; see [`LICENSE`](LICENSE). The licence choice and the project
-name are provisional. Third-party code is listed in
-[`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
+One repository, several licences, by component — see [`COPYING`](COPYING)
+for the table and [`LICENSES/`](LICENSES) for the texts:
+
+- the kernel, its drivers, the boot loader and the Linux compatibility
+  layer are under **GPL-2.0-only**; the system call interface carries an
+  exception so that programs using the kernel through it can be under any
+  licence;
+- the desktop and bundled programs are under **GPL-3.0-or-later**;
+- the libraries other people's programs link, and the build tools, are
+  under **MIT OR Apache-2.0**;
+- documentation is under **CC-BY-SA-4.0**.
+
+Third-party code is listed in [`docs/THIRD_PARTY.md`](docs/THIRD_PARTY.md).
+Contributions need a sign-off; see [`CONTRIBUTING.md`](CONTRIBUTING.md).
+The project's name is not covered by these licences; see
+[`TRADEMARKS.md`](TRADEMARKS.md). The name is provisional. None of this
+has been reviewed by a lawyer.

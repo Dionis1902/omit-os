@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! PCI configuration space access through I/O ports 0xCF8/0xCFC
 //! ("configuration mechanism #1").

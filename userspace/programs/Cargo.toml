@@ -3,7 +3,8 @@ name = "omit-user-programs"
 description = "Small Omit OS user programs: demos and tests of the userspace interface"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

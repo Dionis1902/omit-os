@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Text conversion.
 //!
 //! Windows has two versions of every function that takes text: `...W`

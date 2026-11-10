@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! Keyboard and mouse events for the process that owns the display.
 //!

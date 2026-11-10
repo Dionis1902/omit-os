@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Self-checking test of the directory system calls: creates, renames and
 //! removes files and directories under the directory given as argument and
 //! verifies every step, including the errors that must be reported.

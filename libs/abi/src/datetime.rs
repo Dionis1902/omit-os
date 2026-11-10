@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-2.0-only WITH LicenseRef-OmitOS-syscall-note
 //! Calendar dates and times.
 //!
 //! The system counts time in seconds since 1970-01-01 00:00:00 UTC (the

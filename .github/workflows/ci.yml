@@ -41,6 +41,39 @@ jobs:
       - name: Host unit tests
         run: cargo test --locked
 
+  licensing:
+    name: Licensing (REUSE, per-component licences, dependencies, DCO)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The sign-off check looks at the commits being pushed.
+          fetch-depth: 0
+      - name: Install Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Install reuse and cargo-deny
+        run: |
+          pipx install reuse
+          cargo install cargo-deny --locked --version 0.20.2
+      - name: REUSE compliance
+        run: reuse lint
+      - name: Every source file carries its component's licence
+        run: python3 tools/check-licenses.py
+      - name: Dependency licences, per component policy
+        run: sh tools/check-deps.sh
+      - name: Developer Certificate of Origin sign-offs
+        env:
+          BEFORE: ${{ github.event.before }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          # A pull request is checked against its base, a push against
+          # what the branch pointed to before (if that is known here).
+          base="${BASE:-$BEFORE}"
+          if [ -z "$base" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+            base="$(cat tools/dco-baseline)"
+          fi
+          sh tools/check-dco.sh "$base" HEAD
+
   qemu:
     name: QEMU boot tests
     runs-on: ubuntu-24.04

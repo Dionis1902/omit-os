@@ -3,7 +3,7 @@ name = "omit-gfx"
 description = "Pixel drawing, text and a small window manager for Omit OS programs (no_std, host-tested)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 repository.workspace = true
 rust-version.workspace = true
 

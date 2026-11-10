@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! USB keyboards and mice on an xHCI host controller.
 //!

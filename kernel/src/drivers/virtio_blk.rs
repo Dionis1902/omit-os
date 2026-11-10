@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! VirtIO block device driver (VirtIO 1.x over PCI, "modern" interface).
 //!

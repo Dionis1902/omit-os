@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `winsample.dll` — a Windows library for testing the loader: it exports
 //! functions, has an initialisation routine, imports from `KERNEL32.dll`
 //! itself, and contains data that must be relocated.

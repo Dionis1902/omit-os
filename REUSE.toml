@@ -1,0 +1,43 @@
+# SPDX-FileCopyrightText: 2026 Omit OS contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# Licensing information for files that carry no header of their own.
+# Source files state their licence in their first lines; see COPYING for
+# which licence applies where.
+
+version = 1
+
+# Documentation, including the top-level documents and the screenshots.
+[[annotations]]
+path = ["README.md", "COPYING", "CONTRIBUTING.md", "TRADEMARKS.md", "docs/**", "drivers/linux/README.md", "compat/linux-kpi/README.md"]
+SPDX-FileCopyrightText = "2026 Omit OS contributors"
+SPDX-License-Identifier = "CC-BY-SA-4.0"
+
+# Build configuration and CI.
+[[annotations]]
+path = [
+    "Cargo.toml",
+    "Cargo.lock",
+    "**/Cargo.toml",
+    "rust-toolchain.toml",
+    ".gitignore",
+    ".cargo/**",
+    ".github/**",
+    "tools/dco-baseline",
+]
+SPDX-FileCopyrightText = "2026 Omit OS contributors"
+SPDX-License-Identifier = "MIT OR Apache-2.0"
+
+# Imported Linux driver code. The files are kept exactly as upstream has
+# them, including their own notices; three of them use the older spelling
+# "GPL-2.0+" of the identifier GPL-2.0-or-later, which is restated here
+# so that tools find the licence text.
+[[annotations]]
+path = "drivers/linux/misc/pvpanic/**"
+precedence = "override"
+SPDX-FileCopyrightText = [
+    "2013 Fujitsu",
+    "2018 ZTE",
+    "2021 Oracle",
+]
+SPDX-License-Identifier = "GPL-2.0-or-later"

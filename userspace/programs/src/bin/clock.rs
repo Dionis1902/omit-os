@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `clock` — a window that shows how long the system has been running.
 //!
 //! A second small program with a window of its own, drawn with the same

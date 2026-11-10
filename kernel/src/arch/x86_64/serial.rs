@@ -1,3 +1,4 @@
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
 // SPDX-License-Identifier: GPL-2.0-only
 //! 16550-compatible UART driver for the kernel console (COM1, 115200 8N1).
 //!

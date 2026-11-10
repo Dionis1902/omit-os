@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Points and rectangles in pixel coordinates. The origin is the top-left
 //! corner; x grows to the right and y downwards. Coordinates are signed so
 //! that things can be partly off-screen.

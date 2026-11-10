@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `pop` — a small game: click the discs before they shrink away.
 //!
 //! Discs appear at random places and shrink; a click on one scores a

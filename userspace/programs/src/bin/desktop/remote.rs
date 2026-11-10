@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! Windows of other programs.
 //!
 //! A program connects to the desktop's channel and asks for a window

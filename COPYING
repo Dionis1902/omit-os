@@ -1,0 +1,91 @@
+Omit OS — licensing overview
+============================
+
+Omit OS is one repository under several licences, one per kind of
+component. Every source file names its licence in its first lines
+(SPDX-License-Identifier); files that cannot carry a notice are covered
+by REUSE.toml. The full text of every licence is in the LICENSES/
+directory. This page is a summary in plain words, not a licence and not
+legal advice; where it and a file's own notice disagree, the notice
+counts.
+
+Which licence applies where
+---------------------------
+
+  Kernel side — GPL-2.0-only
+      kernel/                 the kernel, its drivers, the Linux
+                              compatibility runtime
+      compat/linux-kpi/       the Linux compatibility headers
+      shell/                  the shell (it is linked into the kernel)
+      boot/                   the UEFI boot loader
+      libs/acpi  libs/bootproto  libs/elf  libs/ext2  libs/fat
+      libs/gpt   libs/hwdb       libs/term libs/vfs
+
+  The system call interface — GPL-2.0-only WITH the Omit OS syscall note
+      libs/abi/               system call numbers, error codes and the
+                              structures exchanged with the kernel
+
+  Imported Linux drivers — as upstream (GPL-2.0-or-later)
+      drivers/linux/          unmodified files from the Linux kernel;
+                              their own notices apply and are not touched
+
+  User-space system components — GPL-3.0-or-later
+      userspace/programs/     the desktop and the bundled programs,
+                              including the Windows compatibility layer
+      compat/windows/pe/  compat/windows/win32/
+                              libraries of that layer
+
+  The SDK: what other people's programs link — MIT OR Apache-2.0
+      userspace/rt/           the runtime of every user program
+      libs/window/            the window protocol
+      libs/gfx/               drawing and text
+      libs/mm/                the memory allocator (also used by the
+                              kernel, under MIT)
+
+  Build tools, tests fixtures and CI — MIT OR Apache-2.0
+      tools/  .github/  compat/windows/samples/
+      Cargo.toml files, Cargo.lock and other build configuration
+
+  Documentation — CC-BY-SA-4.0
+      README.md, docs/, this file, CONTRIBUTING.md, TRADEMARKS.md
+
+  Third-party material keeps its own licence. The console and desktop
+  font is Noto Sans Mono (SIL Open Font License 1.1), which comes in
+  through the noto-sans-mono-bitmap crate and is not stored in this
+  repository. docs/THIRD_PARTY.md lists every third-party crate.
+
+The system call exception
+-------------------------
+
+A program that uses the kernel only through its system calls and the
+inter-process communication it provides is not a derived work of the
+kernel, and may be under any licence. The files in libs/abi/, which a
+program has to build against to make those calls, carry an explicit
+exception saying so (LICENSES/LicenseRef-OmitOS-syscall-note.txt; it is
+modelled on the Linux kernel's). The exception covers nothing else:
+code that copies or links other kernel-side code is under GPL-2.0-only.
+
+Why it is divided this way
+--------------------------
+
+The kernel can run unmodified Linux drivers, which are mostly under
+GPL-2.0-only; everything linked into the kernel must therefore be
+compatible with that licence. GPL-3.0, LGPL-3.0, AGPL and
+Apache-2.0-only code is not, and must not be linked into it. Code under
+"MIT OR Apache-2.0" is used there under MIT.
+
+Kernel and user space share no source files: they meet at the system
+call interface. Code must not be copied between components whose
+licences are incompatible (for example from the kernel into the SDK, or
+from the desktop into the kernel).
+
+The build tool in tools/ links two kernel-side libraries (libs/vfs and
+libs/gpt), so the tool as built is a GPL-2.0-only work, although its own
+source files are under MIT OR Apache-2.0. It is not part of the system
+image.
+
+Names and logos
+---------------
+
+The licences above cover code and documentation. They do not grant any
+right to the project's name; see TRADEMARKS.md.

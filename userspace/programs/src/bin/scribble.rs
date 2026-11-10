@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! `scribble` — a small drawing program with its own window.
 //!
 //! Hold the left mouse button and move to draw. Keys: `c` clears, `1` to

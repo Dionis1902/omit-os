@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The window protocol: how a program with a window talks to the desktop.
 //!
 //! A program connects to the channel [`CHANNEL`] and sends

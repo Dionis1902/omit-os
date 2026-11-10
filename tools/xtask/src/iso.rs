@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Minimal ISO 9660 + El Torito writer.
 //!
 //! Produces a CD/DVD image that UEFI firmware can boot: the El Torito boot

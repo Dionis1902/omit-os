@@ -3,7 +3,8 @@ name = "omit-shell"
 description = "The Omit OS built-in command shell (no_std + alloc)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-2.0-only"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

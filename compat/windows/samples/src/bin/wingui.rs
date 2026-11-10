@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! A graphical Windows program in the classic shape: a window class, a
 //! window, a message loop and a window procedure that paints and reacts
 //! to the keyboard and the mouse. It uses only documented functions of

@@ -3,7 +3,8 @@ name = "omit-win-sample-plugin"
 description = "winplugin.dll: a Windows library that itself uses winsample.dll, loaded on request; built for x86_64-pc-windows-msvc"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

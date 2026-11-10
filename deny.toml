@@ -1,0 +1,46 @@
+# SPDX-FileCopyrightText: 2026 Omit OS contributors
+# SPDX-License-Identifier: MIT OR Apache-2.0
+#
+# cargo-deny policy for what is linked into the kernel and the boot
+# loader: only licences compatible with GPL-2.0-only. See COPYING and
+# CONTRIBUTING.md. Checked per crate:
+#
+#     cargo deny --manifest-path kernel/Cargo.toml check licenses
+#     cargo deny --manifest-path boot/Cargo.toml check licenses
+#
+# The other policies are tools/deny-userspace.toml and tools/deny-sdk.toml.
+
+[graph]
+# What is linked into the shipped binaries; test-only dependencies of the
+# libraries are not.
+exclude-dev = true
+
+[licenses]
+allow = [
+    "GPL-2.0-only",
+    "GPL-2.0-or-later",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    # Crates offered under "MIT OR Apache-2.0" are used under MIT; with
+    # MIT allowed, cargo-deny accepts them without Apache-2.0 being
+    # listed, and rejects crates that are Apache-2.0 only.
+]
+confidence-threshold = 0.9
+# One list serves several crates; not every licence occurs in each.
+unused-allowed-license = "allow"
+
+# The system call interface: GPL-2.0-only with the project's exception.
+[[licenses.exceptions]]
+crate = "omit-abi"
+allow = ["GPL-2.0-only WITH AdditionRef-OmitOS-syscall-note"]
+
+# The boot loader (not the kernel) links `ucs2` through the `uefi` crate.
+# MPL-2.0 is compatible with GPL-2.0 (section 3.3 of the MPL) but is not
+# on the kernel list; it is allowed for this one crate only.
+[[licenses.exceptions]]
+crate = "ucs2"
+allow = ["MPL-2.0"]

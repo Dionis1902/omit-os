@@ -3,7 +3,7 @@ name = "xtask"
 description = "Omit OS build, image, run and test driver"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "MIT OR Apache-2.0"
 publish = false
 
 [dependencies]

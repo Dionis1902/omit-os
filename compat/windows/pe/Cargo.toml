@@ -3,7 +3,8 @@ name = "omit-pe"
 description = "Safe parser and image builder for PE32+ (64-bit Windows) executables (no_std)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

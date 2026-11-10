@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Size-class heap allocator.
 //!
 //! Serves arbitrary [`Layout`]s on top of a source of whole pages:

@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: GPL-3.0-or-later
 //! The parts of the Windows API layer that do not depend on the machine
 //! they run on, kept separate so that they can be tested on the build
 //! host: error codes, translation of paths and command lines, text

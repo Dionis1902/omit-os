@@ -3,7 +3,8 @@ name = "omit-bootproto"
 description = "Boot protocol shared by the Omit OS UEFI loader and kernel"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-2.0-only"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

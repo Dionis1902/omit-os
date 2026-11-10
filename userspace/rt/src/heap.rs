@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! The program's heap: the global allocator behind the `alloc` crate.
 //!
 //! The same size-class allocator the kernel uses (`omit_mm::Heap`), fed

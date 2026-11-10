@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Partition layout of the boot disk image: a GUID partition table with a
 //! single EFI System Partition. The table itself is built by the
 //! `omit-gpt` library, which the kernel's installer uses too. All

@@ -3,7 +3,8 @@ name = "omit-win32"
 description = "Platform-independent parts of the Windows API layer: error codes, path and command-line translation, handles (no_std)"
 version.workspace = true
 edition.workspace = true
-license.workspace = true
+license = "GPL-3.0-or-later"
+publish = false
 repository.workspace = true
 rust-version.workspace = true
 

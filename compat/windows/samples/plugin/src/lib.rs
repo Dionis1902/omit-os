@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! `winplugin.dll` — a Windows library that is not imported by any
 //! program but loaded on request with `LoadLibrary`, and that itself
 //! imports from another library, `winsample.dll`.

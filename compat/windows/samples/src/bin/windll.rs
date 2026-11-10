@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Tests libraries (DLLs): one imported by the program, `winsample.dll`,
 //! and one loaded on request, `winplugin.dll`, which itself needs the
 //! first.

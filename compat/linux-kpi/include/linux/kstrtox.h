@@ -1,3 +1,4 @@
+/* SPDX-FileCopyrightText: 2026 Omit OS contributors */
 /* SPDX-License-Identifier: GPL-2.0-only */
 /* Omit OS LinuxKPI: <linux/kstrtox.h> — strict string-to-number parsing. */
 #ifndef _OMIT_LINUXKPI_KSTRTOX_H

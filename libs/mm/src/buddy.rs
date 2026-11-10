@@ -1,4 +1,5 @@
-// SPDX-License-Identifier: GPL-2.0-only
+// SPDX-FileCopyrightText: 2026 Omit OS contributors
+// SPDX-License-Identifier: MIT OR Apache-2.0
 //! Binary buddy allocator for physical page frames.
 //!
 //! Memory is handed out in blocks of `2^order` frames, naturally aligned.
