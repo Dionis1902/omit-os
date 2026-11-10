@@ -23,10 +23,10 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{RefCell, UnsafeCell};
 
 use omit_pe::{ExportTarget, Pe, SUBSYSTEM_CONSOLE, SUBSYSTEM_GUI, Symbol};
 use omit_rt::abi::protect;
+use omit_rt::sync::Mutex;
 
 use crate::kernel32;
 
@@ -45,21 +45,15 @@ struct Module {
     exports: Vec<(Option<String>, u32, usize)>,
 }
 
-/// The loaded images; the program itself is the first. Single-threaded
-/// access as for [`kernel32`]'s state; no borrow is held while code of a
-/// loaded image runs.
-struct Registry(UnsafeCell<RefCell<Vec<Module>>>);
-
-// SAFETY: an Omit OS process has exactly one thread.
-unsafe impl Sync for Registry {}
-
-static MODULES: Registry = Registry(UnsafeCell::new(RefCell::new(Vec::new())));
+/// The loaded images; the program itself is the first. The lock is not
+/// held while code of a loaded image runs, and loading takes it in short
+/// steps: two threads calling `LoadLibrary` for the same new library at
+/// the same moment could both load it. Programs serialise library
+/// loading themselves in practice; this is a known gap.
+static MODULES: Mutex<Vec<Module>> = Mutex::new(Vec::new());
 
 fn with_modules<R>(f: impl FnOnce(&mut Vec<Module>) -> R) -> R {
-    // SAFETY: single-threaded (see `Registry`); the reference does not
-    // escape.
-    let cell = unsafe { &*MODULES.0.get() };
-    f(&mut cell.borrow_mut())
+    f(&mut MODULES.lock())
 }
 
 /// Why a load failed.

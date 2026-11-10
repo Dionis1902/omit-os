@@ -157,6 +157,7 @@ const WINDOWS_PROGRAMS: &[&str] = &[
     "winplugin.dll",
     "winsample.dll",
     "wintest.exe",
+    "winthread.exe",
 ];
 
 /// The target the Windows test programs are built for.
@@ -659,7 +660,7 @@ const BOOT_TESTS: &[BootTest] = &[
             ),
             (
                 "ls /bin",
-                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\n",
+                "\ncat\ncrash\ndesktop\necho\nfileops\nhello\nls\nmemtest\npipetest\nrun\nsleeper\nspin\nsyscheck\ntee\nthreadtest\nwindll.exe\nwinfloat.exe\nwinhello.exe\nwinmissing.exe\nwinplugin.dll\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
             ),
             // A program that misbehaves is stopped; the shell carries on.
             (
@@ -755,7 +756,10 @@ const BOOT_TESTS: &[BootTest] = &[
             ("cat /copy1 /copy2", "\none two three\none two three\n"),
             ("ls /bin | tee /listing > /dev-null", ""),
             ("cat < /listing | cat | cat > /listing2", ""),
-            ("cat /listing2", "\nwinrun\nwinsample.dll\nwintest.exe\n"),
+            (
+                "cat /listing2",
+                "\nwinrun\nwinsample.dll\nwintest.exe\nwinthread.exe\n",
+            ),
             // A Windows program at the end of a pipeline and at its start.
             (
                 "echo to windows | winhello.exe",
@@ -915,6 +919,14 @@ const BOOT_TESTS: &[BootTest] = &[
                 "windll.exe",
                 "[winsample.dll] printed by the library through its own imports\r\nwindll: program file: C:\\bin\\windll.exe\r\nwindll: all 33 checks passed\r\n",
             ),
+            // Threads in a Windows program: critical sections, events,
+            // thread-local storage, exit codes; a thread still running
+            // when the program returns ends with it.
+            (
+                "winthread.exe",
+                "winthread: 4 threads counted to 20000\r\nwinthread: events ok\r\nwinthread: all",
+            ),
+            ("ps", "PID"),
             // A library is not a program.
             (
                 "winrun /bin/winsample.dll",
@@ -923,7 +935,7 @@ const BOOT_TESTS: &[BootTest] = &[
             // Missing functions are reported before the program starts.
             (
                 "winmissing.exe",
-                "winrun: /bin/winmissing.exe: needs kernel32.dll!CreateThread, which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: 2 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
+                "winrun: /bin/winmissing.exe: needs kernel32.dll!GetSystemTimeAsFileTime, which is not available\nwinrun: /bin/winmissing.exe: needs user32.dll (library not found), which is not available\nwinrun: /bin/winmissing.exe: 2 of the things it needs are missing\nwinmissing.exe: exited with status 127\n",
             ),
             // Files that are not 64-bit Windows programs.
             ("echo MZ-but-not-really > /fake.exe", ""),

@@ -16,8 +16,11 @@
 //! * File names are case-sensitive; the directory tree is drive `C:`.
 //! * A file is opened either for reading or for writing, not both, and
 //!   there is no seeking.
-//! * There is one thread, no environment, and no way to tell whether
-//!   standard output is the console or a file; it is reported as console.
+//! * Threads exist, but libraries are not told about them (no
+//!   `DLL_THREAD_ATTACH`), threads cannot be created suspended, and a
+//!   process that ends through its last thread reports exit code 0.
+//! * There is no environment, and no way to tell whether standard output
+//!   is the console or a file; it is reported as console.
 //! * Console input ends lines with `\n`, not `\r\n`.
 
 #![allow(
@@ -27,14 +30,16 @@
 
 use alloc::alloc::{alloc, alloc_zeroed, dealloc, realloc};
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use core::alloc::Layout;
-use core::cell::{RefCell, UnsafeCell};
 use core::ffi::{CStr, c_char, c_void};
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU32, Ordering};
 
 use omit_pe::Symbol;
 use omit_rt::abi::{self, Errno, KIND_DIRECTORY, open, protect};
+use omit_rt::sync::Mutex;
+use omit_rt::thread::JoinHandle;
 use omit_win32::error::*;
 use omit_win32::handle::{Handle, INVALID_HANDLE, Table};
 use omit_win32::path::{self, Target};
@@ -69,6 +74,67 @@ enum Object {
         path: String,
         writable: bool,
     },
+    Thread {
+        shared: Arc<ThreadShared>,
+        handle: JoinHandle<()>,
+    },
+    Event(Arc<Event>),
+}
+
+/// What a thread and the holders of its handle share.
+struct ThreadShared {
+    id: u32,
+    /// `STILL_ACTIVE` until the thread ends.
+    exit_code: AtomicU32,
+}
+
+/// `STILL_ACTIVE`: the "exit code" of a thread that has not ended.
+const STILL_ACTIVE: u32 = 259;
+
+/// An event object: a flag threads can wait for.
+struct Event {
+    /// 1 while signalled. Also the futex the waiters sleep on.
+    signalled: AtomicU32,
+    /// Manual-reset events stay signalled until reset and release every
+    /// waiter; auto-reset events release one waiter and reset themselves.
+    manual: bool,
+}
+
+impl Event {
+    /// Waits until the event is signalled (consuming the signal if it is
+    /// an auto-reset event) or the time has passed.
+    fn wait(&self, timeout_ms: Option<u64>) -> bool {
+        let deadline = timeout_ms.map(|timeout| omit_rt::uptime_ms().saturating_add(timeout));
+        loop {
+            let acquired = if self.manual {
+                self.signalled.load(Ordering::Acquire) == 1
+            } else {
+                self.signalled
+                    .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            };
+            if acquired {
+                return true;
+            }
+            let remaining = match deadline {
+                Some(deadline) => {
+                    let now = omit_rt::uptime_ms();
+                    if now >= deadline {
+                        return false;
+                    }
+                    Some(deadline - now)
+                }
+                None => None,
+            };
+            // Sleeps only while the event is still unsignalled.
+            let _ = omit_rt::futex_wait(&self.signalled, 0, remaining);
+        }
+    }
+
+    fn set(&self) {
+        self.signalled.store(1, Ordering::Release);
+        omit_rt::futex_wake(&self.signalled, if self.manual { usize::MAX } else { 1 });
+    }
 }
 
 struct State {
@@ -79,26 +145,23 @@ struct State {
     command_line_wide: Vec<u16>,
     /// Regions handed out by `VirtualAlloc`: base and size.
     regions: Vec<(usize, usize)>,
+    /// Address of the process environment block.
+    peb: usize,
+    /// The thread environment block of every thread ever started (they
+    /// are not released), for clearing thread-local storage slots.
+    tebs: Vec<usize>,
+    /// Bit `n` set: thread-local storage index `n` is allocated.
+    tls_used: u64,
+    /// Stack size for threads that do not ask for one.
+    default_stack: usize,
 }
 
-/// Process-wide state. Omit OS processes have exactly one thread, and the
-/// Windows program can only reach this state by calling the functions
-/// below, so access is never concurrent; the `RefCell` turns accidental
-/// re-entrancy into a panic.
-struct Global(UnsafeCell<RefCell<Option<State>>>);
-
-// SAFETY: see the type's documentation — a process has a single thread.
-unsafe impl Sync for Global {}
-
-static STATE: Global = Global(UnsafeCell::new(RefCell::new(None)));
-/// Address of the thread environment block.
-static TEB: AtomicUsize = AtomicUsize::new(0);
+/// Process-wide state, shared by all threads of the Windows program. The
+/// lock is never held while code of the program or of a library runs.
+static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
-    // SAFETY: single-threaded (see `Global`); the reference does not
-    // escape this function.
-    let cell = unsafe { &*STATE.0.get() };
-    let mut state = cell.borrow_mut();
+    let mut state = STATE.lock();
     f(state.as_mut().expect("kernel32::init has run"))
 }
 
@@ -107,6 +170,8 @@ pub struct Setup<'a> {
     pub image_base: usize,
     pub stack_top: usize,
     pub stack_limit: usize,
+    /// Stack size the program asked for; also used for its threads.
+    pub stack_size: usize,
     /// The program's path followed by its arguments.
     pub arguments: &'a [&'a str],
 }
@@ -121,7 +186,40 @@ const TEB_PROCESS_ID: usize = 0x40;
 const TEB_THREAD_ID: usize = 0x48;
 const TEB_PEB: usize = 0x60;
 const TEB_LAST_ERROR: usize = 0x68;
+/// The 64 thread-local storage slots.
+const TEB_TLS_SLOTS: usize = 0x1480;
+const TLS_SLOT_COUNT: u32 = 64;
+/// Beyond the end of the real structure, inside the two pages allocated
+/// for it: this implementation's own per-thread pointer (see
+/// [`ThreadShared`]).
+const TEB_PRIVATE_THREAD: usize = 0x1F00;
+const TEB_SIZE: usize = 2 * PAGE;
 const PEB_IMAGE_BASE: usize = 0x10;
+
+/// Allocates and fills in a thread environment block. The caller makes it
+/// the thread's own with `set_thread_pointer`.
+fn create_teb(
+    peb: usize,
+    stack_top: usize,
+    stack_limit: usize,
+    thread_id: usize,
+) -> Result<usize, Errno> {
+    let teb = omit_rt::map(TEB_SIZE, PAGE)? as usize;
+    let fields = [
+        (TEB_STACK_BASE, stack_top),
+        (TEB_STACK_LIMIT, stack_limit),
+        (TEB_SELF, teb),
+        (TEB_PROCESS_ID, omit_rt::getpid() as usize),
+        (TEB_THREAD_ID, thread_id),
+        (TEB_PEB, peb),
+    ];
+    for (offset, value) in fields {
+        // SAFETY: every offset lies inside the pages just mapped, which
+        // are writable and used by nothing else, and is 8-byte aligned.
+        unsafe { ((teb + offset) as *mut usize).write(value) };
+    }
+    Ok(teb)
+}
 
 /// Prepares the process for running a Windows program: standard handles,
 /// command line, and the thread environment block that Windows code
@@ -143,48 +241,58 @@ pub fn init(setup: Setup<'_>) -> Result<(), Errno> {
     let mut command_line = line.into_bytes();
     command_line.push(0);
 
-    // Two pages for the TEB, one for the PEB.
-    let block = omit_rt::map(3 * PAGE, PAGE)? as usize;
-    let peb = block + 2 * PAGE;
-    let pid = omit_rt::getpid() as usize;
-    let fields = [
-        (block + TEB_STACK_BASE, setup.stack_top),
-        (block + TEB_STACK_LIMIT, setup.stack_limit),
-        (block + TEB_SELF, block),
-        (block + TEB_PROCESS_ID, pid),
-        (block + TEB_THREAD_ID, pid),
-        (block + TEB_PEB, peb),
-        (peb + PEB_IMAGE_BASE, setup.image_base),
-    ];
-    for (address, value) in fields {
-        // SAFETY: every address lies inside the three pages just mapped,
-        // which are writable and used by nothing else, and is 8-byte
-        // aligned.
-        unsafe { (address as *mut usize).write(value) };
-    }
-    omit_rt::set_thread_pointer(block)?;
-    TEB.store(block, Ordering::Relaxed);
+    let peb = omit_rt::map(PAGE, PAGE)? as usize;
+    // SAFETY: inside the page just mapped, 8-byte aligned.
+    unsafe { ((peb + PEB_IMAGE_BASE) as *mut usize).write(setup.image_base) };
+    // The first thread's ID is the process ID, as tools expect.
+    let teb = create_teb(
+        peb,
+        setup.stack_top,
+        setup.stack_limit,
+        omit_rt::getpid() as usize,
+    )?;
+    omit_rt::set_thread_pointer(teb)?;
 
-    // SAFETY: single-threaded (see `Global`); no borrow is active.
-    let cell = unsafe { &*STATE.0.get() };
-    *cell.borrow_mut() = Some(State {
+    *STATE.lock() = Some(State {
         handles,
         standard,
         image_base: setup.image_base,
         command_line,
         command_line_wide,
         regions: Vec::new(),
+        peb,
+        tebs: alloc::vec![teb],
+        tls_used: 0,
+        default_stack: setup.stack_size,
     });
     Ok(())
 }
 
+/// The calling thread's environment block: Windows code finds it through
+/// `GS`, and so does this.
+fn teb() -> usize {
+    let teb: usize;
+    // SAFETY: every thread that runs Windows code has had its `GS` base
+    // set to a block whose field at 0x30 holds the block's own address
+    // (`create_teb`); the instruction only reads that field.
+    unsafe {
+        core::arch::asm!(
+            "mov {}, gs:[0x30]",
+            out(reg) teb,
+            options(nostack, readonly, preserves_flags),
+        );
+    }
+    teb
+}
+
 fn last_error_slot() -> *mut u32 {
-    (TEB.load(Ordering::Relaxed) + TEB_LAST_ERROR) as *mut u32
+    (teb() + TEB_LAST_ERROR) as *mut u32
 }
 
 fn set_last_error(code: u32) {
-    // SAFETY: the TEB was mapped by `init` and stays mapped; the field is
-    // 4-byte aligned. Windows keeps the last error in the same place.
+    // SAFETY: the TEB stays mapped for the life of the process; the field
+    // is 4-byte aligned. Windows keeps the last error in the same place,
+    // per thread.
     unsafe { last_error_slot().write(code) };
 }
 
@@ -263,10 +371,10 @@ extern "win64" fn GetCurrentProcessId() -> u32 {
     omit_rt::getpid() as u32
 }
 
-/// `GetCurrentThreadId`: the process has one thread; its ID is the
-/// process ID.
+/// `GetCurrentThreadId`.
 extern "win64" fn GetCurrentThreadId() -> u32 {
-    omit_rt::getpid() as u32
+    // SAFETY: the field was written by `create_teb` and never changes.
+    unsafe { ((teb() + TEB_THREAD_ID) as *const usize).read() as u32 }
 }
 
 /// `GetLastError`.
@@ -825,6 +933,12 @@ extern "win64" fn CloseHandle(handle: Handle) -> Bool {
             Ok(()) => TRUE,
             Err(errno) => fail_errno(errno),
         },
+        Some(Object::Thread { handle, .. }) => {
+            // The thread itself is not affected. If it has ended, its
+            // stack can go; otherwise it keeps it.
+            handle.reclaim();
+            TRUE
+        }
         Some(_) => TRUE,
         None => fail(ERROR_INVALID_HANDLE),
     }
@@ -1174,9 +1288,14 @@ extern "win64" fn GetFileType(handle: Handle) -> u32 {
             set_last_error(ERROR_SUCCESS);
             FILE_TYPE_DISK
         }
-        Some(_) => {
+        Some(Object::ConsoleInput | Object::ConsoleOutput(_) | Object::Null) => {
             set_last_error(ERROR_SUCCESS);
             FILE_TYPE_CHAR
+        }
+        // Not a file of any kind.
+        Some(Object::Thread { .. } | Object::Event(_)) => {
+            set_last_error(ERROR_INVALID_HANDLE);
+            0
         }
         None => {
             set_last_error(ERROR_INVALID_HANDLE);
@@ -1326,6 +1445,493 @@ unsafe extern "win64" fn GetFileAttributesA(name: *const c_char) -> u32 {
 }
 
 // ---------------------------------------------------------------------
+// Threads
+// ---------------------------------------------------------------------
+
+/// `INFINITE`: no timeout.
+const INFINITE: u32 = u32::MAX;
+const WAIT_OBJECT_0: u32 = 0;
+const WAIT_TIMEOUT: u32 = 258;
+const WAIT_FAILED: u32 = u32::MAX;
+
+/// Source of thread IDs for threads other than the first.
+static NEXT_THREAD_ID: AtomicU32 = AtomicU32::new(0x1000);
+
+/// The calling thread's shared record, if it was created by
+/// `CreateThread` (the program's first thread has none).
+fn current_thread_shared() -> Option<&'static ThreadShared> {
+    // SAFETY: the slot is inside the thread's own TEB and holds either
+    // zero or a pointer from `Arc::into_raw` that is never released, so
+    // the record lives as long as the process.
+    unsafe {
+        let pointer = ((teb() + TEB_PRIVATE_THREAD) as *const *const ThreadShared).read();
+        pointer.as_ref()
+    }
+}
+
+/// `CreateThread`: starts a thread at `start` with `parameter`. The stack
+/// size is honoured within 64 KiB – 8 MiB (zero means the program's own
+/// default). Creation flags are not supported: a thread always starts
+/// running. Security attributes are ignored.
+///
+/// # Safety
+///
+/// `start` must be a function with the thread start routine signature
+/// that is safe to call with `parameter`; `id` must be null or valid for
+/// a write.
+unsafe extern "win64" fn CreateThread(
+    _security: *mut c_void,
+    stack_size: usize,
+    start: usize,
+    parameter: usize,
+    flags: u32,
+    id: *mut u32,
+) -> Handle {
+    let refuse = |code| {
+        set_last_error(code);
+        0
+    };
+    if start == 0 {
+        return refuse(ERROR_INVALID_PARAMETER);
+    }
+    if flags != 0 {
+        return refuse(ERROR_NOT_SUPPORTED);
+    }
+    let (peb, default_stack) = with_state(|state| (state.peb, state.default_stack));
+    let stack_size = if stack_size == 0 {
+        default_stack
+    } else {
+        stack_size
+    }
+    .clamp(64 * 1024, 8 * 1024 * 1024)
+    .next_multiple_of(PAGE);
+
+    // Everything the thread needs is prepared here, so that failures are
+    // reported to the caller rather than discovered by the new thread.
+    let Ok(stack) = omit_rt::map(stack_size + PAGE, PAGE) else {
+        return refuse(ERROR_NOT_ENOUGH_MEMORY);
+    };
+    // SAFETY: just mapped and unused: the page below the stack is removed
+    // so that an overflow faults.
+    let _ = unsafe { omit_rt::unmap(stack, PAGE) };
+    let stack_limit = stack as usize + PAGE;
+    let stack_top = stack_limit + stack_size;
+    let release_stack = || {
+        // SAFETY: the stack was never used.
+        let _ = unsafe { omit_rt::unmap(stack_limit as *mut u8, stack_size) };
+    };
+
+    let shared = Arc::new(ThreadShared {
+        id: NEXT_THREAD_ID.fetch_add(4, Ordering::Relaxed),
+        exit_code: AtomicU32::new(STILL_ACTIVE),
+    });
+    let Ok(teb) = create_teb(peb, stack_top, stack_limit, shared.id as usize) else {
+        release_stack();
+        return refuse(ERROR_NOT_ENOUGH_MEMORY);
+    };
+    // The thread finds its record through its TEB (for `ExitThread`).
+    // This reference is never released, like the TEB itself.
+    // SAFETY: inside the TEB just mapped, 8-byte aligned.
+    unsafe {
+        ((teb + TEB_PRIVATE_THREAD) as *mut *const ThreadShared)
+            .write(Arc::into_raw(shared.clone()));
+    }
+    with_state(|state| state.tebs.push(teb));
+
+    let in_thread = shared.clone();
+    let spawned = omit_rt::thread::spawn(move || {
+        if omit_rt::set_thread_pointer(teb).is_err() {
+            in_thread.exit_code.store(u32::MAX, Ordering::Release);
+            return;
+        }
+        // SAFETY: the caller of `CreateThread` vouches for the start
+        // routine; it runs on the stack prepared above, as Windows would
+        // run it, with its parameter as the only argument.
+        let code = unsafe { crate::call_on_stack(start, stack_top, [parameter, 0, 0]) };
+        in_thread.exit_code.store(code as u32, Ordering::Release);
+    });
+    let handle = match spawned {
+        Ok(handle) => handle,
+        Err(_) => {
+            release_stack();
+            return refuse(ERROR_NOT_ENOUGH_MEMORY);
+        }
+    };
+    let thread_id = shared.id;
+    match with_state(|state| state.handles.insert(Object::Thread { shared, handle })) {
+        Ok(handle) => {
+            if !id.is_null() {
+                // SAFETY: guaranteed by the caller.
+                unsafe { id.write_unaligned(thread_id) };
+            }
+            handle
+        }
+        // The thread runs, but there is no handle to give out.
+        Err(_) => refuse(ERROR_TOO_MANY_OPEN_FILES),
+    }
+}
+
+/// `ExitThread`: ends the calling thread with the given exit code.
+extern "win64" fn ExitThread(code: u32) -> ! {
+    if let Some(shared) = current_thread_shared() {
+        shared.exit_code.store(code, Ordering::Release);
+    }
+    omit_rt::thread::exit()
+}
+
+/// `GetExitCodeThread`: the thread's exit code, or `STILL_ACTIVE` (259)
+/// while it runs.
+///
+/// # Safety
+///
+/// `code` must be null or valid for a write.
+unsafe extern "win64" fn GetExitCodeThread(handle: Handle, code: *mut u32) -> Bool {
+    let value = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Thread { shared, handle }) => {
+            // The code is stored just before the thread ends; report it
+            // only once the thread really has.
+            Some(if handle.is_finished() {
+                shared.exit_code.load(Ordering::Acquire)
+            } else {
+                STILL_ACTIVE
+            })
+        }
+        _ => None,
+    });
+    match value {
+        Some(_) if code.is_null() => fail(ERROR_NOACCESS),
+        Some(value) => {
+            // SAFETY: guaranteed by the caller.
+            unsafe { code.write_unaligned(value) };
+            TRUE
+        }
+        None => fail(ERROR_INVALID_HANDLE),
+    }
+}
+
+/// `GetCurrentThread`: the pseudo-handle for the calling thread. It is
+/// not accepted by the wait functions here.
+extern "win64" fn GetCurrentThread() -> Handle {
+    usize::MAX - 1
+}
+
+/// `SwitchToThread`: lets another thread run.
+extern "win64" fn SwitchToThread() -> Bool {
+    omit_rt::yield_now();
+    TRUE
+}
+
+/// `WaitForSingleObject`: waits until a thread has ended or an event is
+/// signalled, or until `milliseconds` have passed (`INFINITE`: no limit).
+/// Returns `WAIT_OBJECT_0` (0), `WAIT_TIMEOUT` (258) or `WAIT_FAILED`.
+extern "win64" fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32 {
+    enum Target {
+        Thread(omit_rt::thread::Waiter),
+        Event(Arc<Event>),
+    }
+    // The lock is released before waiting.
+    let target = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Thread { handle, .. }) => Some(Target::Thread(handle.waiter())),
+        Some(Object::Event(event)) => Some(Target::Event(event.clone())),
+        _ => None,
+    });
+    let timeout = (milliseconds != INFINITE).then_some(u64::from(milliseconds));
+    let signalled = match target {
+        Some(Target::Thread(waiter)) => waiter.wait(timeout),
+        Some(Target::Event(event)) => event.wait(timeout),
+        None => {
+            set_last_error(ERROR_INVALID_HANDLE);
+            return WAIT_FAILED;
+        }
+    };
+    if signalled {
+        WAIT_OBJECT_0
+    } else {
+        WAIT_TIMEOUT
+    }
+}
+
+// ---------------------------------------------------------------------
+// Events
+// ---------------------------------------------------------------------
+
+/// `CreateEventA`: creates an unnamed event. Named events (shared between
+/// processes on Windows) are not supported.
+///
+/// # Safety
+///
+/// `name` is only compared with null.
+unsafe extern "win64" fn CreateEventA(
+    _security: *mut c_void,
+    manual_reset: Bool,
+    initial_state: Bool,
+    name: *const c_char,
+) -> Handle {
+    if !name.is_null() {
+        set_last_error(ERROR_NOT_SUPPORTED);
+        return 0;
+    }
+    let event = Arc::new(Event {
+        signalled: AtomicU32::new(u32::from(initial_state != FALSE)),
+        manual: manual_reset != FALSE,
+    });
+    match with_state(|state| state.handles.insert(Object::Event(event))) {
+        Ok(handle) => {
+            set_last_error(ERROR_SUCCESS);
+            handle
+        }
+        Err(_) => {
+            set_last_error(ERROR_TOO_MANY_OPEN_FILES);
+            0
+        }
+    }
+}
+
+fn with_event(handle: Handle, action: impl FnOnce(&Event)) -> Bool {
+    let event = with_state(|state| match state.handles.get(handle) {
+        Some(Object::Event(event)) => Some(event.clone()),
+        _ => None,
+    });
+    match event {
+        Some(event) => {
+            action(&event);
+            TRUE
+        }
+        None => fail(ERROR_INVALID_HANDLE),
+    }
+}
+
+/// `SetEvent`: signals the event. A manual-reset event releases every
+/// waiter and stays signalled; an auto-reset event releases one.
+extern "win64" fn SetEvent(handle: Handle) -> Bool {
+    with_event(handle, Event::set)
+}
+
+/// `ResetEvent`: makes the event unsignalled.
+extern "win64" fn ResetEvent(handle: Handle) -> Bool {
+    with_event(handle, |event| event.signalled.store(0, Ordering::Release))
+}
+
+// ---------------------------------------------------------------------
+// Critical sections
+// ---------------------------------------------------------------------
+
+/// `CRITICAL_SECTION`. The program provides the memory (40 bytes) and
+/// must treat it as opaque; the fields have the documented names and
+/// sizes, and this implementation gives them its own meaning: `lock` is a
+/// futex word (0 free, 1 held, 2 held with waiters), `owner` the ID of
+/// the holding thread, `recursion` how many times it entered.
+#[repr(C)]
+struct CriticalSection {
+    debug_info: usize,
+    lock: AtomicU32,
+    recursion: u32,
+    owner: usize,
+    semaphore: usize,
+    spin_count: usize,
+}
+
+const _: () = assert!(size_of::<CriticalSection>() == 40);
+
+/// `InitializeCriticalSection`.
+///
+/// # Safety
+///
+/// `section` must point to 40 writable bytes that no thread is using as a
+/// critical section.
+unsafe extern "win64" fn InitializeCriticalSection(section: *mut CriticalSection) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { section.write_bytes(0, 1) };
+}
+
+/// `InitializeCriticalSectionAndSpinCount`: the spin count only matters
+/// with several processors and is ignored.
+///
+/// # Safety
+///
+/// As for [`InitializeCriticalSection`].
+unsafe extern "win64" fn InitializeCriticalSectionAndSpinCount(
+    section: *mut CriticalSection,
+    _spin_count: u32,
+) -> Bool {
+    // SAFETY: same contract.
+    unsafe { InitializeCriticalSection(section) };
+    TRUE
+}
+
+/// `DeleteCriticalSection`.
+///
+/// # Safety
+///
+/// `section` must be an initialised critical section that no thread
+/// holds or waits for.
+unsafe extern "win64" fn DeleteCriticalSection(section: *mut CriticalSection) {
+    // SAFETY: guaranteed by the caller.
+    unsafe { section.write_bytes(0, 1) };
+}
+
+/// Takes the section for the calling thread, which does not hold it.
+///
+/// # Safety
+///
+/// `section` must be an initialised critical section.
+unsafe fn take_section(section: *mut CriticalSection, me: usize, wait: bool) -> bool {
+    // SAFETY: the lock word is an atomic shared by all threads; the other
+    // fields are only written by the thread that holds the lock, which
+    // from here on is this one.
+    unsafe {
+        let lock = &(*section).lock;
+        if lock
+            .compare_exchange(0, 1, Ordering::Acquire, Ordering::Relaxed)
+            .is_err()
+        {
+            if !wait {
+                return false;
+            }
+            // Same protocol as the runtime's mutex.
+            while lock.swap(2, Ordering::Acquire) != 0 {
+                let _ = omit_rt::futex_wait(lock, 2, None);
+            }
+        }
+        (&raw mut (*section).owner).write(me);
+        (&raw mut (*section).recursion).write(1);
+    }
+    true
+}
+
+/// Whether the calling thread (`me`) holds the section; if so, counts
+/// another entry.
+///
+/// # Safety
+///
+/// `section` must be an initialised critical section.
+unsafe fn reenter_section(section: *mut CriticalSection, me: usize) -> bool {
+    // SAFETY: `owner` is written only by the holder: reading it races
+    // with other threads, but it can only equal this thread's ID if this
+    // thread wrote it, in which case nobody else writes these fields.
+    unsafe {
+        if (&raw const (*section).owner).read_volatile() != me {
+            return false;
+        }
+        (*section).recursion += 1;
+    }
+    true
+}
+
+/// `EnterCriticalSection`: waits until the calling thread owns the
+/// section. A thread may enter a section it already owns.
+///
+/// # Safety
+///
+/// `section` must be an initialised critical section.
+unsafe extern "win64" fn EnterCriticalSection(section: *mut CriticalSection) {
+    let me = GetCurrentThreadId() as usize;
+    // SAFETY: guaranteed by the caller.
+    unsafe {
+        if !reenter_section(section, me) {
+            take_section(section, me, true);
+        }
+    }
+}
+
+/// `TryEnterCriticalSection`: like [`EnterCriticalSection`] without
+/// waiting; returns whether the thread now owns the section.
+///
+/// # Safety
+///
+/// `section` must be an initialised critical section.
+unsafe extern "win64" fn TryEnterCriticalSection(section: *mut CriticalSection) -> Bool {
+    let me = GetCurrentThreadId() as usize;
+    // SAFETY: guaranteed by the caller.
+    let entered = unsafe { reenter_section(section, me) || take_section(section, me, false) };
+    Bool::from(entered)
+}
+
+/// `LeaveCriticalSection`: undoes one entry; the section becomes free
+/// when the owner has left as often as it entered.
+///
+/// # Safety
+///
+/// `section` must be a critical section the calling thread owns.
+unsafe extern "win64" fn LeaveCriticalSection(section: *mut CriticalSection) {
+    // SAFETY: the caller owns the section, so it alone writes the fields.
+    unsafe {
+        (*section).recursion = (*section).recursion.saturating_sub(1);
+        if (*section).recursion == 0 {
+            (&raw mut (*section).owner).write(0);
+            let lock = &(*section).lock;
+            if lock.swap(0, Ordering::Release) == 2 {
+                omit_rt::futex_wake(lock, 1);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// Thread-local storage
+// ---------------------------------------------------------------------
+
+const TLS_OUT_OF_INDEXES: u32 = u32::MAX;
+
+/// `TlsAlloc`: reserves an index under which every thread can keep one
+/// pointer-sized value, initially zero in all threads. Up to 64 indexes.
+extern "win64" fn TlsAlloc() -> u32 {
+    with_state(|state| {
+        let index = (!state.tls_used).trailing_zeros();
+        if index >= TLS_SLOT_COUNT {
+            set_last_error(ERROR_NOT_ENOUGH_MEMORY);
+            return TLS_OUT_OF_INDEXES;
+        }
+        state.tls_used |= 1 << index;
+        // A previous user of the index may have left values behind.
+        for &teb in &state.tebs {
+            // SAFETY: inside a TEB, which stays mapped; a thread writing
+            // its own slot at the same moment would be using an index it
+            // was never given.
+            unsafe { ((teb + TEB_TLS_SLOTS + 8 * index as usize) as *mut usize).write(0) };
+        }
+        index
+    })
+}
+
+/// `TlsFree`.
+extern "win64" fn TlsFree(index: u32) -> Bool {
+    with_state(|state| {
+        if index < TLS_SLOT_COUNT && state.tls_used & (1 << index) != 0 {
+            state.tls_used &= !(1 << index);
+            TRUE
+        } else {
+            fail(ERROR_INVALID_PARAMETER)
+        }
+    })
+}
+
+/// `TlsGetValue`: the calling thread's value for the index. Succeeding
+/// sets the last error to zero, so that a stored zero can be told from
+/// failure.
+extern "win64" fn TlsGetValue(index: u32) -> usize {
+    if index >= TLS_SLOT_COUNT {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return 0;
+    }
+    set_last_error(ERROR_SUCCESS);
+    // SAFETY: inside the calling thread's own TEB.
+    unsafe { ((teb() + TEB_TLS_SLOTS + 8 * index as usize) as *const usize).read() }
+}
+
+/// `TlsSetValue`: sets the calling thread's value for the index.
+extern "win64" fn TlsSetValue(index: u32, value: usize) -> Bool {
+    let allocated =
+        index < TLS_SLOT_COUNT && with_state(|state| state.tls_used & (1 << index) != 0);
+    if !allocated {
+        return fail(ERROR_INVALID_PARAMETER);
+    }
+    // SAFETY: inside the calling thread's own TEB.
+    unsafe { ((teb() + TEB_TLS_SLOTS + 8 * index as usize) as *mut usize).write(value) };
+    TRUE
+}
+
+// ---------------------------------------------------------------------
 // The export table
 // ---------------------------------------------------------------------
 
@@ -1346,10 +1952,15 @@ macro_rules! exports {
 exports! {
     CloseHandle,
     CreateDirectoryA,
+    CreateEventA,
     CreateFileA,
     CreateFileW,
+    CreateThread,
+    DeleteCriticalSection,
     DeleteFileA,
+    EnterCriticalSection,
     ExitProcess,
+    ExitThread,
     FreeLibrary,
     GetACP,
     GetCommandLineA,
@@ -1359,8 +1970,10 @@ exports! {
     GetConsoleOutputCP,
     GetCurrentProcess,
     GetCurrentProcessId,
+    GetCurrentThread,
     GetCurrentThreadId,
     GetEnvironmentVariableA,
+    GetExitCodeThread,
     GetFileAttributesA,
     GetFileSizeEx,
     GetFileType,
@@ -1377,17 +1990,29 @@ exports! {
     HeapFree,
     HeapReAlloc,
     HeapSize,
+    InitializeCriticalSection,
+    InitializeCriticalSectionAndSpinCount,
     IsDebuggerPresent,
+    LeaveCriticalSection,
     LoadLibraryA,
     MoveFileA,
     QueryPerformanceCounter,
     QueryPerformanceFrequency,
     ReadFile,
     RemoveDirectoryA,
+    ResetEvent,
+    SetEvent,
     SetLastError,
     Sleep,
+    SwitchToThread,
+    TlsAlloc,
+    TlsFree,
+    TlsGetValue,
+    TlsSetValue,
+    TryEnterCriticalSection,
     VirtualAlloc,
     VirtualFree,
+    WaitForSingleObject,
     WriteConsoleA,
     WriteConsoleW,
     WriteFile,

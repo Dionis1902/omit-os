@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 //! A program that needs functions the compatibility layer does not have:
-//! a message box (there is no window system) and a second thread. It must
-//! be refused before it starts, with both functions named.
+//! a message box (there is no window system) and the current date and
+//! time (there is no real-time clock driver). It must be refused before
+//! it starts, with both named.
 
 #![no_std]
 #![no_main]
@@ -22,14 +23,9 @@ unsafe extern "system" {
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
-    fn CreateThread(
-        security: *mut c_void,
-        stack_size: usize,
-        start: *mut c_void,
-        parameter: *mut c_void,
-        flags: u32,
-        id: *mut u32,
-    ) -> *mut c_void;
+    /// The current date and time: Omit OS has no real-time clock driver
+    /// yet, so this function does not exist there.
+    fn GetSystemTimeAsFileTime(time: *mut u64);
 }
 
 /// Entry point.
@@ -44,14 +40,8 @@ pub extern "C" fn mainCRTStartup() -> u32 {
             c"caption".as_ptr(),
             0,
         );
-        CreateThread(
-            core::ptr::null_mut(),
-            0,
-            core::ptr::null_mut(),
-            core::ptr::null_mut(),
-            0,
-            core::ptr::null_mut(),
-        );
+        let mut time = 0u64;
+        GetSystemTimeAsFileTime(&raw mut time);
     }
     ExitProcess(1)
 }

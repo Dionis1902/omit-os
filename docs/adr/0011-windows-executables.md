@@ -45,7 +45,7 @@ are started like any other.
   Win32 error codes, path translation (`C:\a\b` is `/a/b`), command-line
   quoting, UTF-16 conversion, the handle table. Host-tested.
 - `userspace/programs/src/bin/winrun` — the loader and the implementation
-  of 47 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
+  of 66 `KERNEL32.dll` functions as `extern "win64"` Rust functions over
   Omit OS system calls.
 - `compat/windows/samples` — test programs. They are real Windows console
   executables (target `x86_64-pc-windows-msvc`), built by `cargo xtask`
@@ -73,6 +73,15 @@ unloaded, exports forwarded to another library are not followed, and a
 failed `LoadLibrary` leaves nothing mapped. No Microsoft library is, or
 may be, shipped: a program that needs `USER32.dll` or the C runtime DLLs
 is refused because those files do not exist here.
+
+**Threads.** `CreateThread` starts a native thread (ADR 0015) on its own
+stack, with its own thread environment block — so the last-error code and
+the 64 thread-local storage slots (`TlsAlloc` and friends) are per thread,
+as on Windows. `WaitForSingleObject` waits for threads and events with a
+timeout; events are manual- or auto-reset; critical sections are
+recursive locks kept in the program's own 40-byte structure. All of them
+sleep on futexes; none polls. The layer's own state is behind a lock that
+is never held while program code runs.
 
 **Honesty rules for the API.** A function is either implemented for the
 cases its comment states, or absent. A program that imports an absent
@@ -104,6 +113,11 @@ Verified in QEMU by the `windows-programs` test:
   relocated, bound to `KERNEL32` itself and initialised first; the
   program then loads a second DLL on request, which in turn depends on
   the first (33 self-checked operations);
+- a multi-threaded program: four threads counting under a critical
+  section (entered recursively), exit codes including `ExitThread` from a
+  nested call, per-thread storage and error codes, auto- and manual-reset
+  events with waiters, timeouts, and a thread still running when the
+  program returns (44 self-checked operations);
 - a program needing unimplemented functions or a missing library, a file
   that is not a PE image, a DLL started as a program, and a native
   program given to `winrun` are each refused with a specific message.
@@ -112,15 +126,19 @@ Verified in QEMU by the `windows-programs` test:
 
 This is a proof that the approach works, not Windows compatibility.
 
-- **Only programs whose imports are all satisfied by the 47 implemented
+- **Only programs whose imports are all satisfied by the 66 implemented
   `KERNEL32.dll` functions, or by DLL files that are present and
   themselves loadable, run.** That excludes practically all existing
   software: anything linked against the C runtime, the Rust standard
   library, or a Windows system DLL other than `KERNEL32.dll`.
   `winrun --list` prints the functions.
 - Console programs only. No graphics, windows, messages, registry,
-  networking, threads, processes started by Windows programs, structured
-  exception handling, thread-local storage, or environment.
+  networking, processes started by Windows programs, structured
+  exception handling, or environment.
+- Threads: libraries are not notified of them (`DLL_THREAD_ATTACH`),
+  static thread-local storage (`__declspec(thread)`, the PE TLS
+  directory) is not supported — only the `Tls*` functions — and there are
+  no mutex, semaphore or `WaitForMultipleObjects` objects yet. One CPU.
 - The test programs were built here and have **not been run on Windows**
   to confirm they behave identically there.
 - Images without relocation information are refused: the kernel cannot
@@ -152,5 +170,5 @@ This is a proof that the approach works, not Windows compatibility.
   crash without affecting anything but its own process.
 - Compatibility grows by adding functions to the loader, one documented
   API at a time, each with a test program. The next steps of real value
-  are threads and thread-local storage, and the functions the C runtime
-  start-up code calls.
+  are static thread-local storage, structured exception handling, and
+  the remaining functions the C runtime start-up code calls.

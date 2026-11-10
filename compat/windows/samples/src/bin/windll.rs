@@ -89,7 +89,8 @@ fn module_functions(checks: &mut Checks) {
         let ticks: extern "system" fn() -> u64 = core::mem::transmute(ticks);
         checks.check(ticks() > 0, "call a kernel32 function by address");
         checks.check(
-            GetProcAddress(kernel, c"CreateThread".as_ptr()).is_null() && GetLastError() == 127,
+            GetProcAddress(kernel, c"GetSystemTimeAsFileTime".as_ptr()).is_null()
+                && GetLastError() == 127,
             "missing kernel32 function",
         );
 

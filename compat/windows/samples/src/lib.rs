@@ -46,6 +46,15 @@ pub const PAGE_READWRITE: u32 = 0x04;
 pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
 pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 pub const INVALID_FILE_ATTRIBUTES: u32 = u32::MAX;
+pub const INFINITE: u32 = u32::MAX;
+pub const WAIT_OBJECT_0: u32 = 0;
+pub const WAIT_TIMEOUT: u32 = 258;
+pub const STILL_ACTIVE: u32 = 259;
+
+/// `CRITICAL_SECTION`: 40 bytes that belong to the system once
+/// initialised.
+#[repr(C, align(8))]
+pub struct CriticalSection(pub [u8; 40]);
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
@@ -109,6 +118,35 @@ unsafe extern "system" {
         protection: u32,
     ) -> *mut c_void;
     pub fn VirtualFree(address: *mut c_void, size: usize, kind: u32) -> Bool;
+    pub fn CreateThread(
+        security: *mut c_void,
+        stack_size: usize,
+        start: unsafe extern "system" fn(*mut c_void) -> u32,
+        parameter: *mut c_void,
+        flags: u32,
+        id: *mut u32,
+    ) -> Handle;
+    pub safe fn ExitThread(code: u32) -> !;
+    pub fn GetExitCodeThread(thread: Handle, code: *mut u32) -> Bool;
+    pub safe fn GetCurrentThreadId() -> u32;
+    pub safe fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
+    pub fn CreateEventA(
+        security: *mut c_void,
+        manual_reset: Bool,
+        initial_state: Bool,
+        name: *const c_char,
+    ) -> Handle;
+    pub safe fn SetEvent(event: Handle) -> Bool;
+    pub safe fn ResetEvent(event: Handle) -> Bool;
+    pub fn InitializeCriticalSection(section: *mut CriticalSection);
+    pub fn EnterCriticalSection(section: *mut CriticalSection);
+    pub fn TryEnterCriticalSection(section: *mut CriticalSection) -> Bool;
+    pub fn LeaveCriticalSection(section: *mut CriticalSection);
+    pub fn DeleteCriticalSection(section: *mut CriticalSection);
+    pub safe fn TlsAlloc() -> u32;
+    pub safe fn TlsFree(index: u32) -> Bool;
+    pub safe fn TlsGetValue(index: u32) -> *mut c_void;
+    pub safe fn TlsSetValue(index: u32, value: *mut c_void) -> Bool;
     pub safe fn Sleep(milliseconds: u32);
     pub safe fn GetTickCount64() -> u64;
 }

@@ -121,6 +121,7 @@ fn run(path: &str, arguments: &[&str]) -> Result<i32, (i32, String)> {
         image_base: program.base,
         stack_top,
         stack_limit,
+        stack_size,
         arguments,
     })
     .map_err(|error| cannot_run(format!("{path}: cannot set up the process: {error}")))?;
@@ -164,7 +165,11 @@ fn run(path: &str, arguments: &[&str]) -> Result<i32, (i32, String)> {
 /// `function` must be the address of code that follows that convention
 /// and that is safe to run with these arguments; `stack_top` must be the
 /// 16-byte-aligned end of a stack nothing else is using.
-unsafe fn call_on_stack(function: usize, stack_top: usize, arguments: [usize; 3]) -> u64 {
+pub(crate) unsafe fn call_on_stack(
+    function: usize,
+    stack_top: usize,
+    arguments: [usize; 3],
+) -> u64 {
     let result: u64;
     // SAFETY: the code switches to the given stack (keeping the old stack
     // pointer in R12, which the Windows convention preserves), reserves
