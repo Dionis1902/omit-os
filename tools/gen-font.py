@@ -29,6 +29,7 @@ FACES = [
     ("inter-semibold-13", "Inter-SemiBold.otf", 13),
     ("inter-semibold-15", "Inter-SemiBold.otf", 15),
     ("inter-semibold-20", "Inter-SemiBold.otf", 20),
+    ("inter-semibold-32", "Inter-SemiBold.otf", 32),
 ]
 
 

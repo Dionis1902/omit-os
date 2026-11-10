@@ -33,6 +33,7 @@ extern crate alloc;
 extern crate std;
 
 pub mod art;
+pub mod calculator;
 pub mod desktop;
 pub mod files;
 pub mod font;

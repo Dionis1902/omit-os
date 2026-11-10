@@ -245,6 +245,9 @@ struct Window {
     app: Box<dyn App>,
     /// While the window is maximised: the frame to go back to.
     restore: Option<Rect>,
+    /// While the window is arranged in half of the screen: the size to
+    /// give it back when it is dragged away.
+    arranged: Option<(i32, i32)>,
     /// Off the screen until its task bar icon is clicked.
     minimised: bool,
 }
@@ -347,6 +350,20 @@ struct Launcher {
     action: Box<dyn Fn(&mut Context)>,
 }
 
+/// Where a window dragged to an edge of the screen goes when let go.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Zone {
+    /// The left half of the screen.
+    Left,
+    /// The right half.
+    Right,
+    /// All of it: maximised.
+    Whole,
+}
+
+/// The space left between arranged windows, and around them.
+const GUTTER: i32 = 8;
+
 /// What the pointer is over, of the things that show it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Hover {
@@ -384,6 +401,8 @@ pub struct Desktop {
     wallpaper: Option<(crate::theme::Mode, Vec<Colour>)>,
     /// The window being moved, and where in its frame it was grabbed.
     drag: Option<(WindowId, Point)>,
+    /// Where the window being moved would go if it were let go now.
+    zone: Option<Zone>,
     /// The window being resized by its corner, and where in the corner
     /// (relative to the frame's bottom-right) it was grabbed.
     resize: Option<(WindowId, Point)>,
@@ -417,6 +436,7 @@ impl Desktop {
             alignment: Alignment::Left,
             wallpaper: None,
             drag: None,
+            zone: None,
             resize: None,
             capture: None,
             dirty: Rect::new(0, 0, width, height),
@@ -644,6 +664,7 @@ impl Desktop {
             frame,
             app,
             restore: None,
+            arranged: None,
             minimised: false,
         });
         self.damage_window(self.windows.len() - 1);
@@ -877,6 +898,13 @@ impl Desktop {
         self.left_button = left;
 
         if !left {
+            // A window let go at an edge of the screen is arranged there.
+            if let (Some((id, _)), Some(zone)) = (self.drag, self.zone)
+                && let Some(index) = self.index_of(id)
+            {
+                self.arrange(index, zone);
+            }
+            self.set_zone(None);
             self.drag = None;
             self.resize = None;
         }
@@ -894,12 +922,24 @@ impl Desktop {
             if resized != frame {
                 self.damage_window(index);
                 self.windows[index].frame = resized;
+                // A window given a size by hand is no longer arranged.
+                self.windows[index].arranged = None;
                 self.damage_window(index);
             }
         }
         if let Some((id, grab)) = self.drag
             && let Some(index) = self.index_of(id)
         {
+            // An arranged window dragged away gets its own size back,
+            // under the pointer.
+            let mut grab = grab;
+            if let Some((w, h)) = self.windows[index].arranged.take() {
+                self.damage_window(index);
+                let frame = self.windows[index].frame;
+                grab.x = grab.x * w / frame.w.max(1);
+                self.windows[index].frame = Rect::new(frame.x, frame.y, w, h);
+                self.drag = Some((id, grab));
+            }
             let frame = self.windows[index].frame;
             let x =
                 (self.pointer.x - grab.x).clamp(KEEP_VISIBLE - frame.w, self.width - KEEP_VISIBLE);
@@ -910,6 +950,20 @@ impl Desktop {
                 self.windows[index].frame = moved;
                 self.damage_window(index);
             }
+            // At an edge of the screen: show where letting go would
+            // put the window. (Windows of a fixed size stay as they are.)
+            let zone = if !self.windows[index].app.resizable() {
+                None
+            } else if self.pointer.x == 0 {
+                Some(Zone::Left)
+            } else if self.pointer.x == self.width - 1 {
+                Some(Zone::Right)
+            } else if self.pointer.y == 0 {
+                Some(Zone::Whole)
+            } else {
+                None
+            };
+            self.set_zone(zone);
         }
         if pressed {
             self.press();
@@ -1030,6 +1084,51 @@ impl Desktop {
         } else {
             self.raise(window);
         }
+    }
+
+    /// The part of the screen `zone` stands for.
+    pub fn zone_frame(&self, zone: Zone) -> Rect {
+        let height = self.height - TASKBAR_HEIGHT;
+        let half = (self.width - 3 * GUTTER) / 2;
+        match zone {
+            Zone::Left => Rect::new(GUTTER, GUTTER, half, height - 2 * GUTTER),
+            Zone::Right => Rect::new(
+                self.width - GUTTER - half,
+                GUTTER,
+                half,
+                height - 2 * GUTTER,
+            ),
+            Zone::Whole => Rect::new(0, 0, self.width, height),
+        }
+    }
+
+    fn set_zone(&mut self, zone: Option<Zone>) {
+        if self.zone != zone {
+            for changed in [self.zone, zone].into_iter().flatten() {
+                self.damage(self.zone_frame(changed));
+            }
+            self.zone = zone;
+        }
+    }
+
+    /// Puts the window at `index` into `zone`.
+    fn arrange(&mut self, index: usize, zone: Zone) {
+        self.damage_window(index);
+        let target = self.zone_frame(zone);
+        let window = &mut self.windows[index];
+        // What to go back to: the size the window had (it has been
+        // dragged about since, so its place means nothing).
+        let own = window.arranged.unwrap_or((window.frame.w, window.frame.h));
+        match zone {
+            Zone::Whole => {
+                let back = Rect::new((target.w - own.0) / 2, GUTTER * 4, own.0, own.1);
+                window.arranged = None;
+                window.restore = Some(back);
+            }
+            Zone::Left | Zone::Right => window.arranged = Some(own),
+        }
+        window.frame = target;
+        self.damage_window(index);
     }
 
     /// Maximises the window at `index` to the whole screen above the
@@ -1165,6 +1264,15 @@ impl Desktop {
             draw_window(&mut canvas, window, Some(index) == front, hovered, &theme);
         }
 
+        if let Some(zone) = self.zone {
+            // Where the window being dragged would go: a soft sheet in
+            // the accent colour.
+            let area = self
+                .zone_frame(zone)
+                .inset(if zone == Zone::Whole { GUTTER } else { 0 });
+            canvas.round_rect(area, RADIUS, theme.accent, 46);
+            canvas.round_outline(area, RADIUS, theme.accent, 160);
+        }
         if !self.taskbar().intersect(&dirty).is_empty() {
             self.draw_taskbar(&mut canvas);
         }
@@ -2171,8 +2279,10 @@ mod tests {
         let id = f.open("w", RED);
         let frame = f.desktop.window_frame(id).unwrap();
         let grab = |f: &mut Fixture| {
-            let frame = f.desktop.window_frame(id).unwrap();
+            // (Letting go at a corner of the screen arranges the window;
+            // take it from where it is after that.)
             f.desktop.mouse(0, 0, 0);
+            let frame = f.desktop.window_frame(id).unwrap();
             f.move_to(
                 (frame.x + 60).clamp(0, W as i32 - 1),
                 (frame.y + 10).clamp(0, H as i32 - 1),
@@ -2825,5 +2935,151 @@ mod tests {
             wallpaper_at(&light, 64, 48, 10, 10),
             wallpaper_at(&dark, 64, 48, 10, 10)
         );
+    }
+
+    /// Drags the window `id` by its title bar until the pointer is at
+    /// (`x`, `y`), and lets go.
+    fn drag_to(f: &mut Fixture, id: WindowId, x: i32, y: i32) {
+        let frame = f.desktop.window_frame(id).unwrap();
+        f.desktop.mouse(0, 0, 0);
+        f.move_to(frame.x + 60, frame.y + 10);
+        f.desktop.mouse(0, 0, 1);
+        f.move_to(x, y);
+        f.desktop.mouse(0, 0, 0);
+    }
+
+    #[test]
+    fn a_window_let_go_at_a_side_of_the_screen_takes_that_half() {
+        let mut f = Fixture::new();
+        let a = f.open("a", RED);
+        let b = f.open("b", GREEN);
+        let own = f.desktop.window_frame(a).unwrap();
+        let height = H as i32 - TASKBAR_HEIGHT;
+
+        // (The one in front first: the other would cover it.)
+        drag_to(&mut f, b, W as i32 - 1, 300);
+        let right = f.desktop.window_frame(b).unwrap();
+        drag_to(&mut f, a, 0, 200);
+        let left = f.desktop.window_frame(a).unwrap();
+        assert_eq!(left, Rect::new(8, 8, (W as i32 - 24) / 2, height - 16));
+        // Side by side, the same size, gutters between and around.
+        assert_eq!((right.w, right.h, right.y), (left.w, left.h, left.y));
+        assert_eq!(right.x - left.right(), 8);
+        assert_eq!(W as i32 - right.right(), 8);
+        // They keep their rounded corners and their grips.
+        f.move_to(400, 590);
+        f.render();
+        assert_ne!(f.pixel(left.x, left.y), f.desktop.theme().chrome);
+        assert!(f.desktop.windows[0].grip().is_some());
+
+        // Dragged away again, a window has its own size back, and is
+        // under the pointer where it was taken.
+        let left = f.desktop.window_frame(a).unwrap();
+        f.move_to(left.x + 200, left.y + 10);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(30, 40, 1);
+        let free = f.desktop.window_frame(a).unwrap();
+        assert_eq!((free.w, free.h), (own.w, own.h));
+        assert!(free.x <= f.desktop.pointer().x && f.desktop.pointer().x < free.right());
+        assert_eq!(free.y, left.y + 40);
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.desktop.window_frame(a), Some(free));
+        // Straight from one side to the other: still its own size after.
+        drag_to(&mut f, a, 0, 100);
+        drag_to(&mut f, a, W as i32 - 1, 100);
+        assert_eq!(f.desktop.window_frame(a), Some(right));
+        drag_to(&mut f, a, 300, 200);
+        let free = f.desktop.window_frame(a).unwrap();
+        assert_eq!((free.w, free.h), (own.w, own.h));
+    }
+
+    #[test]
+    fn a_window_let_go_at_the_top_is_maximised() {
+        let mut f = Fixture::new();
+        let id = f.open("w", RED);
+        let own = f.desktop.window_frame(id).unwrap();
+        drag_to(&mut f, id, 400, 0);
+        let full = Rect::new(0, 0, W as i32, H as i32 - TASKBAR_HEIGHT);
+        assert_eq!(f.desktop.window_frame(id), Some(full));
+        // The button puts it back at its own size.
+        let button = f.desktop.control_frame(id, Control::Maximise).unwrap();
+        f.click_in(button);
+        let back = f.desktop.window_frame(id).unwrap();
+        assert_eq!((back.w, back.h), (own.w, own.h));
+        assert!(back.x >= 0 && back.right() <= W as i32);
+    }
+
+    #[test]
+    fn the_place_a_dragged_window_would_take_is_shown_while_dragging() {
+        let mut f = Fixture::new();
+        let id = f.open("w", RED);
+        f.move_to(700, 300);
+        f.render();
+        let plain = f.surface.clone();
+        let frame = f.desktop.window_frame(id).unwrap();
+        f.move_to(frame.x + 60, frame.y + 10);
+        f.desktop.mouse(0, 0, 1);
+        // In the middle of the screen: nothing is shown.
+        f.move_to(300, 200);
+        assert_eq!(f.desktop.zone, None);
+        // At the right edge: the right half is tinted with the accent.
+        f.move_to(W as i32 - 1, 200);
+        assert_eq!(f.desktop.zone, Some(Zone::Right));
+        f.render();
+        let zone = f.desktop.zone_frame(Zone::Right);
+        let probe = (zone.x + 20, zone.bottom() - 20);
+        let theme = *f.desktop.theme();
+        assert_eq!(
+            f.pixel(probe.0, probe.1),
+            mix(theme.accent, plain.pixel(probe.0, probe.1).unwrap(), 46)
+        );
+        // Moved off the edge without letting go: the tint goes, and the
+        // window is not arranged.
+        f.move_to(500, 200);
+        assert_eq!(f.desktop.zone, None);
+        f.render();
+        assert_eq!(
+            f.pixel(probe.0, probe.1),
+            plain.pixel(probe.0, probe.1).unwrap()
+        );
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.desktop.window_frame(id).unwrap().w, frame.w);
+        // The top edge shows the whole screen.
+        f.move_to(
+            f.desktop.window_frame(id).unwrap().x + 60,
+            f.desktop.window_frame(id).unwrap().y + 10,
+        );
+        f.desktop.mouse(0, 0, 1);
+        f.move_to(400, 0);
+        assert_eq!(f.desktop.zone, Some(Zone::Whole));
+        f.desktop.mouse(0, 0, 0);
+        assert_eq!(f.desktop.zone, None);
+    }
+
+    #[test]
+    fn windows_of_a_fixed_size_are_not_arranged_and_resizing_ends_it() {
+        let mut f = Fixture::new();
+        let app = f.probe("fixed", RED, true);
+        let fixed = f.desktop.open(app, 240, 120);
+        let before = f.desktop.window_frame(fixed).unwrap();
+        drag_to(&mut f, fixed, 0, 200);
+        let after = f.desktop.window_frame(fixed).unwrap();
+        assert_eq!((after.w, after.h), (before.w, before.h));
+        assert_eq!(f.desktop.zone, None);
+
+        // An arranged window resized by its corner is an ordinary
+        // window again: dragging it does not change its size.
+        let id = f.open("w", GREEN);
+        drag_to(&mut f, id, 0, 200);
+        let half = f.desktop.window_frame(id).unwrap();
+        f.move_to(half.right() - 4, half.bottom() - 4);
+        f.desktop.mouse(0, 0, 1);
+        f.desktop.mouse(-50, -60, 1);
+        f.desktop.mouse(0, 0, 0);
+        let resized = f.desktop.window_frame(id).unwrap();
+        assert_eq!((resized.w, resized.h), (half.w - 50, half.h - 60));
+        drag_to(&mut f, id, 300, 300);
+        let moved = f.desktop.window_frame(id).unwrap();
+        assert_eq!((moved.w, moved.h), (resized.w, resized.h));
     }
 }

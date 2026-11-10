@@ -28,6 +28,64 @@ const APPEARANCE: i32 = 92;
 const ROW: i32 = 64;
 const TASKBAR: i32 = APPEARANCE + 2 * ROW + 50;
 
+/// What Settings chooses, in a form that can be kept in a file:
+/// three lines, `mode=dark`, `accent=rose`, `alignment=centre`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Saved {
+    /// Light or dark.
+    pub mode: Mode,
+    /// The accent colour.
+    pub accent: Accent,
+    /// Where the task bar's icons sit.
+    pub alignment: Alignment,
+}
+
+impl Saved {
+    /// Reads what [`Saved::to_text`] wrote. Lines that are missing,
+    /// unknown or damaged leave their setting at its default: a file
+    /// from another version, or a broken one, never stops the desktop.
+    pub fn parse(text: &str) -> Self {
+        let mut saved = Self::default();
+        for line in text.lines() {
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
+            match (name.trim(), value.trim()) {
+                ("mode", "light") => saved.mode = Mode::Light,
+                ("mode", "dark") => saved.mode = Mode::Dark,
+                ("alignment", "left") => saved.alignment = Alignment::Left,
+                ("alignment", "centre") => saved.alignment = Alignment::Centre,
+                ("accent", value) => {
+                    let named = Accent::ALL
+                        .into_iter()
+                        .find(|accent| accent.name().eq_ignore_ascii_case(value));
+                    if let Some(accent) = named {
+                        saved.accent = accent;
+                    }
+                }
+                _ => {}
+            }
+        }
+        saved
+    }
+
+    /// The settings as text for a file.
+    pub fn to_text(&self) -> alloc::string::String {
+        alloc::format!(
+            "mode={}\naccent={}\nalignment={}\n",
+            match self.mode {
+                Mode::Light => "light",
+                Mode::Dark => "dark",
+            },
+            self.accent.name().to_ascii_lowercase(),
+            match self.alignment {
+                Alignment::Left => "left",
+                Alignment::Centre => "centre",
+            },
+        )
+    }
+}
+
 /// Something in the window that can be clicked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
@@ -350,6 +408,54 @@ mod tests {
         let area = control(Choice::Alignment(Alignment::Centre));
         let theme = *f.desktop.theme();
         assert_eq!(f.pixel_in(area.x + 4, area.y + 4), theme.control);
+    }
+
+    #[test]
+    fn settings_survive_being_written_to_a_file_and_read_back() {
+        for mode in [Mode::Light, Mode::Dark] {
+            for accent in Accent::ALL {
+                for alignment in [Alignment::Left, Alignment::Centre] {
+                    let saved = Saved {
+                        mode,
+                        accent,
+                        alignment,
+                    };
+                    assert_eq!(Saved::parse(&saved.to_text()), saved);
+                }
+            }
+        }
+        assert_eq!(
+            Saved {
+                mode: Mode::Dark,
+                accent: Accent::Rose,
+                alignment: Alignment::Centre
+            }
+            .to_text(),
+            "mode=dark\naccent=rose\nalignment=centre\n"
+        );
+    }
+
+    #[test]
+    fn a_damaged_or_foreign_settings_file_gives_the_defaults() {
+        assert_eq!(Saved::parse(""), Saved::default());
+        assert_eq!(
+            Saved::parse("\u{0}\u{1}garbage\n===\n=\nmode\n"),
+            Saved::default()
+        );
+        // What is understood is used; the rest is ignored.
+        let partly =
+            Saved::parse(" mode = dark \nwallpaper=dawn\naccent=ultraviolet\nalignment=middle\r\n");
+        assert_eq!(
+            partly,
+            Saved {
+                mode: Mode::Dark,
+                ..Saved::default()
+            }
+        );
+        // The last of several lines for one setting counts; case of the
+        // accent's name does not matter.
+        let twice = Saved::parse("accent=teal\naccent=AMBER\n");
+        assert_eq!(twice.accent, Accent::Amber);
     }
 
     #[test]

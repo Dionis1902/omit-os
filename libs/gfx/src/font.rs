@@ -60,6 +60,8 @@ pub const SEMIBOLD_13: Font = Font::new(include_bytes!("../fonts/inter-semibold-
 pub const SEMIBOLD_15: Font = Font::new(include_bytes!("../fonts/inter-semibold-15.omf"));
 /// Semibold, 20 px: page titles.
 pub const SEMIBOLD_20: Font = Font::new(include_bytes!("../fonts/inter-semibold-20.omf"));
+/// Semibold, 32 px: large figures.
+pub const SEMIBOLD_32: Font = Font::new(include_bytes!("../fonts/inter-semibold-32.omf"));
 
 impl Font {
     /// A font over the bytes of a font file. A file that is damaged is
@@ -171,7 +173,7 @@ impl Font {
 mod tests {
     use super::*;
 
-    const ALL: [(&str, Font, i32); 7] = [
+    const ALL: [(&str, Font, i32); 8] = [
         ("regular 11", REGULAR_11, 11),
         ("regular 12", REGULAR_12, 12),
         ("regular 13", REGULAR_13, 13),
@@ -179,6 +181,7 @@ mod tests {
         ("semibold 13", SEMIBOLD_13, 13),
         ("semibold 15", SEMIBOLD_15, 15),
         ("semibold 20", SEMIBOLD_20, 20),
+        ("semibold 32", SEMIBOLD_32, 32),
     ];
 
     #[test]

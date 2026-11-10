@@ -131,6 +131,7 @@ pub fn icon(name: &str, size: i32) -> Option<Picture> {
         "canvas" => "app-canvas",
         "player" => "app-player",
         "notes" => "app-notes",
+        "calculator" => "app-calculator",
         "folder" => "folder",
     };
     Picture::parse(data?)
@@ -143,7 +144,16 @@ mod tests {
     #[test]
     fn every_picture_is_there_and_well_formed() {
         for name in [
-            "files", "terminal", "settings", "clock", "canvas", "player", "notes", "folder",
+            "files",
+            "terminal",
+            "settings",
+            "clock",
+            "canvas",
+            "player",
+            "notes",
+            "folder",
+            "calculator",
+            "calculator",
         ] {
             for size in [20, 30] {
                 let picture = icon(name, size).unwrap_or_else(|| panic!("{name} at {size}"));

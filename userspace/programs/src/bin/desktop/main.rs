@@ -27,9 +27,12 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 
+use omit_gfx::calculator;
 use omit_gfx::desktop::Desktop;
 use omit_gfx::settings;
+use omit_gfx::settings::Saved;
 use omit_gfx::surface::Surface;
+use omit_gfx::theme::Theme;
 use omit_rt::abi::datetime::DateTime;
 use omit_rt::abi::{Errno, InputEvent, event, key};
 use omit_rt::{eprintln, println};
@@ -62,6 +65,15 @@ fn main() -> i32 {
     let (width, height) = (info.width as usize, info.height as usize);
     let mut surface = Surface::new(width, height, 0);
     let mut desktop = Desktop::new(width, height);
+    // What was chosen in Settings the last time, if it was kept.
+    let settings_file = settings_path();
+    let mut saved = omit_rt::read_file(settings_file)
+        .ok()
+        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .map(|text| Saved::parse(&text))
+        .unwrap_or_default();
+    desktop.set_theme(Theme::new(saved.mode, saved.accent));
+    desktop.set_alignment(saved.alignment);
 
     desktop.add_launcher("Files", "files", |context| {
         let (width, height) = omit_gfx::files::SIZE;
@@ -73,6 +85,10 @@ fn main() -> i32 {
     desktop.add_launcher("Settings", "settings", |context| {
         let (width, height) = settings::SIZE;
         context.open(Box::new(settings::Settings::new()), width, height);
+    });
+    desktop.add_launcher("Calculator", "calculator", |context| {
+        let (width, height) = calculator::SIZE;
+        context.open(Box::new(calculator::Window::new()), width, height);
     });
     desktop.add_launcher("About", "info", move |context| {
         context.open(Box::new(apps::About::new(width, height)), 470, 230);
@@ -161,6 +177,17 @@ fn main() -> i32 {
             }
         }
         desktop.tick();
+        // Keep what Settings changed. (A failure to write is not worth
+        // interrupting anybody for: the choice just is not remembered.)
+        let current = Saved {
+            mode: desktop.theme().mode,
+            accent: desktop.theme().accent_name,
+            alignment: desktop.alignment(),
+        };
+        if current != saved {
+            saved = current;
+            let _ = write_settings(settings_file, &saved);
+        }
         // Collect the exit status of started programs that have ended.
         children
             .borrow_mut()
@@ -175,6 +202,25 @@ fn main() -> i32 {
         let _ = omit_rt::wait(*pid);
     }
     finish(failure, &latency)
+}
+
+/// Where the choices made in Settings are kept: on the data partition
+/// if the system has one (an installed system: they then survive a
+/// restart), otherwise in memory, until the machine is switched off.
+fn settings_path() -> &'static str {
+    if omit_rt::read_dir("/data").is_ok() {
+        "/data/desktop.conf"
+    } else {
+        "/desktop.conf"
+    }
+}
+
+fn write_settings(path: &str, saved: &Saved) -> Result<(), Errno> {
+    use omit_rt::abi::open;
+    let fd = omit_rt::open(path, open::WRITE | open::CREATE | open::TRUNCATE)?;
+    let outcome = omit_rt::write_all(fd, saved.to_text().as_bytes());
+    let _ = omit_rt::close(fd);
+    outcome
 }
 
 /// What the task bar's clock shows: the time and, under it, the date

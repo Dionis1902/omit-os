@@ -2164,7 +2164,14 @@ impl<'a> Mouse<'a> {
 /// Labels of the programs on the desktop's task bar; must match
 /// `userspace/programs/src/bin/desktop/main.rs`.
 const DESKTOP_LAUNCHERS: &[&str] = &[
-    "Files", "Run", "Settings", "About", "Scribble", "Clock", "Pop",
+    "Files",
+    "Run",
+    "Settings",
+    "Calculator",
+    "About",
+    "Scribble",
+    "Clock",
+    "Pop",
 ];
 
 /// Operates the graphical desktop, which the caller has just started from
@@ -2239,6 +2246,7 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
     };
     let (run_x, run_y) = button("Run").ok_or("no Run button")?;
     let (settings_x, settings_y) = button("Settings").ok_or("no Settings button")?;
+    let (calculator_x, calculator_y) = button("Calculator").ok_or("no Calculator button")?;
     let (files_x, files_y) = button("Files").ok_or("no Files button")?;
     debug_assert!(run_y >= image.height as i32 - TASKBAR_HEIGHT);
     let start = layout.start_button();
@@ -2703,7 +2711,22 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
                     && title(image, "Settings")
             },
         )?;
+        // Another accent: the Start mark on the task bar takes its
+        // colour. (It stays chosen for the rest of the test, and is
+        // what the settings file must say afterwards.)
+        let teal = Theme::new(Mode::Light, Accent::Teal);
+        let (x, y) = middle_of(Choice::Accent(Accent::Teal));
+        mouse.click(x, y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the teal accent", patience, |image| {
+            let bar = image.height - TASKBAR_HEIGHT as usize..image.height;
+            image.count(bar.clone(), rgb(teal.accent)) > 20
+                && image.count(bar, rgb(theme.accent)) == 0
+        })?;
     }
+    // (From here on the accent is teal.)
+    let theme =
+        omit_gfx::theme::Theme::new(omit_gfx::theme::Mode::Light, omit_gfx::theme::Accent::Teal);
 
     // Files: the eighth window. It lists the top folder; a click on the
     // first row (`bin`: folders come first) selects it and a second
@@ -2751,6 +2774,61 @@ fn desktop_scenario(check: &DisplayCheck) -> Result<()> {
             &check.screenshot,
             check.screenshot.with_extension("files.ppm"),
         );
+
+        // Arranging: the Files window dragged by its title bar to the
+        // right edge of the screen takes the right half when let go.
+        let half = layout.zone_frame(omit_gfx::desktop::Zone::Right);
+        let inside = ((half.x + half.w / 2) as usize, (half.y + 5) as usize);
+        let beside = ((half.x - 5) as usize, (half.y + 5) as usize);
+        mouse.move_to(frame.x + 150, frame.y + 20)?;
+        mouse.button(true)?;
+        mouse.move_to(image.width as i32 - 1, 300)?;
+        mouse.button(false)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(
+            check,
+            "Files in the right half of the screen",
+            patience,
+            |image| {
+                image.pixel(inside.0, inside.1) == rgb(theme.chrome)
+                    && image.pixel(beside.0, beside.1) != rgb(theme.chrome)
+                    && title(image, "Files — bin")
+            },
+        )?;
+    }
+
+    // The Calculator: the ninth window. 7 × 6 = by mouse; the result is
+    // written large. Then − 2 and Enter on the keyboard.
+    {
+        use omit_gfx::calculator::{self, Key, Operator};
+        use omit_gfx::font::SEMIBOLD_32;
+        let window = layout.open(Box::new(Blank), calculator::SIZE.0, calculator::SIZE.1);
+        let frame = layout
+            .window_frame(window)
+            .ok_or("no frame for the Calculator window")?;
+        let (left, top) = (frame.x + BORDER, frame.y + BORDER + TITLE_HEIGHT);
+        mouse.click(calculator_x, calculator_y)?;
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the Calculator window", patience, |image| {
+            title(image, "Calculator")
+        })?;
+        for key in [
+            Key::Digit(7),
+            Key::Operator(Operator::Multiply),
+            Key::Digit(6),
+            Key::Equals,
+        ] {
+            let area = calculator::key_frame(key).ok_or("a key without a place")?;
+            mouse.click(left + area.x + area.w / 2, top + area.y + area.h / 2)?;
+        }
+        mouse.move_to(20, 300)?;
+        wait_for_screen(check, "the result of 7 x 6", patience, |image| {
+            screen_writes(image, "42", SEMIBOLD_32, theme.text, theme.window)
+        })?;
+        type_on_keyboard(&check.monitor, &["minus", "2", "ret"])?;
+        wait_for_screen(check, "the result of 42 - 2", patience, |image| {
+            screen_writes(image, "40", SEMIBOLD_32, theme.text, theme.window)
+        })?;
     }
 
     // The Start mark opens the list of programs; the row under the
@@ -3113,14 +3191,30 @@ fn run_qemu_captured(
                 }
                 // What was typed into `tee` inside the desktop reached
                 // the file through the program's standard input.
-                if let Some(from) = after_desktop {
-                    let _ = stdin.write_all(b"cat /typed\r");
-                    let shown = wait_for_prompt(from).map(|to| {
-                        String::from_utf8_lossy(&output.lock().expect("output lock")[from..to])
+                // And what was chosen in Settings (the teal accent, last)
+                // was written down for the next start of the desktop.
+                let mut from = after_desktop;
+                for (file, expected, failure) in [
+                    (
+                        "/typed",
+                        "\nkeyboard input\n",
+                        "the line typed into tee is not in its file",
+                    ),
+                    (
+                        "/desktop.conf",
+                        "\naccent=teal\n",
+                        "the settings chosen were not kept",
+                    ),
+                ] {
+                    let Some(start) = from else { break };
+                    let _ = stdin.write_all(format!("cat {file}\r").as_bytes());
+                    from = wait_for_prompt(start);
+                    let shown = from.map(|to| {
+                        String::from_utf8_lossy(&output.lock().expect("output lock")[start..to])
                             .replace("\r\n", "\n")
                     });
-                    if !shown.is_some_and(|text| text.contains("\nkeyboard input\n")) {
-                        failures.push("desktop: the line typed into tee is not in its file".into());
+                    if !shown.is_some_and(|text| text.contains(expected)) {
+                        failures.push(format!("desktop: {failure}"));
                     }
                 }
                 // The text console must be back on the screen.

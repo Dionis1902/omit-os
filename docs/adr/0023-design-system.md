@@ -59,11 +59,21 @@ this ADR records how the system implements it and how far it has got.
   window (back and up, the path as names that can be clicked, a
   sidebar of places, a list with sizes and kinds). Settings, Files and
   the controls they are made of (segmented control, swatch, card,
-  switch) live in the library, where they are host-tested.
+  switch) live in the library, where they are host-tested. The third:
+  a **Calculator** (the four operations, percent, sign, backspace; by
+  mouse or keyboard; decimal arithmetic on whole numbers scaled by a
+  power of ten, so that 0.1 + 0.2 is 0.3); **arranging** — a window
+  dragged by its title to the left or right edge of the screen takes
+  that half, to the top edge all of it, with an outline shown before
+  the button is let go, and dragged away again it gets its old size
+  back; and what Settings chooses is **remembered**, in a small text
+  file (`desktop.conf`: on the data partition of an installed system,
+  where it survives a restart; otherwise in memory until the machine
+  is switched off).
 
 ## What works
 
-- 79 host tests in `libs/gfx`: the font and icon files (every
+- 94 host tests in `libs/gfx`: the font and icon files (every
   printable character at every size; damaged files); the shapes against
   geometry (a rounded rectangle's area to within two pixels of the
   exact figure, mirror symmetry of its corners, an outline's length);
@@ -80,7 +90,12 @@ this ADR records how the system implements it and how far it has got.
   the power button ending the desktop; and, since the second stage,
   dark mode chosen in Settings (the wallpaper becomes the dusk picture
   and titles are written light on dark) and back, and a folder opened
-  in Files.
+  in Files; and, since the third, another accent colour chosen and
+  found in the settings file afterwards, the Files window dragged to
+  the right edge and found filling the right half, and 7 × 6 = on the
+  Calculator's keys followed by − 2 Enter on the keyboard.
+  That the settings file is read back at the next start is tested on
+  the host only (the parser), not across a restart in QEMU.
 
 ## Cost
 
@@ -93,17 +108,18 @@ halved that.) Debug builds are slower by the same factor as before.
 ## Not yet, and differences from the design
 
 - **Most of the design's screens**: lock screen and sign-in (there are
-  no users yet), the separate search screen, arranging windows side by
-  side, the window switcher, the quick panel and notifications, System
-  Monitor, calculator, Market; all pages of Settings but one. In
+  no users yet), the separate search screen, the window switcher and
+  the picker that offers a second window for the other half after one
+  was arranged, the quick panel and notifications, System
+  Monitor, Market; all pages of Settings but one. In
   Files: tabs, search, the preview pane, the context menu, renaming,
   deleting and the Recycle Bin, sorting, and scrolling with the mouse
   (there are no wheel events yet); a row is opened by clicking it a
   second time, at any interval, where the design means a double click.
   The Start panel has the design's search but not its favourites row
   or letter index.
-- **What Settings chooses is not remembered**: every start of the
-  desktop is light and blue again.
+- The Calculator has no history, memory keys or scientific page, and
+  shows at most twelve digits.
 - **Glass is tinted, not blurred** (and the Start panel nearly opaque,
   to stay readable without blur), and nothing is animated.
 - Two programs have no picture in the design and keep line icons
