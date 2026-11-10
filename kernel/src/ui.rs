@@ -14,6 +14,14 @@ use crate::{arch, fbcon, time};
 /// the first draw.
 static LAST_REFRESH: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// Body of the kernel thread that keeps the status bar current.
+pub fn status_thread(_: usize) {
+    loop {
+        refresh_status();
+        crate::sched::sleep_ticks(u64::from(time::TICK_HZ) / 4);
+    }
+}
+
 /// Redraws the status bar if the displayed second has changed. Cheap to
 /// call often.
 pub fn refresh_status() {

@@ -539,3 +539,9 @@ pub fn self_test(leave_stale_access: bool) -> Result<(), &'static str> {
     }
     Ok(())
 }
+
+/// Start of the part of the general kernel mapping range used for kernel
+/// thread stacks.
+pub const KERNEL_STACKS_BASE: u64 = KERNEL_MAP_BASE + (1 << 30);
+/// Exclusive end of the kernel thread stack area (32 GiB of address space).
+pub const KERNEL_STACKS_END: u64 = KERNEL_STACKS_BASE + (32 << 30);

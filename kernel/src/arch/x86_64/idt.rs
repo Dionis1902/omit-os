@@ -330,6 +330,10 @@ pub fn self_test() -> bool {
 extern "C" fn trap_dispatch(frame: &mut TrapFrame) {
     if frame.vector >= EXCEPTION_COUNT as u64 {
         interrupts::dispatch(frame.vector);
+        // The interrupt has been acknowledged; if the time slice is over
+        // or a thread was woken, switch now. The interrupted thread resumes
+        // here later and returns through the normal trap exit.
+        crate::sched::preempt_if_needed();
         return;
     }
     if frame.vector == VECTOR_BREAKPOINT {

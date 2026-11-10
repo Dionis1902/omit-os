@@ -87,6 +87,7 @@ pub fn init() -> Result<TimeInfo, ApicError> {
 
 fn on_tick() {
     TICKS.fetch_add(1, Ordering::Relaxed);
+    crate::sched::on_tick();
 }
 
 /// Number of timer ticks since [`init`].

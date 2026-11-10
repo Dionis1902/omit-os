@@ -7,7 +7,8 @@
 
 use core::fmt;
 
-use crate::arch::{interrupts, serial};
+use crate::arch::serial;
+use crate::sched::WaitQueue;
 use crate::sync::SpinLock;
 
 const CAPACITY: usize = 256;
@@ -53,7 +54,11 @@ static INPUT: SpinLock<InputQueue> = SpinLock::new(InputQueue {
 /// interrupt handlers.
 pub fn push_input(byte: u8) {
     INPUT.lock().push(byte);
+    INPUT_AVAILABLE.wake_all();
 }
+
+/// Threads blocked in [`read_byte`].
+static INPUT_AVAILABLE: WaitQueue = WaitQueue::new();
 
 /// Starts queueing serial input. The serial interrupt must be routed to
 /// [`serial::handle_interrupt`] separately.
@@ -63,23 +68,15 @@ pub fn enable_input() {
 
 /// Blocks until a byte of console input is available and returns it.
 ///
-/// Interrupts are enabled while waiting and on return.
+/// The calling thread sleeps while the queue is empty; other threads (or
+/// the idle thread) run in the meantime.
 pub fn read_byte() -> u8 {
-    loop {
-        // Check with interrupts off, then enable-and-halt atomically, so an
-        // interrupt arriving between the check and the halt is not missed.
-        interrupts::disable();
-        // The lock guard must be gone before interrupts are re-enabled.
-        let byte = INPUT.lock().pop();
-        if let Some(byte) = byte {
-            interrupts::enable();
-            return byte;
-        }
-        interrupts::wait();
-        // The CPU wakes at least once per timer tick; use that to keep the
-        // on-screen status bar current while the system is otherwise idle.
-        crate::ui::refresh_status();
-    }
+    let mut byte = None;
+    INPUT_AVAILABLE.wait_until(|| {
+        byte = INPUT.lock().pop();
+        byte.is_some()
+    });
+    byte.expect("wait_until returns only once the condition holds")
 }
 
 /// Number of input bytes discarded because the queue was full.

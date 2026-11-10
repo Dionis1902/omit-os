@@ -7,6 +7,7 @@ use omit_bootproto::{BootInfo, PHYS_MAP_BASE};
 
 pub mod frame;
 pub mod heap;
+pub mod kstack;
 
 /// Size of a page frame in bytes.
 pub const PAGE_SIZE: u64 = omit_bootproto::PAGE_SIZE;

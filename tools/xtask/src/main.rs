@@ -444,6 +444,7 @@ const BOOT_TESTS: &[BootTest] = &[
             "[INFO ] irq: legacy PIC masked; local APIC 0 enabled",
             "[INFO ] time: timer interrupt self-test passed",
             "[INFO ] console: serial input enabled",
+            "[INFO ] sched: round-robin scheduler started; preemption self-test passed",
             "[INFO ] paging: audit passed (W^X holds)",
         ],
         must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],

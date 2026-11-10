@@ -7,6 +7,7 @@ use omit_bootproto::{KERNEL_STACK_BOTTOM, KERNEL_STACK_TOP};
 
 pub mod acpi;
 pub mod apic;
+pub mod context;
 pub mod cpu;
 pub mod gdt;
 pub mod idt;

@@ -15,6 +15,7 @@ mod fbcon;
 mod log;
 mod mm;
 mod panic;
+mod sched;
 mod shell;
 mod sync;
 mod time;
@@ -66,6 +67,8 @@ enum InitError {
     Acpi(AcpiLookupError),
     IoApic(IoApicError),
     InputInterrupt(RegisterError),
+    Scheduler(sched::SpawnError),
+    SchedulerSelfTest(&'static str),
 }
 
 impl fmt::Display for InitError {
@@ -90,6 +93,8 @@ impl fmt::Display for InitError {
             Self::Acpi(e) => write!(f, "acpi: {e}"),
             Self::IoApic(e) => write!(f, "I/O APIC: {e}"),
             Self::InputInterrupt(e) => write!(f, "input interrupt: {e:?}"),
+            Self::Scheduler(e) => write!(f, "scheduler: {e:?}"),
+            Self::SchedulerSelfTest(e) => write!(f, "scheduler self-test: {e}"),
         }
     }
 }
@@ -353,7 +358,12 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<Cmdline<'static>, InitError
         "console: PS/2 keyboard input enabled (GSI {} -> vector {})",
         acpi.keyboard_irq.gsi, KEYBOARD_VECTOR
     );
-    ui::refresh_status();
+
+    // Threads and the scheduler. From here on the boot context is thread 1.
+    sched::init().map_err(InitError::Scheduler)?;
+    sched::self_test().map_err(InitError::SchedulerSelfTest)?;
+    info!("sched: round-robin scheduler started; preemption self-test passed");
+    sched::spawn("status-bar", ui::status_thread, 0).map_err(InitError::Scheduler)?;
 
     // 10. Audit the final address space, including the mappings made above.
     // SAFETY: `boot_info` is validated and describes the active address
