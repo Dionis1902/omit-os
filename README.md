@@ -208,14 +208,14 @@ been tested in virtual machines only; installing on a real computer has
 never been tried.
 
 ```bash
-qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-0.2.0-x86_64.iso -serial stdio
+qemu-system-x86_64 -machine q35 -m 256M -bios /usr/share/ovmf/OVMF.fd -cdrom omit-os-0.3.0-x86_64.iso -serial stdio
 ```
 
 To cut a release, set the version in `Cargo.toml`, merge, then push a
 matching tag:
 
 ```bash
-git tag v0.2.0 && git push origin v0.2.0
+git tag v0.3.0 && git push origin v0.3.0
 ```
 
 The release workflow tests the exact binaries from both media before

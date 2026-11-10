@@ -477,15 +477,15 @@ dependencies = [
 
 [[package]]
 name = "omit-abi"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-acpi"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-boot"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-bootproto",
  "omit-elf",
@@ -494,48 +494,48 @@ dependencies = [
 
 [[package]]
 name = "omit-bootproto"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-elf"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-ext2"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-vfs",
 ]
 
 [[package]]
 name = "omit-fat"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fatfs",
 ]
 
 [[package]]
 name = "omit-gfx"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "noto-sans-mono-bitmap",
 ]
 
 [[package]]
 name = "omit-gpt"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-hwdb"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-inet"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-kernel"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "noto-sans-mono-bitmap",
  "omit-abi",
@@ -556,23 +556,23 @@ dependencies = [
 
 [[package]]
 name = "omit-mm"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-net"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-pe"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-rng"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-rt"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-abi",
  "omit-inet",
@@ -582,7 +582,7 @@ dependencies = [
 
 [[package]]
 name = "omit-shell"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-abi",
  "omit-net",
@@ -591,11 +591,11 @@ dependencies = [
 
 [[package]]
 name = "omit-term"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-tls"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "getrandom",
  "rustls",
@@ -606,7 +606,7 @@ dependencies = [
 
 [[package]]
 name = "omit-user-programs"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-gfx",
  "omit-inet",
@@ -619,36 +619,36 @@ dependencies = [
 
 [[package]]
 name = "omit-vfs"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-win-sample-dll"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-win-samples",
 ]
 
 [[package]]
 name = "omit-win-sample-plugin"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-win-samples",
 ]
 
 [[package]]
 name = "omit-win-samples"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "omit-win32"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "omit-abi",
 ]
 
 [[package]]
 name = "omit-window"
-version = "0.2.0"
+version = "0.3.0"
 
 [[package]]
 name = "once_cell"
@@ -1282,7 +1282,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "fatfs",
  "omit-gfx",
