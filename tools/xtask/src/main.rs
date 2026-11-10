@@ -319,8 +319,9 @@ const ISO_README: &str = "\
 Omit OS live image.
 
 This disc boots on x86-64 machines with UEFI firmware (Secure Boot off).
-It runs entirely from memory: nothing is installed and nothing on the
-machine is modified. See https://github.com/dionis1902/omit-os
+It runs entirely from memory and modifies nothing on the machine unless
+you run its `install` command, which erases the disk you name.
+See https://github.com/dionis1902/omit-os
 ";
 
 /// Formats `volume` as FAT and fills it with the EFI system partition
@@ -639,6 +640,10 @@ struct BootTest {
     /// installed disk (see [`check_installed_disk`]) instead of as one
     /// ext2 filesystem.
     boot_installed: bool,
+    /// Attach a second, empty disk behind an NVMe controller. With
+    /// `boot_installed`, it is the disk the system is expected to have
+    /// been installed on.
+    nvme: bool,
 }
 
 const BOOT_TESTS: &[BootTest] = &[
@@ -670,6 +675,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "shell-session",
@@ -844,6 +850,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "display-and-keyboard",
@@ -862,6 +869,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "desktop",
@@ -880,6 +888,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: true,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "disk-persistence",
@@ -938,6 +947,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     // The installer: the system writes itself to the VirtIO disk, the
     // machine is restarted without the boot medium, and must come up from
@@ -999,6 +1009,56 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: true,
+        nvme: false,
+    },
+    // The same on an NVMe disk, the kind most current machines have: the
+    // native NVMe driver, installation, and booting from the result with
+    // an empty VirtIO disk still attached.
+    BootTest {
+        name: "install-to-nvme",
+        cmdline: "",
+        expected_exit: QEMU_EXIT_SUCCESS,
+        must_contain: &[
+            "[INFO ] nvme: nvme0n1 ready, 128 MiB, model \"QEMU NVMe Ctrl\"; read test passed",
+            "[INFO ] block: nvme0n1 has 2 partition(s)",
+            "[INFO ] fs: data partition nvme0n1p2 mounted at /data",
+            "[INFO ] shell exited",
+        ],
+        must_not_contain: &["KERNEL PANIC", "KERNEL EXCEPTION", "[ERROR]", "[WARN ]"],
+        script: &[
+            ("lsblk", "\nnvme0n1   128 MiB\n"),
+            ("lsdrv", "native     nvme\n"),
+            (
+                "lspci",
+                " 1b36:0010 QEMU NVMe controller [native driver: nvme]\n",
+            ),
+            (
+                "install nvme0n1 --erase",
+                "\nnvme0n1p2: data partition, 78 MiB, empty ext2 filesystem (mounted at /data when the installed system starts)\ninstalled on nvme0n1; remove the installation medium and restart\n",
+            ),
+            ("lsblk", "\nnvme0n1p1    48 MiB\nnvme0n1p2    78 MiB\n"),
+            ("mkdir /data", ""),
+            ("mount nvme0n1p2 /data", "mount nvme0n1p2 /data\nomit:/# "),
+            ("echo kept on the NVMe disk > /data/note", ""),
+            // A file larger than one command can carry (4 KiB), so that
+            // reads and writes are split.
+            ("cp /bin/desktop /data/desktop", ""),
+            ("umount /data", "umount /data\nomit:/# "),
+        ],
+        // Second boot: from the NVMe disk alone.
+        reboot_script: &[
+            ("mount", "\nramfs on /\nnvme0n1p2 on /data\n"),
+            ("cat /data/note", "\nkept on the NVMe disk\n"),
+            ("cmp /bin/desktop /data/desktop", ""),
+            ("winhello.exe", "\nHello from a Windows executable!\r\n"),
+            ("umount /data", "umount /data\nomit:/# "),
+        ],
+        ends_with_reset: false,
+        display: false,
+        desktop: false,
+        qemu_args: &[],
+        boot_installed: true,
+        nvme: true,
     },
     BootTest {
         name: "windows-programs",
@@ -1097,6 +1157,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "linux-driver-watchdog",
@@ -1179,6 +1240,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "linux-driver-watchdog-expiry",
@@ -1204,6 +1266,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "linux-driver-pvpanic",
@@ -1264,6 +1327,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &["-device", "pvpanic-pci"],
         boot_installed: false,
+        nvme: false,
     },
     // With the pvpanic device and its Linux driver, a kernel panic is
     // reported to the hypervisor. QEMU is told to exit with status 1 when
@@ -1287,6 +1351,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &["-device", "pvpanic-pci", "-action", "panic=exit-failure"],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "panic-diagnostics",
@@ -1307,6 +1372,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "page-fault-diagnostics",
@@ -1325,6 +1391,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "use-after-unmap-faults",
@@ -1343,6 +1410,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
     BootTest {
         name: "stack-overflow-double-fault",
@@ -1360,6 +1428,7 @@ const BOOT_TESTS: &[BootTest] = &[
         desktop: false,
         qemu_args: &[],
         boot_installed: false,
+        nvme: false,
     },
 ];
 
@@ -2075,6 +2144,20 @@ fn run_boot_test(
     let log = dir.join(format!("test-{}.serial.log", test.name));
     let data_disk = dir.join(format!("test-{}.data.img", test.name));
     create_data_disk(&data_disk)?;
+    let nvme_disk = dir.join(format!("test-{}.nvme.img", test.name));
+    let mut qemu_args: Vec<String> = test.qemu_args.iter().map(|s| (*s).into()).collect();
+    if test.nvme {
+        create_data_disk(&nvme_disk)?;
+        qemu_args.extend([
+            "-drive".into(),
+            format!("if=none,id=nvme,format=raw,file={}", nvme_disk.display()),
+            "-device".into(),
+            "nvme,drive=nvme,serial=omit-test".into(),
+        ]);
+    }
+    let qemu_args: Vec<&str> = qemu_args.iter().map(String::as_str).collect();
+    // The disk an installation is expected on.
+    let target_disk = if test.nvme { &nvme_disk } else { &data_disk };
 
     // Tests without a script must not sit at the shell prompt forever.
     let shell = if test.script.is_empty() {
@@ -2096,7 +2179,7 @@ fn run_boot_test(
             &vars,
             &data_disk,
             display.as_ref().map(|d| d.monitor.as_path()),
-            test.qemu_args,
+            &qemu_args,
             options,
         )?,
         test.script,
@@ -2114,7 +2197,7 @@ fn run_boot_test(
         // again, or from the data disk if the system was installed on it.
         let medium = (!test.boot_installed).then_some(image.as_path());
         let second = run_qemu_captured(
-            qemu_command(medium, &vars, &data_disk, None, test.qemu_args, options)?,
+            qemu_command(medium, &vars, &data_disk, None, &qemu_args, options)?,
             test.reboot_script,
             false,
             None,
@@ -2132,7 +2215,7 @@ fn run_boot_test(
         run.elapsed += second.elapsed;
         if test.boot_installed {
             failures.extend(check_installed_disk(
-                &data_disk,
+                target_disk,
                 artifacts,
                 cmdline.trim(),
                 &dir,
@@ -2171,6 +2254,7 @@ fn run_boot_test(
     let _ = fs::remove_file(&image);
     let _ = fs::remove_file(&vars);
     let _ = fs::remove_file(&data_disk);
+    let _ = fs::remove_file(&nvme_disk);
     Ok((failures, run))
 }
 

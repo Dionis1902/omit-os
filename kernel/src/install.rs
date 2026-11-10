@@ -190,7 +190,8 @@ pub fn install(device: &str, loader: &[u8], kernel: &[u8]) -> Result<Vec<String>
     if found != partitions.len() {
         return Err("the new partition table could not be read back".into());
     }
-    let data_device = format!("{device}2");
+    let data_device = block::partition_name(device, 2);
+    let system_device = block::partition_name(device, 1);
     let mut data = fs::Disk::open(&data_device).map_err(String::from)?;
     omit_ext2::format(&mut data)
         .map_err(|error| format!("cannot create the data filesystem: {error}"))?;
@@ -199,7 +200,7 @@ pub fn install(device: &str, loader: &[u8], kernel: &[u8]) -> Result<Vec<String>
     let mib = |sectors: u64| sectors / MIB;
     Ok(alloc::vec![
         format!(
-            "{device}1: EFI System Partition, {} MiB: boot loader ({} KiB), kernel ({} KiB), \
+            "{system_device}: EFI System Partition, {} MiB: boot loader ({} KiB), kernel ({} KiB), \
              initial ramdisk ({} KiB)",
             mib(SYSTEM_SECTORS),
             loader.len() / 1024,

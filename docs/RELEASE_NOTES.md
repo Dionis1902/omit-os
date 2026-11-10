@@ -13,15 +13,17 @@ depend on.
 Both boot the same live system: it runs entirely from memory and does not
 touch the machine's disks unless you tell it to.
 
-## Installing (virtual machines only)
+## Installing (tested in virtual machines only)
 
-Omit OS can install itself onto a **VirtIO** disk — the kind virtual
-machines offer; it has no driver for the disks of real computers yet.
-Give the VM an empty VirtIO disk of at least 64 MiB, boot the ISO, and at
-the prompt:
+Omit OS can install itself onto a **VirtIO** or **NVMe** disk. Both have
+been tested only with QEMU's emulated disks: the NVMe driver has never
+run on a real disk, so do not point it at a machine whose data you care
+about. SATA disks are not supported.
+Give the VM an empty disk of at least 64 MiB, boot the ISO, and at the
+prompt:
 
 ```text
-lsblk                    the disk appears as vda
+lsblk                    a VirtIO disk appears as vda, an NVMe disk as nvme0n1
 install vda --erase      writes the system; everything on vda is lost
 ```
 

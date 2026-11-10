@@ -75,12 +75,11 @@ partitions together), and a disk smaller than 64 MiB.
 
 ## Limitations
 
-- **Only VirtIO disks**, because that is the only disk driver. Real
-  machines have NVMe or SATA disks, which Omit OS cannot access: on
-  hardware, installation is not possible yet, and writing the live image
-  to a USB stick remains the only way to boot. This is the main gap.
+- **Only VirtIO and NVMe disks** (NVMe since ADR 0017; when this was
+  first written, only VirtIO). SATA disks and USB storage cannot be
+  accessed. Installation on a real machine has never been attempted.
 - Tested only under QEMU with OVMF firmware, which boots the default
-  loader path from a VirtIO disk. Firmware boot entries are not created.
+  loader path from the disk. Firmware boot entries are not created.
 - No dual boot, no resizing, no partitioning choices: the whole disk is
   taken.
 - No updates in place: installing again erases the data partition too.

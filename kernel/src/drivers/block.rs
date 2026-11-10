@@ -218,7 +218,7 @@ pub fn scan_partitions(name: &str) -> usize {
     }
     for (index, partition) in found.iter().enumerate() {
         devices.push(Entry {
-            name: alloc::format!("{name}{}", index + 1),
+            name: partition_name(name, index + 1),
             kind: Kind::Partition {
                 parent: name.into(),
                 first: partition.first_lba,
@@ -228,6 +228,17 @@ pub fn scan_partitions(name: &str) -> usize {
         });
     }
     found.len()
+}
+
+/// The name of partition `number` of the device `device`: the number is
+/// appended, after a `p` if the device's own name ends in a digit
+/// (`vda2`, but `nvme0n1p2`).
+pub fn partition_name(device: &str, number: usize) -> String {
+    if device.ends_with(|c: char| c.is_ascii_digit()) {
+        alloc::format!("{device}p{number}")
+    } else {
+        alloc::format!("{device}{number}")
+    }
 }
 
 /// The first partition marked as an Omit OS data partition, if any.

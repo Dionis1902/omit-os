@@ -185,7 +185,7 @@ type CommandResult = Result<(), Failure>;
 const BUILTINS: &[&str] = &[
     "help", "echo", "pwd", "cd", "ls", "cat", "mkdir", "touch", "cp", "mv", "rm", "uname", "clear",
     "ps", "kill", "free", "lspci", "lsblk", "mkfs", "mount", "umount", "lsdrv", "unbind",
-    "devattr", "watchdog", "install",
+    "devattr", "watchdog", "install", "cmp",
 ];
 
 /// Internal marker returned by `run` for names that are not built-ins.
@@ -236,6 +236,7 @@ Built-in commands:
   mkdir [-p] DIR...    create directories
   touch FILE...        create empty files
   cp SOURCE DEST       copy a file
+  cmp FILE1 FILE2      compare two files
   mv SOURCE DEST       move or rename a file or directory
   rm [-r] PATH...      remove files (-r: and directories, recursively)
   ps                   list threads and processes
@@ -430,6 +431,7 @@ impl Shell {
             "mkdir" => self.mkdir(args, vfs),
             "touch" => self.touch(args, vfs),
             "cp" => self.cp(args, vfs),
+            "cmp" => self.cmp(args, vfs),
             "mv" => self.mv(args, vfs),
             "rm" => self.rm(args, vfs),
             "uname" => self.uname(args, out),
@@ -511,9 +513,14 @@ impl Shell {
             }
             "watchdog" => Ok(out.write_str(&host.watchdog(args).map_err(Failure)?)?),
             "lsblk" => {
-                writeln!(out, "NAME        SIZE")?;
-                for (device, bytes) in host.block_devices() {
-                    writeln!(out, "{device:<6} {:>5} MiB", bytes >> 20)?;
+                let devices = host.block_devices();
+                let width = devices
+                    .iter()
+                    .map(|(name, _)| name.len())
+                    .fold(6, usize::max);
+                writeln!(out, "{:<width$}      SIZE", "NAME")?;
+                for (device, bytes) in devices {
+                    writeln!(out, "{device:<width$} {:>5} MiB", bytes >> 20)?;
                 }
                 Ok(())
             }
@@ -958,6 +965,37 @@ impl Shell {
             )),
             e => fs_failure(dest_arg, e),
         })
+    }
+
+    /// Compares two files byte by byte: silent if they are equal.
+    fn cmp(&self, args: &[String], vfs: &mut Vfs) -> CommandResult {
+        let [first_arg, second_arg] = args else {
+            return Err(Failure("usage: cmp FILE1 FILE2".into()));
+        };
+        let first = vfs
+            .read_file(&self.resolve(first_arg)?)
+            .map_err(|e| fs_failure(first_arg, e))?;
+        let second = vfs
+            .read_file(&self.resolve(second_arg)?)
+            .map_err(|e| fs_failure(second_arg, e))?;
+        if let Some(at) = first.iter().zip(&second).position(|(a, b)| a != b) {
+            return Err(Failure(format!(
+                "{first_arg} and {second_arg} differ at byte {}",
+                at + 1
+            )));
+        }
+        if first.len() != second.len() {
+            let shorter = if first.len() < second.len() {
+                first_arg
+            } else {
+                second_arg
+            };
+            return Err(Failure(format!(
+                "{shorter} ends after byte {}, the other file continues",
+                first.len().min(second.len())
+            )));
+        }
+        Ok(())
     }
 
     fn mv(&self, args: &[String], vfs: &mut Vfs) -> CommandResult {
@@ -1779,6 +1817,19 @@ mod tests {
                 .execute("  exit  now", &mut s.vfs, &mut s.host, &mut out),
             Outcome::Exit
         );
+    }
+
+    #[test]
+    fn cmp_compares_files() {
+        let mut s = Session::new();
+        s.ok("echo one > /a");
+        s.ok("echo one > /b");
+        s.ok("echo one more > /c");
+        s.ok("echo two > /d");
+        assert_eq!(s.ok("cmp /a /b"), "");
+        assert_eq!(s.err("cmp /a /d"), "cmp: /a and /d differ at byte 1\n");
+        assert_eq!(s.err("cmp /a /c"), "cmp: /a and /c differ at byte 4\n");
+        assert!(s.err("cmp /a").contains("usage"));
     }
 
     #[test]

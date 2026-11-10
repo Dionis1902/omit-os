@@ -438,6 +438,27 @@ unsafe fn init(boot_info: *const BootInfo) -> Result<(Cmdline<'static>, &'static
         Ok(None) => info!("virtio-blk: no device"),
         Err(error) => warn!("virtio-blk: cannot initialise device: {error}"),
     }
+    match drivers::nvme::init() {
+        Ok(Some(found)) => {
+            let mut sector = [0u8; drivers::block::SECTOR_SIZE];
+            match drivers::block::with_device("nvme0n1", |device| device.read(0, &mut sector)) {
+                Ok(()) => {
+                    info!(
+                        "nvme: nvme0n1 ready, {} MiB, model \"{}\"; read test passed",
+                        (found.sectors * drivers::block::SECTOR_SIZE as u64) >> 20,
+                        found.model
+                    );
+                    let partitions = drivers::block::scan_partitions("nvme0n1");
+                    if partitions != 0 {
+                        info!("block: nvme0n1 has {partitions} partition(s)");
+                    }
+                }
+                Err(error) => warn!("nvme: nvme0n1 read test failed: {error}"),
+            }
+        }
+        Ok(None) => info!("nvme: no controller"),
+        Err(error) => warn!("nvme: cannot initialise controller: {error}"),
+    }
     // Linux drivers running on the compatibility layer.
     match linuxkpi::init() {
         Ok(devices) => info!("linuxkpi: {devices} device(s) bound to Linux drivers"),

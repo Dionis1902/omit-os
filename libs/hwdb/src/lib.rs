@@ -152,8 +152,8 @@ pub const DEVICES: &[DeviceInfo] = &[
         0x1B36,
         0x0010,
         "QEMU NVMe controller",
-        Support::Unsupported,
-        Validation::None,
+        Support::Native { driver: "nvme" },
+        Validation::Emulation,
     ),
     entry(
         0x1B36,
